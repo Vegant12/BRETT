@@ -29,6 +29,9 @@ A running FastAPI service backed by a migration-managed PostgreSQL schema, with 
 ### Local Dev Logging Format
 - **D-06:** structlog uses `ConsoleRenderer` (human-readable, colored key=value) when `ENVIRONMENT=development`, and a JSON renderer in production. The secret-redaction processor (deny-list for API keys/tokens/credentials) runs identically in both modes as a separate pipeline step, so this is purely a rendering choice, not a safety one.
 
+### External Connections Schema Scope
+- **D-07:** `external_connections` (blueprint §5.2) is NOT created in Phase 1. The `encrypted_credentials` column would sit unused with no encryption implementation until Phase 3 (Hevy integration), inviting a plaintext key being written into it in the interim. The table is deferred to Phase 3, built alongside the actual encryption logic. Decided 2026-08-23 per gsd-phase-researcher recommendation (RESEARCH.md Open Question #2, Assumption A4).
+
 ### Claude's Discretion
 - Exact shape/wording of the sanitized error body beyond `{error, correlation_id}` (additional fields, error codes, etc.)
 - structlog processor pipeline details and the specific deny-list of redacted key names
