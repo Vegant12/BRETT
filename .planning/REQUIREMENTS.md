@@ -114,17 +114,72 @@ Explicitly excluded. Documented to prevent scope creep.
 | Live Hevy fetch on every MCP request | Contradicts "PostgreSQL is the source of truth"; Hevy's pageSize cap of 10 would make every Claude turn slow and rate-limit-prone |
 | Charts, images, or rendered visuals from MCP tools | MCP consumers can't render a PNG; Claude can build a table or artifact from structured data if the user wants a visual |
 | Multi-user product UX (accounts, per-user auth flows beyond schema readiness) | Personal project for one user; schema must not preclude multi-user later, but no multi-user UX is built now |
-| OAuth-based MCP auth as the default v1 assumption | Research found Claude's custom-connector UI does not expose a plain bearer-token field, and `static_headers` beta access is unconfirmed for a personal account — the actual mechanism (bearer via beta access, or a minimal OAuth resource-server shim) will be resolved by a Phase 1.5 spike rather than assumed upfront |
+| OAuth-based MCP auth as the default v1 assumption | Research found Claude's custom-connector UI does not expose a plain bearer-token field, and `static_headers` beta access is unconfirmed for a personal account — the actual mechanism (bearer via beta access, or a minimal OAuth resource-server shim) will be resolved by the Phase 2 deploy/auth spike rather than assumed upfront |
 
 ## Traceability
 
-Populated during roadmap creation.
+Every v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for phase detail.
+
+| Requirement | Phase | Phase Name | Status |
+|-------------|-------|------------|--------|
+| FOUND-01 | Phase 1 | Backend Foundation | Pending |
+| FOUND-02 | Phase 1 | Backend Foundation | Pending |
+| FOUND-03 | Phase 1 | Backend Foundation | Pending |
+| FOUND-04 | Phase 1 | Backend Foundation | Pending |
+| FOUND-05 | Phase 1 | Backend Foundation | Pending |
+| MCP-01 | Phase 2 | Deploy & Connector Auth Spike | Pending |
+| MCP-04 | Phase 2 | Deploy & Connector Auth Spike | Pending |
+| DEPLOY-01 | Phase 2 | Deploy & Connector Auth Spike | Pending |
+| DEPLOY-02 | Phase 2 | Deploy & Connector Auth Spike | Pending |
+| HEVY-01 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-02 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-03 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-04 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-05 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-06 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-07 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-08 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-09 | Phase 3 | Hevy Integration & Normalization | Pending |
+| NORM-01 | Phase 3 | Hevy Integration & Normalization | Pending |
+| NORM-02 | Phase 3 | Hevy Integration & Normalization | Pending |
+| NORM-03 | Phase 3 | Hevy Integration & Normalization | Pending |
+| VOL-01 | Phase 4 | Volume & Frequency Analytics | Pending |
+| VOL-02 | Phase 4 | Volume & Frequency Analytics | Pending |
+| VOL-03 | Phase 4 | Volume & Frequency Analytics | Pending |
+| DQ-01 | Phase 4 | Volume & Frequency Analytics | Pending |
+| DQ-02 | Phase 4 | Volume & Frequency Analytics | Pending |
+| PROG-01 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| PROG-02 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| PROG-03 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| PROG-04 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| CMP-01 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| BODY-01 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| BODY-02 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| MCP-02 | Phase 6 | MCP Tools | Pending |
+| MCP-03 | Phase 6 | MCP Tools | Pending |
+| MCP-05 | Phase 6 | MCP Tools | Pending |
+| MCP-06 | Phase 6 | MCP Tools | Pending |
+| DEPLOY-03 | Phase 7 | Production Hardening & Coaching Layer | Pending |
+| COACH-01 | Phase 7 | Production Hardening & Coaching Layer | Pending |
 
 **Coverage:**
 - v1 requirements: 39 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 39 ⚠️ (pending roadmap)
+- Mapped to phases: 39 ✓
+- Unmapped: 0 ✓
+- Duplicated across phases: 0 ✓
+
+**Per-phase counts:**
+
+| Phase | Requirements | Count |
+|-------|--------------|-------|
+| 1. Backend Foundation | FOUND-01..05 | 5 |
+| 2. Deploy & Connector Auth Spike | MCP-01, MCP-04, DEPLOY-01, DEPLOY-02 | 4 |
+| 3. Hevy Integration & Normalization | HEVY-01..09, NORM-01..03 | 12 |
+| 4. Volume & Frequency Analytics | VOL-01..03, DQ-01, DQ-02 | 5 |
+| 5. Progression, Records & Recomposition Analytics | PROG-01..04, CMP-01, BODY-01, BODY-02 | 7 |
+| 6. MCP Tools | MCP-02, MCP-03, MCP-05, MCP-06 | 4 |
+| 7. Production Hardening & Coaching Layer | DEPLOY-03, COACH-01 | 2 |
 
 ---
 *Requirements defined: 2026-08-23*
-*Last updated: 2026-08-23 after initial definition*
+*Last updated: 2026-08-23 after roadmap creation (traceability populated)*
