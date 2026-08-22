@@ -13,7 +13,7 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 - [ ] **FOUND-02**: Database schema is managed via versioned Alembic migrations
 - [ ] **FOUND-03**: User's timezone is configurable (defaulting to Asia/Jakarta) and used for all daily/weekly calculations
 - [ ] **FOUND-04**: All timestamps are stored in UTC and converted to local time only at calculation/display boundaries
-- [ ] **FOUND-05**: Secrets (API keys, tokens, DB credentials) are never committed, are loaded from environment/secret storage, and never appear in logs
+- [x] **FOUND-05**: Secrets (API keys, tokens, DB credentials) are never committed, are loaded from environment/secret storage, and never appear in logs
 
 ### Hevy Integration
 
