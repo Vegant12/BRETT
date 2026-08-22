@@ -1,0 +1,19 @@
+# Local development database only.
+#
+# NOTE ON THE PASSWORD BELOW: `brett_local_dev` is a LOCAL DEV ONLY throwaway
+# credential for a container bound to localhost. It is NOT a secret, it is not
+# used in any deployed environment, and it is intentionally committed so that
+# `docker compose up -d db` works out of the box. Gitleaks triage: not a leak.
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: brett
+      POSTGRES_PASSWORD: brett_local_dev
+      POSTGRES_DB: brett
+    ports:
+      - "5432:5432"
+    volumes:
+      - brett_pgdata:/var/lib/postgresql/data
+volumes:
+  brett_pgdata:
