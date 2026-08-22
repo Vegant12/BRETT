@@ -10,7 +10,7 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 ### Foundation
 
 - [x] **FOUND-01**: Backend exposes a health endpoint reporting service and database status
-- [ ] **FOUND-02**: Database schema is managed via versioned Alembic migrations
+- [x] **FOUND-02**: Database schema is managed via versioned Alembic migrations
 - [x] **FOUND-03**: User's timezone is configurable (defaulting to Asia/Jakarta) and used for all daily/weekly calculations
 - [x] **FOUND-04**: All timestamps are stored in UTC and converted to local time only at calculation/display boundaries
 - [x] **FOUND-05**: Secrets (API keys, tokens, DB credentials) are never committed, are loaded from environment/secret storage, and never appear in logs
@@ -122,11 +122,11 @@ Every v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for p
 
 | Requirement | Phase | Phase Name | Status |
 |-------------|-------|------------|--------|
-| FOUND-01 | Phase 1 | Backend Foundation | Pending |
-| FOUND-02 | Phase 1 | Backend Foundation | Pending |
-| FOUND-03 | Phase 1 | Backend Foundation | Pending |
-| FOUND-04 | Phase 1 | Backend Foundation | Pending |
-| FOUND-05 | Phase 1 | Backend Foundation | Pending |
+| FOUND-01 | Phase 1 | Backend Foundation | Complete |
+| FOUND-02 | Phase 1 | Backend Foundation | Complete |
+| FOUND-03 | Phase 1 | Backend Foundation | Complete |
+| FOUND-04 | Phase 1 | Backend Foundation | Complete |
+| FOUND-05 | Phase 1 | Backend Foundation | Complete |
 | MCP-01 | Phase 2 | Deploy & Connector Auth Spike | Pending |
 | MCP-04 | Phase 2 | Deploy & Connector Auth Spike | Pending |
 | DEPLOY-01 | Phase 2 | Deploy & Connector Auth Spike | Pending |
