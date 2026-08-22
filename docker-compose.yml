@@ -14,6 +14,15 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - brett_pgdata:/var/lib/postgresql/data
+      # postgres:18+ REFUSES to start with the mount at `/var/lib/postgresql/data`
+      # ("Error: in 18+, these Docker images are configured to store database data
+      # in a format which is compatible with pg_ctlcluster"). 18 stores data in a
+      # major-version subdirectory, so the mount belongs one level up.
+      - brett_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brett -d brett"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 volumes:
   brett_pgdata:
