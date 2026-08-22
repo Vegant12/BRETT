@@ -38,8 +38,8 @@ Plans:
 - [x] 01-01-PLAN.md — Repo scaffold, uv/tooling, local dev Postgres, typed fail-fast config with SecretStr (FOUND-05)
 - [x] 01-02-PLAN.md — Three-layer secret-redaction logging, FastAPI bootstrap, D-05 sanitized error handler (FOUND-05)
 - [x] 01-03-PLAN.md — SQLAlchemy models, async Alembic migrations + default-user seed, migrated-Postgres test infra (FOUND-02, FOUND-04)
-- [ ] 01-04-PLAN.md — Timezone bucketing helpers and UTC-storage enforcement tests (FOUND-03, FOUND-04)
-- [ ] 01-05-PLAN.md — Lifespan-managed engine, open GET /health with live DB check, README (FOUND-01)
+- [x] 01-04-PLAN.md — Timezone bucketing helpers and UTC-storage enforcement tests (FOUND-03, FOUND-04)
+- [x] 01-05-PLAN.md — Lifespan-managed engine, open GET /health with live DB check, README (FOUND-01)
 
 ### Phase 2: Deploy & Connector Auth Spike
 **Goal**: Resolve the project's single highest-uncertainty question — whether and how a real Claude client can authenticate to a remote MCP server — while it is still cheap to change the answer
