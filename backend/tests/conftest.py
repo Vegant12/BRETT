@@ -153,13 +153,24 @@ def client(postgres_url: str) -> Iterator[object]:
     from app.main import app
 
     engine = create_async_engine(postgres_url)
-    # `app.state.engine` is the attribute the `/health` route reads.
-    app.state.engine = engine
-    app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
     try:
         # `raise_server_exceptions=False` so the D-05 handler's sanitized 500 is
         # what the test observes, instead of the exception propagating.
         with TestClient(app, raise_server_exceptions=False) as test_client:
-            yield test_client
+            # Entering the context ran `lifespan`, which built its own engine
+            # from `DATABASE_URL`. Override it AFTER startup -- assigning before
+            # would simply be clobbered -- so `/health` probes the container.
+            lifespan_engine = app.state.engine
+            # `app.state.engine` is the attribute the `/health` route reads.
+            app.state.engine = engine
+            app.state.sessionmaker = async_sessionmaker(
+                engine, expire_on_commit=False, autoflush=False
+            )
+            try:
+                yield test_client
+            finally:
+                # Hand the lifespan its own engine back so shutdown disposes the
+                # one it created, not the fixture's.
+                app.state.engine = lifespan_engine
     finally:
         engine.sync_engine.dispose()
