@@ -14,7 +14,9 @@ from asgi_correlation_id import CorrelationIdMiddleware, correlation_id
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.routes import health
 from app.config import get_settings
+from app.db.session import make_engine, make_sessionmaker
 from app.logging import configure_logging
 
 settings = get_settings()  # fail-fast BEFORE anything else
@@ -26,13 +28,22 @@ log = structlog.get_logger()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan.
 
-    Deliberately has no database engine: Plan 01-05 adds ``app.state.engine`` and
-    ``app.state.sessionmaker`` here alongside the health router.
+    The engine is created here and NEVER at module import: a module-level engine
+    binds its pool to whichever event loop imported it, which breaks under
+    pytest-asyncio and leaks connections between tests.
+
+    Migrations are deliberately absent -- ``alembic upgrade head`` runs
+    out-of-band (a Render pre-deploy command), because startup migrations race
+    across restarts.
     """
+    engine = make_engine(settings)
+    app.state.engine = engine
+    app.state.sessionmaker = make_sessionmaker(engine)
     log.info("service_starting", environment=settings.environment)
     try:
         yield
     finally:
+        await engine.dispose()
         log.info("service_stopped")
 
 
@@ -41,6 +52,9 @@ app = FastAPI(title="BRETT", lifespan=lifespan)
 # Pure-ASGI middleware, not BaseHTTPMiddleware -- the ContextVar it sets must stay
 # readable inside the exception handler below.
 app.add_middleware(CorrelationIdMiddleware)
+
+# D-04: no auth dependency -- /health is open so platform health checks reach it.
+app.include_router(health.router)
 
 
 # D-05: identical behavior in EVERY environment. No traceback ever reaches the
