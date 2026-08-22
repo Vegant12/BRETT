@@ -32,7 +32,14 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Day/week bucketing helpers place a workout timestamped near midnight UTC into the correct Asia/Jakarta local day, with the timezone read from user configuration rather than hard-coded
   4. Every timestamp is stored in UTC and converted only at calculation boundaries — enforced by a test, not by convention
   5. A seeded secret passed through config, logs, and error output never appears in any log line or response
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Repo scaffold, uv/tooling, local dev Postgres, typed fail-fast config with SecretStr (FOUND-05)
+- [ ] 01-02-PLAN.md — Three-layer secret-redaction logging, FastAPI bootstrap, D-05 sanitized error handler (FOUND-05)
+- [ ] 01-03-PLAN.md — SQLAlchemy models, async Alembic migrations + default-user seed, migrated-Postgres test infra (FOUND-02, FOUND-04)
+- [ ] 01-04-PLAN.md — Timezone bucketing helpers and UTC-storage enforcement tests (FOUND-03, FOUND-04)
+- [ ] 01-05-PLAN.md — Lifespan-managed engine, open GET /health with live DB check, README (FOUND-01)
 
 ### Phase 2: Deploy & Connector Auth Spike
 **Goal**: Resolve the project's single highest-uncertainty question — whether and how a real Claude client can authenticate to a remote MCP server — while it is still cheap to change the answer
@@ -111,7 +118,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Backend Foundation | 0/TBD | Not started | - |
+| 1. Backend Foundation | 0/5 | Planned | - |
 | 2. Deploy & Connector Auth Spike | 0/TBD | Not started | - |
 | 3. Hevy Integration & Normalization | 0/TBD | Not started | - |
 | 4. Volume & Frequency Analytics | 0/TBD | Not started | - |
