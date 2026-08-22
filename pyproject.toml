@@ -1,0 +1,65 @@
+[project]
+name = "brett"
+version = "0.1.0"
+description = "Personal fitness data platform: Hevy -> PostgreSQL -> analytics -> MCP"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn==0.52.4",
+    "sqlalchemy[asyncio]==2.0.52",
+    "asyncpg==0.31.0",
+    "alembic==1.19.1",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.15.0",
+    "structlog==26.1.0",
+    "asgi-correlation-id==5.0.1",
+    "tzdata",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "testcontainers[postgres]==4.15.0",
+    "time-machine==3.4.0",
+    "ruff==0.16.4",
+    "mypy==2.3.1",
+    "pre-commit",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+markers = [
+    "integration: test requires a live Postgres container (deselect with -m 'not integration')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "DTZ"]
+
+[tool.ruff.lint.isort]
+# `backend/` is the import root (see pytest `pythonpath`), so `app` is first-party
+# even though it is not a top-level directory of the repo.
+known-first-party = ["app"]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/tests/*" = ["S101", "S105", "S106"]
+"backend/migrations/versions/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+mypy_path = "backend"
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*", "asgi_correlation_id.*"]
+ignore_missing_imports = true
