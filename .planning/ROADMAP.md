@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 5 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Repo scaffold, uv/tooling, local dev Postgres, typed fail-fast config with SecretStr (FOUND-05)
+- [x] 01-01-PLAN.md — Repo scaffold, uv/tooling, local dev Postgres, typed fail-fast config with SecretStr (FOUND-05)
 - [ ] 01-02-PLAN.md — Three-layer secret-redaction logging, FastAPI bootstrap, D-05 sanitized error handler (FOUND-05)
 - [ ] 01-03-PLAN.md — SQLAlchemy models, async Alembic migrations + default-user seed, migrated-Postgres test infra (FOUND-02, FOUND-04)
 - [ ] 01-04-PLAN.md — Timezone bucketing helpers and UTC-storage enforcement tests (FOUND-03, FOUND-04)
