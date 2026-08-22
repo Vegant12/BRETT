@@ -12,11 +12,10 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] Backend foundation: FastAPI app, PostgreSQL, Alembic migrations, users table (single-user now, schema not hard-coded to preclude multi-user), config, health endpoint — Validated in Phase 1: Backend Foundation (2026-08-23)
 
 ### Active
 
-- [ ] Backend foundation: FastAPI app, PostgreSQL, Alembic migrations, users table (single-user now, schema not hard-coded to preclude multi-user), config, health endpoint
 - [ ] Hevy client isolated in `integrations/hevy/`, built against current official Hevy API docs (not invented endpoints)
 - [ ] Hevy sync service: initial full sync with pagination, incremental sync via workout events, idempotent (unique on user_id+provider+external_id), handles deletions/errors/rate limits without corrupting data
 - [ ] Hevy data model: workouts, workout_exercises, sets — enough fidelity to reconstruct workouts and drive analytics
@@ -85,4 +84,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-23 after initialization*
+*Last updated: 2026-08-23 — Phase 1: Backend Foundation complete*
