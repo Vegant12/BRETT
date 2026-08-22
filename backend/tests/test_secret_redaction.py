@@ -1,9 +1,10 @@
 """FOUND-05: a seeded secret must never reach the rendered log stream.
 
 RESEARCH Pitfall 6 is the reason every assertion here runs against the *rendered*
-stream: ``structlog.testing.capture_logs()`` calls ``configured_processors.clear()``,
-so the redaction processors under test would never run and the suite would pass
-while proving nothing.
+stream. ``structlog.testing``'s log-capturing context manager clears the entire
+configured processor list for its duration, so the redaction processors under test
+would never run and this suite would pass while proving nothing. Do not reach for
+it here, no matter how much more convenient it looks.
 """
 
 import io
