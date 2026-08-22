@@ -89,9 +89,7 @@ def test_secret_in_rendered_traceback_is_redacted(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.parametrize("name", ["uvicorn.error", "sqlalchemy.engine", "alembic"])
-def test_third_party_stdlib_logger_is_redacted(
-    monkeypatch: pytest.MonkeyPatch, name: str
-) -> None:
+def test_third_party_stdlib_logger_is_redacted(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     """Leak channel (c): foreign_pre_chain covers loggers nobody here wrote."""
     buf = _configure(monkeypatch)
     logging.getLogger(name).error("third party %s", SEEDED)
