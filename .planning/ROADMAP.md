@@ -50,7 +50,16 @@ Plans:
   2. A Claude custom connector pointed at the deployed `/mcp` endpoint discovers a throwaway tool and successfully calls it from an actual Claude client (Desktop/Web/Mobile), not just a local test client
   3. An unauthenticated request to the MCP endpoint is rejected and an authenticated one succeeds, verified against the deployed URL
   4. The auth mechanism that actually works — static bearer header or a minimal OAuth 2.1 resource-server shim — is chosen and recorded in PROJECT.md Key Decisions, confirming or explicitly overturning the "bearer token, not OAuth" decision
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — mcp==2.0.0 pin, MCP_* settings fields, test env seeding (MCP-01, MCP-04, DEPLOY-01)
+- [ ] 02-02-PLAN.md — backend/app/mcp package: lifespan context, static bearer verifier, fitness_ping, MCPServer wiring (MCP-01, MCP-04)
+- [ ] 02-03-PLAN.md — render.yaml blueprint + static test binding it to Settings (DEPLOY-01)
+- [ ] 02-04-PLAN.md — FastAPI mount at / + full local HTTP verification suite (MCP-01, MCP-04)
+- [ ] 02-05-PLAN.md — Render free-tier deploy, laptop migration, deployed Auth Verification Matrix, D-01 CLI proof (DEPLOY-01, MCP-01, MCP-04)
+- [ ] 02-06-PLAN.md — WorkOS AuthKit project checkpoint + JWKS token verifier (MCP-04, DEPLOY-02)
+- [ ] 02-07-PLAN.md — Starter upgrade, authkit cutover, Claude connector round-trip, decision recorded (DEPLOY-02, MCP-04, DEPLOY-01)
 
 ### Phase 3: Hevy Integration & Normalization
 **Goal**: PostgreSQL becomes the trustworthy source of truth for all Hevy data — workouts, exercise templates, and body measurements — normalized to a canonical muscle taxonomy
@@ -119,7 +128,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Backend Foundation | 0/5 | Planned | - |
-| 2. Deploy & Connector Auth Spike | 0/TBD | Not started | - |
+| 2. Deploy & Connector Auth Spike | 0/7 | Planned | - |
 | 3. Hevy Integration & Normalization | 0/TBD | Not started | - |
 | 4. Volume & Frequency Analytics | 0/TBD | Not started | - |
 | 5. Progression, Records & Recomposition Analytics | 0/TBD | Not started | - |
