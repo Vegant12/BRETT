@@ -1029,26 +1029,30 @@ Probed on the development machine, 2026-08-24.
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does the plan create the WorkOS account, or is that a human prerequisite?**
    - What we know: WorkOS setup is entirely dashboard-driven (project creation, two toggles, one Resource Indicator). No API/CLI path was found in the docs.
    - What's unclear: whether the executing agent has or should have WorkOS credentials.
    - Recommendation: treat WorkOS project creation and the three dashboard settings as an **explicit human checkpoint task** in the plan, with the resulting AuthKit domain handed back as `MCP_ISSUER_URL`. Do not model it as an automatable task.
+   - **RESOLVED:** Implemented as Plan 02-06 Task 1 — an `autonomous: false` human checkpoint that hands back the AuthKit issuer domain.
 
 2. **Free tier or straight to Starter?**
    - What we know: D-07 locks "start free, upgrade before connector testing." But free has no pre-deploy, no shell, and no one-off jobs, so migrations must run from the laptop (Pitfall 6), and free Postgres expires in 30 days.
    - What's unclear: whether the laptop-migration detour costs more effort than it saves in dollars, given the upgrade is mandatory within the same phase.
    - Recommendation: **follow D-07 as written** — it is a locked decision and the laptop migration is genuinely cheap (one command, already the pattern `conftest.py` uses). Flag the extra step in the plan so it isn't mistaken for a defect. If the planner wants to revisit, that is a discuss-phase question, not a research one.
+   - **RESOLVED:** Followed as written across Plans 02-03 (render.yaml), 02-05 (free-tier deploy + laptop migration), and 02-07 (Starter upgrade before connector testing).
 
 3. **Where should the `MCPServer` singleton live to avoid a circular import?**
    - What we know: `mcp_lifespan` needs `app.state.sessionmaker`, and `main.py` needs `mcp` and `mcp_app`. A naive module-level `from app.main import app` in `app/mcp/context.py` is circular.
    - What's unclear: nothing blocking — several clean shapes exist.
    - Recommendation: import `app` *inside* the `mcp_lifespan` function body (as shown in Pattern 3), which defers resolution to startup. Alternative if the planner prefers explicitness: a tiny `app/mcp/state.py` holder object that `main.py`'s lifespan populates and `mcp_lifespan` reads. Both are fine; this is Claude's-discretion territory per CONTEXT.md ("exact `mcp/server.py` internal file layout").
+   - **RESOLVED:** Plan 02-02 implements the deferred-import shape in `app/mcp/context.py`.
 
 4. **Should `required_scopes` be set?**
    - What we know: `AuthSettings.required_scopes` defaults to `None` and flows into both the metadata's `scopes_supported` and the middleware check. Claude requests whatever `scopes_supported` advertises unless the 401's `WWW-Authenticate` carries a `scope` parameter.
    - Recommendation: leave `None` for this phase. Scope design belongs with the real tool set (Phase 6). An empty scope list is the least likely thing to break a first connector handshake.
+   - **RESOLVED:** Plan 02-02's `server.py` leaves `required_scopes=None`, deferring scope design to Phase 6.
 
 ---
 
