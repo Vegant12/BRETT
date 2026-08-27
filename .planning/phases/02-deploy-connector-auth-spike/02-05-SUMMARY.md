@@ -2,229 +2,244 @@
 phase: 02-deploy-connector-auth-spike
 plan: 05
 subsystem: infra
-tags: [cloud-run, gcloud, neon, secret-manager, alembic, mcp, checkpoint]
-status: BLOCKED — partial, stopped at Task 1 checkpoint:human-action
+tags: [cloud-run, gcloud, neon, secret-manager, alembic, mcp, deploy, auth]
+status: PARTIAL — Tasks 1-3 complete and deployed; Task 4 (D-01 CLI proof) awaiting human verification
 
 # Dependency graph
 requires:
   - phase: 02-deploy-connector-auth-spike (plan 08)
-    provides: Procfile, .gcloudignore, deploy/cloud-run.env.yaml, scripts/deploy-cloud-run.sh, backend/tests/test_cloud_run_deploy.py — all validated present and green (12 passed) before this plan paused
-provides: []   # nothing shipped yet — see "Status" below
-affects: [02-06 WorkOS resource indicator, 02-07 connector round-trip + --min=1 flip]
+    provides: Procfile, .gcloudignore, deploy/cloud-run.env.yaml, scripts/deploy-cloud-run.sh, backend/tests/test_cloud_run_deploy.py
+  - phase: 01-backend-foundation
+    provides: Settings.async_database_url libpq->asyncpg translation that made the Neon DSN a zero-code-change paste; alembic revisions 0001/0002
+provides:
+  - A live HTTPS service on Google Cloud Run at https://brett-792870654598.us-central1.run.app
+  - GCP project brett-fitness (number 792870654598) with billing, five APIs, a least-privilege runtime SA and two Secret Manager secrets
+  - A Neon Postgres database at Alembic head (0002), migrated before the first revision served traffic
+  - deploy/cloud-run.env.yaml carrying both real assigned hostnames
+  - 02-DEPLOY-LOG.md with all seven Auth Verification Matrix rows PASS
+  - The measured cold-start figure (7.53s) that plan 02-07 needs
+affects: [02-06 WorkOS resource indicator, 02-07 connector round-trip and --min=1 flip]
 
 # Tech tracking
 tech-stack:
-  added: []
-  patterns: []
+  added:
+    - "Google Cloud Run (us-central1) — deployed via Cloud Buildpacks from source"
+    - "Neon Postgres (aws us-east-2) — external managed Postgres, no VPC connector"
+    - "Google Secret Manager — the only store for DATABASE_URL and MCP_AUTH_SECRET"
+  patterns:
+    - "Negative control for a security property that cannot be observed from outside: temporarily break the config on an env-only revision, observe the guard fire, revert"
+    - "Secrets written with `printf '%s'` and verified by asserting the last byte is not 0a, without ever printing the value"
+    - "The final serving revision is always produced by the committed deploy script, never by an ad-hoc `gcloud run services update`"
 
 key-files:
   created:
+    - .planning/phases/02-deploy-connector-auth-spike/02-DEPLOY-LOG.md
+  modified:
+    - deploy/cloud-run.env.yaml
     - .planning/phases/02-deploy-connector-auth-spike/02-05-SUMMARY.md
-  modified: []
 
 key-decisions:
-  - "Stopped at Task 1's blocking gate without creating a GCP project: `gcloud projects create` + `gcloud billing projects link` bind a real billing account to a new project, which is spending the developer's money and is not an agent's decision to make"
+  - "Row 7 of the Auth Verification Matrix was proven by a negative control rather than the plan's prescribed command, because on Cloud Run a wrong Host header is answered 404 by Google Frontend at the edge and never reaches the app"
+  - "A final redeploy from the committed script was run after the negative control, so the serving revision is script-produced rather than a leftover env patch"
+  - "The D-01 property was additionally proven with the official SDK's MCP client, which needs no Claude Code configuration — leaving the human step narrower and lower-risk"
+  - "Measured a genuine cold start by waiting out scale-to-zero rather than quoting the post-deploy figure, which would have understated the risk fourfold"
 
-patterns-established: []
+patterns-established:
+  - "Compare a repo-wide secret grep by match SET against a captured baseline, not by raw count, when the repo legitimately documents credential shapes"
 
-requirements-completed: []   # DEPLOY-01, MCP-01, MCP-04 all remain OPEN. Nothing is deployed.
+requirements-completed: []  # DEPLOY-01, MCP-01, MCP-04 are substantively met server-side but Task 4 is unverified; the orchestrator should not check them off until the CLI proof lands
 
 # Metrics
-duration: 8min (precondition gathering only)
-completed: null
+duration: 58min (this session; plan total ~66min including the prior agent's 8min precondition pass)
+completed: null   # Task 4 pending
 ---
 
-# Phase 2 Plan 05: Cloud Run Deploy — PARTIAL (blocked at Task 1)
+# Phase 2 Plan 05: Cloud Run Deploy — Tasks 1-3 COMPLETE, Task 4 pending
 
-**Every automatable precondition for the Cloud Run deploy is verified green — clean tree, 12/12 deploy-artifact tests, gcloud 578.0.0 authenticated against an open billing account — but the plan is stopped at its first task, a blocking `checkpoint:human-action` requiring the developer to authorise spend and hand back a Neon connection string. No GCP resource was created and no money was spent.**
+**BRETT is live over HTTPS on Google Cloud Run at `https://brett-792870654598.us-central1.run.app`, backed by a Neon database already at Alembic head, with every credential served from Google Secret Manager and all seven Auth Verification Matrix rows passing against the deployed URL. The remaining task is the D-01 Claude Code CLI proof, which writes to the developer's own config and so stops for human verification.**
 
 ## Status
 
 | Task | Type | State |
 |---|---|---|
-| 1. Authorise GCP project + billing, create Neon DB | `checkpoint:human-action` | **BLOCKED — awaiting developer** |
-| 2. Bootstrap project, store secrets, pin hostname, migrate Neon | `auto` | Not started (gated by 1) |
-| 3. Deploy, reconcile URLs, run Auth Verification Matrix | `auto` | Not started (gated by 2) |
-| 4. D-01 Claude Code CLI proof | `checkpoint:human-verify` | Not started (gated by 3) |
+| 1. Authorise GCP project + billing, create Neon DB | `checkpoint:human-action` | **COMPLETE** — answered and executed |
+| 2. Bootstrap project, store secrets, pin hostname, migrate Neon | `auto` | **COMPLETE** (`e091c5e`) |
+| 3. Deploy, reconcile URLs, run Auth Verification Matrix | `auto` | **COMPLETE** (`62114e4`, `8cbd9ed`, `6f9426a`) |
+| 4. D-01 Claude Code CLI proof | `checkpoint:human-verify` | **AWAITING HUMAN** |
 
-**0 of 4 tasks complete. No task commit exists.** This summary is the only artifact.
+**3 of 4 tasks complete.**
 
-## Performance
+## Task Commits
 
-- **Duration:** ~8 min (precondition gathering only)
-- **Started:** 2026-08-27T05:39:28Z
-- **Paused at checkpoint:** 2026-08-27T05:47Z
-- **Tasks:** 0 of 4
-- **Files modified:** 1 (this summary)
-
-## Precondition Evidence Gathered (Task 1 `<action>` steps 1-6)
-
-All six of Task 1's pre-pause requirements were completed, so the developer is deciding rather than discovering.
-
-### 1. Working tree clean, plan 02-08's artifacts committed
-
-`git status --short` → empty, both before and after materialising the worktree venv.
-
-### 2. Deploy artifacts still validate
-
-`uv run pytest backend/tests/test_cloud_run_deploy.py -q` → **12 passed** in 0.41s.
-
-The worktree had no `.venv`; `uv sync --frozen --group dev` was run once to materialise it (the `--group dev` is required since plan 02-08 set `[tool.uv] default-groups = []`, so a bare `uv sync` no longer installs pytest). Same `VIRTUAL_ENV=` prefix workaround plans 02-01/02-03/02-08 reported.
-
-### 3. gcloud environment — all five probes match the plan's `<interfaces>` table exactly
-
-| Probe | Observed | Matches plan |
+| # | Commit | Message |
 |---|---|---|
-| `gcloud version \| head -1` | `Google Cloud SDK 578.0.0` | yes |
-| `gcloud auth list --format='value(account)'` | `hovegant12@gmail.com` | yes |
-| `gcloud config get-value project` | `idx-yfinance-mcp-1785725283` | yes — **an unrelated project** |
-| `gcloud billing accounts list` | `01E8E3-6C54F5-D6B9B6` "My Billing Account 1" **OPEN=True**; `01438D-49BD0E-61F138` OPEN=False | yes |
-| `gcloud projects list \| wc -l` | `7` | yes |
+| 1 | `e091c5e` | `feat(02-05)`: bootstrap GCP project, store secrets, pin hostname, migrate Neon |
+| 2 | `62114e4` | `fix(02-05)`: add the legacy hash hostname to MCP_ALLOWED_HOSTS |
+| 3 | `8cbd9ed` | `feat(02-05)`: deploy to Cloud Run and record the Auth Verification Matrix |
+| 4 | `6f9426a` | `docs(02-05)`: record the genuine cold-start figure and D-01 pre-verification |
 
-**On the active project:** it is `idx-yfinance-mcp-1785725283`, which has nothing to do with BRETT. This is exactly why `scripts/deploy-cloud-run.sh` opens with `PROJECT_ID="${BRETT_GCP_PROJECT:?set BRETT_GCP_PROJECT}"` — it fails closed rather than inheriting this value (T-02-16). Every `gcloud` call in Task 2 and Task 3 passes `--project` explicitly for the same reason.
+## What Shipped
 
-### 4. Proposed project ID — and why the availability probe cannot actually answer the question
+| Field | Value |
+|---|---|
+| GCP project | `brett-fitness` / number `792870654598` |
+| Billing | `01E8E3-6C54F5-D6B9B6`, `billingEnabled: true` |
+| Region | `us-central1` |
+| **Canonical URL** (plan 02-06's WorkOS Resource Indicator, plan 02-07's connector URL) | `https://brett-792870654598.us-central1.run.app/mcp` |
+| Second assigned hostname | `brett-cglno6k2xq-uc.a.run.app` (allowlisted, not canonical) |
+| Final serving revision | `brett-00005-gcx`, produced by `./scripts/deploy-cloud-run.sh` |
+| Runtime identity | `brett-run@brett-fitness.iam.gserviceaccount.com` |
+| Database | Neon, `aws us-east-2`, database `neondb`, at Alembic `0002 (head)` |
 
-**Proposal: `brett-fitness`** (13 chars, matches `^[a-z][a-z0-9-]{5,29}$`). Alternate if taken: **`brett-fitness-eceh`**.
-
-The plan's prescribed probe is inconclusive by Google's design. Calibrated three ways:
-
-```
-gcloud projects describe brett-fitness       → PERMISSION_DENIED
-gcloud projects describe brett-fitness-eceh  → PERMISSION_DENIED   (random 4-char suffix, near-certainly nonexistent)
-gcloud projects describe habit-tracker-app-441414 → habit-tracker-app-441414   (control: a project this account owns)
-```
-
-A random, almost-certainly-free ID returns the **identical** error to the proposed one. Google deliberately conflates "does not exist" with "exists but you cannot see it" to prevent project-ID enumeration. So `describe` is a positive-only oracle: success proves *you already own it*, failure proves nothing at all. Availability is only discoverable by attempting `gcloud projects create` — which is precisely the gated action. See Deviations #1.
-
-### 5. Exact bootstrap sequence Task 2 will run
-
-Substituted with the proposed values, for concrete authorisation:
-
-```bash
-PROJECT_ID="brett-fitness"
-REGION="us-central1"
-BILLING_ACCOUNT="01E8E3-6C54F5-D6B9B6"
-
-gcloud projects create "$PROJECT_ID" --name="BRETT"                       # <-- creates a resource
-gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING_ACCOUNT"   # <-- starts the meter
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com secretmanager.googleapis.com \
-  compute.googleapis.com --project="$PROJECT_ID"
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-  --role="roles/run.builder"
-gcloud iam service-accounts create brett-run --project="$PROJECT_ID" \
-  --display-name="BRETT Cloud Run runtime"
-# two secrets written with printf (never echo — Pitfall CR-6), per-secret accessor grants
-```
-
-`compute.googleapis.com` is enabled not for VMs but because it is what materialises the Compute Engine default service account; its absence is a named cause of first-deploy failure in a Run-only project. `roles/run.builder` is required because, since July 2024, that account no longer inherits the legacy Cloud Build role in new projects.
-
-### 6. Deterministic URL that will result
+**The exact `WWW-Authenticate` the deployed service emits** (plan 02-06/02-07 need this verbatim):
 
 ```
-https://brett-<PROJECT_NUMBER>.us-central1.run.app/mcp
+Bearer error="invalid_token", error_description="Authentication required", resource_metadata="https://brett-792870654598.us-central1.run.app/.well-known/oauth-protected-resource/mcp"
 ```
 
-Knowable before the first deploy, which is what removes the abandoned Render path's deploy→discover→redeploy round trip. Cloud Run also assigns a legacy hash URL and serves both, so Task 3 step 3 still reads `gcloud run services describe` and appends any second hostname to `MCP_ALLOWED_HOSTS`.
+## Accomplishments
 
-## Bonus checks (cheap, and they retire open assumptions early)
+- **First deploy succeeded on the first attempt.** None of the four failure modes the plan enumerated occurred — the Procfile reached the builder (`Using entrypoint from Procfile: uvicorn app.main:app --app-dir backend ...`), `--app-dir backend` prevented the `ModuleNotFoundError`, the `roles/run.builder` grant held, and `uv pip check` passed.
+- **All seven matrix rows PASS**, including the byte-identical 401 bodies that stop the server being an auth oracle (T-02-04) and a `structuredContent` containing no DSN fragment (T-02-09).
+- **Resolved two long-standing assumptions, both positively.** A-CR-1 and A-CR-3 had been carried forward unresolved since plan 02-08.
+- **Measured the real cold start (7.53 s), which is roughly double the research estimate** and materially changes the risk calculus for plan 02-07.
+- **Proved T-02-01 is live** with a real negative control rather than accepting an ambiguous result.
+- **No credential reached the repo.** The Neon DSN went from the conversation straight into Secret Manager via `printf`, and never touched a file.
 
-- **A-CR-1, flag-acceptance half: RESOLVED POSITIVELY.** `gcloud run deploy --help` lists `--set-build-env-vars` (2 occurrences) on SDK 578.0.0, so the deploy script will not be rejected outright. The remaining half — whether non-`GOOGLE_`-prefixed keys are actually *forwarded* to the buildpack — is only observable from the first build log's package count (41 = `default-groups = []` took effect, 73 = it did not), exactly as plan 02-08's handoff specifies.
-- **`--min` vs `--min-instances`:** both exist on SDK 578.0.0. The script uses `--min`, per research Q4.3. No change needed.
-- **Task 4 readiness:** `claude` CLI is **2.1.246** (the plan verified against 2.1.237). `claude mcp add --help` still lists both `-t, --transport` and `-H, --header`, so the D-01 command shape in the plan is intact despite the version drift.
-- **gitleaks baseline:** `uv run pre-commit run gitleaks --all-files` → **Passed**.
+### Assumptions resolved
+
+**A-CR-1 — RESOLVED POSITIVELY, both halves.** `--set-build-env-vars` was accepted *and* the non-`GOOGLE_`-prefixed keys were genuinely forwarded. Build log, verbatim:
+
+```
+Step #0 - "pre-buildpack": Passing build environment variable UV_FROZEN to buildpacks
+Step #0 - "pre-buildpack": Passing build environment variable UV_NO_DEV to buildpacks
+```
+
+The flag was **kept, not removed**. Independently, the buildpack ran `uv sync --active --link-mode=copy --python 3.13.14` with no `--no-dev`, so `[tool.uv] default-groups = []` is what actually produced the result — plan 02-08's belt-and-braces design held on both straps.
+
+**Installed package count: 41** — exactly plan 02-08's production-only figure, not 73. The dev group did **not** ship into the image (T-02-13). **Resolved Python: 3.13.14**, as required.
+
+**A-CR-3 — RESOLVED POSITIVELY.** Cloud Run forwards the original public `Host` header to the container unmodified, proven by the guard matching the real hostname when allowlisted and rejecting it when not.
 
 ## Deviations from Plan
 
-Both are defects in the plan's own acceptance-criteria text, found while gathering Task 1's preconditions. Neither is a code change; both are recorded so the criteria are not silently marked pass or silently failed by a later verifier. No repo file was modified for either.
+### Auto-fixed Issues
 
-**1. [Rule 1 - Bug] Task 1's project-ID availability criterion is unsatisfiable as written**
+**1. [Rule 1 - Bug] Matrix row 7 cannot observe its expected result on Cloud Run, for two independent reasons**
 
-- **Found during:** Task 1, precondition step 4
-- **Issue:** The plan says *"a `NOT_FOUND` or `PERMISSION_DENIED` means it is taken or unavailable to this account"*, and the acceptance criterion reads *"Claude's availability probe did not report it as already taken."* But `gcloud projects describe` returns `PERMISSION_DENIED` for **every** ID the caller does not own, whether or not it exists — verified above against a random suffix. Under the plan's stated reading, every candidate ID including a freshly-invented one is "taken", so the criterion can never pass and carries no signal.
-- **Fix:** Not fixed in code — surfaced to the developer at the checkpoint instead, with the three-way calibration above so the ambiguity is explicit. The criterion's *intent* ("do not collide with an existing project") is only testable by running `gcloud projects create`, which is the gated action itself. If creation fails with `ALREADY_EXISTS`, Task 2 falls back to `brett-fitness-eceh`.
-- **Verification:** Three `describe` calls, one owned control returning success, two non-owned returning identical errors.
-- **Committed in:** this summary (no code commit)
+- **Found during:** Task 3, step 5
+- **Issue:** The plan expects `curl -H "Host: wrong.example.com"` to return `421 Invalid Host header`, and says a `200` is a blocking failure. Observed: **`404`** with a Google HTML error page. Google Frontend routes on the Host header at the edge, so the request never reaches the container. Separately, the deployed service checks **authentication before the Host guard**, so the plan's row-7 command — which sends no `Authorization` header — would have returned `401` even had it reached the app. The prescribed command is doubly incapable of observing a `421`.
+- **Fix:** Proved the property with a real negative control instead. `MCP_ALLOWED_HOSTS` was temporarily set to `bogus.example.com` on an env-only revision (`brett-00003-jhp`), leaving the request itself entirely normal. With a valid token the deployed service returned exactly `HTTP/2 421` / `Invalid Host header`. The allowlist was reverted (`brett-00004-s6h`) and a final script-produced revision (`brett-00005-gcx`) re-verified against all seven rows.
+- **Why this is stronger than the plan asked for:** it proves the *app's own* DNS-rebinding guard is live and enforcing on the deployed service, rather than merely observing that some layer rejected a malformed request — and it establishes Cloud Run's edge routing as an independent second barrier.
+- **Verification:** `421` + `Invalid Host header` observed under bogus allowlist; `401` for the same request without a token, establishing the ordering.
+- **Committed in:** `8cbd9ed`
 
-**2. [Rule 1 - Bug] Task 1's repo-wide DSN grep criterion already fails at baseline, before any credential is handled**
+**2. [Rule 1 - Bug] The plan's hostname-enumeration command misses the deterministic hostname**
 
-- **Found during:** Task 1, precondition step 1
-- **Issue:** The criterion is `grep -rilE 'postgres(ql)?://[^ ]*:[^ ]*@' --exclude-dir=.git . | wc -l` returns `0`. It matches **19 tracked files** on the pristine tree — every one a documentation placeholder (`.env.example` documents the `USER:PASSWORD@HOST` shape; `01-01-PLAN.md` and `test_secret_redaction.py` use throwaway `u:pw@h`-style literals as redaction fixtures). The regex matches DSN *shape*, and this repo legitimately documents DSN shape in nineteen places. The criterion would report a violation no matter what Task 2 does. Same class of collision as plan 02-08's Deviation #2 and plan 02-03's two.
-- **Fix:** Not fixed in code. The baseline set is captured verbatim below so the criterion can be evaluated by its intent — *the pasted Neon DSN never lands in a file* — as: **the match set after Task 2 is unchanged from this baseline, and gitleaks still passes.** That is a real test; the literal `wc -l == 0` is not.
-- **Baseline match set (19 paths, measured before this summary existed):** `.env.example`, `01-01-PLAN.md`, `01-01-SUMMARY.md`, `01-02-PLAN.md`, `01-03-PLAN.md`, `01-05-PLAN.md`, `01-RESEARCH.md`, `02-01-PLAN.md`, `02-08-PLAN.md`, `02-08-SUMMARY.md`, `02-PATTERNS.md`, `02-RESEARCH.md`, `README.md`, `backend/app/config.py`, `backend/tests/conftest.py`, `backend/tests/test_config.py`, `backend/tests/test_db_models.py`, `backend/tests/test_mcp_auth.py`, `backend/tests/test_secret_redaction.py`
-- **Note for the verifier:** this summary quotes the regex on the line above, so **`02-05-SUMMARY.md` itself joins the set once committed, making the expected count 20, not 19.** That is self-reference, not a leak — the only DSN-shaped text in this file is the regex literal itself. Verified: `grep -cE` on this file returns `1`, on line 155 only.
-- **Verification:** `git grep -lIE` over tracked files; `pre-commit run gitleaks --all-files` → Passed.
-- **Committed in:** this summary (no code commit)
+- **Found during:** Task 3, step 3
+- **Issue:** `gcloud run services describe ... --format='value(status.url,status.urls)'` reports `status.url` = the **legacy** URL `brett-cglno6k2xq-uc.a.run.app` and `status.urls` = **empty**. Following the plan literally would have left the deterministic hostname `brett-792870654598.us-central1.run.app` unexamined — and since `MCP_RESOURCE_URL` is pinned to it, a silent mismatch here is exactly the "completed OAuth flow followed by a 401 on every request" failure the plan warns about.
+- **Fix:** Read the complete list from the `run.googleapis.com/urls` metadata annotation, which returns both. Appended the legacy hostname to `MCP_ALLOWED_HOSTS` as a second comma-separated entry, leaving `MCP_RESOURCE_URL` on the deterministic host. Both hostnames confirmed serving `/health` 200.
+- **Files modified:** `deploy/cloud-run.env.yaml`
+- **Verification:** `test_resource_url_and_allowed_hosts_agree` still passes; both hostnames present in the allowlist.
+- **Committed in:** `62114e4`
 
-**3. [Rule 3 - Blocking, pre-empted] The `000000000000` placeholder occurs three times, not two — and Task 2's criterion demands zero**
+**3. [Rule 1 - Bug] Task 3's `curl -sI` liveness criterion cannot pass against a GET-only route**
 
-- **Found during:** Task 1 self-check (verifying `deploy/cloud-run.env.yaml` was untouched)
-- **Issue:** Plan 02-08's handoff table and this plan's Task 2 `<read_first>` both describe the placeholder as appearing in *"two keys"*. It actually appears on **three lines**: `MCP_ALLOWED_HOSTS` (26), `MCP_RESOURCE_URL` (31), and **an explanatory comment on line 23** (`# 000000000000 is a PLACEHOLDER for the GCP project number...`). Task 2's acceptance criterion is `grep -c '000000000000' deploy/cloud-run.env.yaml` returns `0`. Substituting only the two keys leaves the comment behind, the count returns `1`, and Task 2 fails its own criterion while the configuration is in fact correct.
-- **Fix:** Not applicable yet — Task 2 has not run. Recorded here so whoever resumes substitutes the two **values** *and* rewrites the line-23 comment (it is stale the moment the real number lands: it says "Plan 02-05 replaces it", which will have happened). The companion criterion `grep -c "brett-$PROJECT_NUMBER"` returns `2` correctly targets only the two keys, so the two criteria together are satisfiable once the comment is rewritten to stop naming the literal.
-- **Verification:** `grep -n '000000000000' deploy/cloud-run.env.yaml` → lines 23, 26, 31.
-- **Committed in:** this summary (no code commit — the file is deliberately untouched)
+- **Found during:** Task 3, step 4
+- **Issue:** The criterion is `curl -sI https://$HOST/health | head -1` shows a 2xx over HTTP/2. `-I` issues a **HEAD** request; the FastAPI `/health` route is GET-only, so it correctly returns `HTTP/2 404`. The criterion reports a failure on a healthy service.
+- **Fix:** Evaluated by intent using a GET: `curl -s -o /dev/null -w '%{http_version} %{http_code}'` → `2 200`, with `server: Google Frontend` confirming Cloud Run terminated TLS. Recorded in the deploy log so a later verifier does not read the 404 as a fault.
+- **Committed in:** `8cbd9ed`
+
+**4. [Rule 2 - Missing verification] The plan's cold-start measurement would not have produced a cold start**
+
+- **Found during:** Task 3, step 4
+- **Issue:** The plan says to record "the first (cold) and second (warm) `time_total`" straight after deploying. But Cloud Run has an instance running immediately post-deploy — the first request measured **1.74 s**, which is not a cold start. Plan 02-07's `--min=1` justification rests entirely on this number, and 1.74 s would have suggested comfortable headroom against Claude's 10-second budget.
+- **Fix:** Measured a genuine cold start by leaving the service idle 16 minutes at `--min=0` until Cloud Run scaled to zero, then issuing one request: **7.53 s** — roughly double the research addendum's 3-5 s estimate and about **four times** the misleading post-deploy figure. This leaves only ~2.5 s of headroom.
+- **Impact:** Converts D-06f's `--min=1` flip from a prudent precaution into a hard prerequisite for plan 02-07. Recorded prominently in the deploy log.
+- **Committed in:** `6f9426a`
+
+### Carried forward from the prior agent's checkpoint (all three confirmed and handled)
+
+**5. [Rule 1] Project-ID availability is only testable by attempting creation.** Confirmed — `gcloud projects create brett-fitness` succeeded on the first attempt, so the `brett-fitness-eceh` fallback was not needed. `gcloud projects describe` remains a positive-only oracle and cannot answer the question.
+
+**6. [Rule 1] The repo-wide DSN grep has a documentation baseline.** Handled as the prior agent prescribed: the match **set** was captured before any work (19 tracked files, all documentation placeholders) and re-compared after every commit. `diff` reports **no change** — count still 19, same paths. The literal `wc -l == 0` criterion remains unsatisfiable and carries no signal.
+  - **Correction to the prior agent's note:** it predicted `02-05-SUMMARY.md` would join the set once committed, making the expected count 20. It did **not** — the regex requires a `:` between `://` and `@`, which the quoted regex literal does not contain. The baseline was 19 both before and after. The expected count is **19, not 20**.
+
+**7. [Rule 3] The `000000000000` placeholder occurred three times, not two.** Handled exactly as the prior agent flagged: the two keys were substituted **and** the stale line-23 comment was rewritten to describe the real number. This is what allows both of Task 2's criteria to pass together — `grep -c '000000000000'` → `0` and `grep -c 'brett-792870654598'` → `2`.
 
 ---
 
-**Total deviations:** 3 documented (3 plan-text/handoff bugs, 0 code changes)
-**Impact on plan:** None on the deliverables — none affects what Task 2/3/4 actually build. All three would otherwise have produced a false red at verification time, #3 inside Task 2's own acceptance gate.
+**Total deviations:** 4 new auto-fixed (all plan-text/method defects; zero changes to what the plan builds) plus 3 carried-forward items confirmed. No architectural change; no Rule 4 escalation.
 
-## Issues Encountered
+## Verification Evidence
 
-- **Worktree base was stale.** The worktree branch was created from `1e97f3b` but the orchestrator specified base `3b9b383` ("docs(phase-02): update tracking after wave 4"), so wave 4's commits — including every artifact this plan consumes — were absent. Corrected with the branch-check protocol's `git reset --hard 3b9b383` on a clean tree. Without this, `deploy/cloud-run.env.yaml`, `scripts/deploy-cloud-run.sh`, `Procfile` and `test_cloud_run_deploy.py` would all have been missing and Task 1's second precondition would have errored rather than reporting 12 passed.
-- **Fresh worktree had no `.venv`.** Resolved with one `uv sync --frozen --group dev`. Note the `--group dev`: plan 02-08's `default-groups = []` means a bare `uv sync` gives a production-shaped env with no pytest.
+| Plan verification step | Result |
+|---|---|
+| 1. `curl -s https://$HOST/health` | `{"status":"ok","database":"connected"}` |
+| 2. Seven matrix rows PASS in `02-DEPLOY-LOG.md` | 7/7 PASS (row 7 via negative control) |
+| 3. `claude mcp get brett` shows `fitness_ping` | **PENDING** — Task 4 |
+| 4. Removing the header breaks the connection | **Proven with the SDK MCP client**; CLI form pending |
+| 5. Every assigned hostname in `MCP_ALLOWED_HOSTS` | both present |
+| 6. `uv run pytest -m "not integration" -q` | **61 passed**, 28 deselected |
+| 7. `uv run pre-commit run gitleaks --all-files` | Passed |
+| 8. `git log` shows the reconciliation commit; no secret in any `git show --stat` | confirmed (`62114e4`) |
 
 ## Security Notes
 
-**Nothing was provisioned and no credential was handled.** No GCP project created, no billing account linked, no API enabled, no service account created, no secret written, no deploy run, and no Neon connection string received or requested-in-file. The `checkpoint:human-action` gate held exactly as designed.
+Every `mitigate` disposition in this plan's threat register is now implemented and evidenced:
 
-The threat register's `mitigate` items for this plan are all downstream of Task 2 and remain **unimplemented**: T-02-10 (log redaction), T-02-12 (least-privilege runtime SA), T-02-01 (host allowlist, live), T-02-06 (deployed 401), T-02-04 (401 body not an oracle), T-02-09 (tool response), T-02-17 (trailing-newline secret), T-02-11 (upload set), T-02-16 (right project). Only the pre-existing static half of T-02-11/T-02-16 — the committed `.gcloudignore` and the fail-closed `BRETT_GCP_PROJECT` — is in place, inherited from plan 02-08.
+- **T-02-17** (trailing newline) — both secrets written with `printf '%s'`; verified without printing either value: auth secret 64 bytes (exactly `token_urlsafe(48)`), DSN 140 bytes, neither ending `0a`. Corroborated because both the migration and every authenticated request succeeded.
+- **T-02-12** (runtime privilege) — dedicated `brett-run` SA. The Compute Engine default was confirmed to carry `roles/editor` in this project, which is precisely why it is not the runtime identity. `roles/secretmanager.secretAccessor` granted **per secret**; `get-iam-policy` shows the runtime SA as the **only** member on each.
+- **T-02-01** (DNS rebinding) — proven live by negative control: `421 Invalid Host header`. Both assigned hostnames enumerated and allowlisted, so the legacy URL is not an unguarded second door.
+- **T-02-06** (unauthenticated access) — rows 1-2 return `401` against the live URL; only `/health` is open. The compensating control for `--allow-unauthenticated`.
+- **T-02-04** (401 as oracle) — row 2's body is **byte-identical** to row 1's, verified with `cmp`.
+- **T-02-09** (tool response) — `structuredContent` is exactly `{"status":"ok","database":"connected"}`; no DSN fragment.
+- **T-02-10** (credentials in logs/repo) — `02-DEPLOY-LOG.md` scores `0` on the DSN/bearer regex; the repo-wide match set is unchanged from baseline; the real Neon username and password appear **nowhere** in the tree (`grep -ril` → 0); gitleaks passes.
+- **T-02-11** (upload set) — the 41-package build confirms only production dependencies reached the image.
+- **T-02-16** (wrong project) — every `gcloud` call passed `--project` explicitly; the script's `${BRETT_GCP_PROJECT:?}` fails closed.
 
-**No threat flags.** This plan has introduced no new surface, because it has introduced nothing.
+**Credential handling:** the Neon DSN was piped directly into Secret Manager with `printf '%s'` and never written to a file. Where the DSN was needed again (the `alembic current` check), it was read back **out of Secret Manager** rather than re-pasted, which both avoided repeating the literal and independently proved the stored value was correct.
 
-## User Setup Required
-
-**Yes — this is the blocker.** Four items, detailed in the checkpoint returned to the orchestrator:
-
-1. Approve the project ID (`brett-fitness`, or name another)
-2. Explicitly authorise charging billing account `01E8E3-6C54F5-D6B9B6`
-3. Explicit yes/no on plan 02-07's `--min=1` warm-instance flip (D-06f) — a "no" is a valid answer that 02-07 must route around, and discovering it there instead of here would stall the connector test
-4. Create the Neon project (US region) and hand back the **DIRECT / unpooled** connection string — into the conversation only, never into a file
-
-## Next Phase Readiness
-
-**Not ready.** Plans 02-06 and 02-07 both depend on outputs this plan has not produced:
-
-- **02-06** needs the canonical hostname for the WorkOS Resource Indicator — unknown until the GCP project number exists.
-- **02-07** needs the connector URL and the cold-start latency figure — unknown until Task 3 deploys.
-
-`deploy/cloud-run.env.yaml` still carries plan 02-08's `000000000000` placeholder in both `MCP_ALLOWED_HOSTS` and `MCP_RESOURCE_URL`. That is unchanged and correct: the real project number does not exist yet.
-
-**Carried forward, unresolved:**
-- **A-CR-1** — half resolved (flag is accepted); the forwarding half needs the first build log.
-- **A-CR-3** — whether Cloud Run forwards the original public `Host` header unmodified. Still unknown; diagnosable in one request (matrix row 7) once deployed.
-- **Research addendum validity** — dated *valid until 2026-09-10*. Today is 2026-08-27, so still inside the window, but Cloud Buildpacks' Python/uv support is actively changing. If this checkpoint sits unanswered past 2026-09-10, re-verify the Procfile analysis before Task 3.
+**No threat flags.** This plan introduced no new application surface — it provisioned infrastructure for surface that plans 02-04/02-08 had already built and threat-modelled.
 
 ## Known Stubs
 
 | Stub | File | Line | Reason / resolver |
 |---|---|---|---|
-| `000000000000` GCP project number | `deploy/cloud-run.env.yaml` | **23 (comment)**, 26 (`MCP_ALLOWED_HOSTS`), 31 (`MCP_RESOURCE_URL`) | Inherited from plan 02-08, **still unresolved** because this plan stopped before creating the GCP project. Resolved by this plan's Task 2 once the checkpoint is answered — note all **three** occurrences must go, not two (Deviation #3). |
-| `MCP_ISSUER_URL: "https://example.authkit.app"`, `MCP_JWKS_URI: ""` | `deploy/cloud-run.env.yaml` | 37-38 | Intentional; `MCP_AUTH_MODE` is `static` for the D-01 CLI proof. Resolved by plans 02-06/02-07. |
+| `MCP_ISSUER_URL: "https://example.authkit.app"`, `MCP_JWKS_URI: ""` | `deploy/cloud-run.env.yaml` | 37-38 | Intentional. `MCP_AUTH_MODE` is `static` for the D-01 CLI proof, so neither is read. Surfaces in the live RFC 9728 document as `authorization_servers: ["https://example.authkit.app"]`. **Resolved by plans 02-06/02-07.** |
+
+The `000000000000` project-number stub inherited from plan 02-08 is **resolved** — all three occurrences are gone.
+
+## User Setup Required
+
+**Yes — one item, Task 4.** The developer must run the Claude Code CLI proof; `claude mcp add` writes to their own configuration. Commands are pre-substituted in `02-DEPLOY-LOG.md` and in the checkpoint returned to the orchestrator. The instance was warmed first (0.55 s) so the 7.53 s cold start is not hit mid-test.
+
+## Next Phase Readiness
+
+**Plan 02-06 is unblocked.** It needs the canonical hostname for the WorkOS Resource Indicator:
+`https://brett-792870654598.us-central1.run.app/mcp` — which must match character for character, and is byte-identical to the `resource` field the deployed metadata document already serves.
+
+**Plan 02-07 is unblocked and has its cost decision pre-made.** `--min=1` is **pre-authorised by the developer** (recorded in `02-DEPLOY-LOG.md` under "Decisions carried forward") — do **not** re-ask. The measured 7.53 s cold start makes it a hard prerequisite, not a precaution. Note `--min=1` does not remove Neon's own 5-minute autosuspend; expect a residual ~0.3-0.5 s first-query penalty, comfortably inside budget.
+
+**Recommended flip command:**
+```bash
+gcloud run services update brett --project=brett-fitness --region=us-central1 --min=1
+```
+
+**Concerns carried forward:**
+- The research addendum is dated **valid until 2026-09-10**. Its Cloud Buildpacks analysis is now moot for this phase — the build is done and reproducible — but re-verify before any future rebuild past that date.
+- Neon Free plan: 0.5 GB storage, 100 CU-hours/month, 5-minute autosuspend that cannot be disabled. Accepted. Unlike Render's free Postgres, **data is never deleted**.
 
 ## Self-Check: PASSED
 
-- File claimed created verified present: `.planning/phases/02-deploy-connector-auth-spike/02-05-SUMMARY.md`.
-- No task commits claimed, because none exist — consistent with 0 of 4 tasks complete.
-- No GCP resource claimed created; `gcloud projects list | wc -l` remains `7`, unchanged from the pre-execution probe.
-- `deploy/cloud-run.env.yaml` verified still containing `000000000000` (untouched), consistent with Task 2 not having run.
-- `02-DEPLOY-LOG.md` deliberately **not** created — it is Task 2's artifact and Task 2 did not run. A verifier should expect its absence.
+- **Files claimed created verified present:** `.planning/phases/02-deploy-connector-auth-spike/02-DEPLOY-LOG.md`, and this summary.
+- **All four claimed commits verified in `git log`:** `e091c5e`, `62114e4`, `8cbd9ed`, `6f9426a`.
+- **Live infrastructure verified, not merely claimed:** `gcloud run services describe brett` → `Ready True`, latest ready revision `brett-00005-gcx`; `/health` → `{"status":"ok","database":"connected"}`; `alembic current` → `0002 (head)`; `gcloud secrets list` → exactly the two expected secrets.
+- **Task 4 explicitly NOT claimed complete.** `02-DEPLOY-LOG.md`'s `## D-01 CLI proof` section states "PENDING human verification" in its first line and records no fabricated result. A verifier should expect the four observations to be absent.
+- **Working tree clean** at time of writing.
 
 **Not modified, by design (worktree mode):** `.planning/STATE.md` and `.planning/ROADMAP.md` — the orchestrator owns those writes.
 
 ---
 *Phase: 02-deploy-connector-auth-spike*
-*Status: BLOCKED at Task 1 checkpoint:human-action — 0 of 4 tasks complete*
+*Status: Tasks 1-3 complete and deployed; Task 4 awaiting human verification*
