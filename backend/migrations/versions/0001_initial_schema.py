@@ -26,9 +26,7 @@ def upgrade() -> None:
     op.create_table(
         "users",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column(
-            "timezone", sa.String(length=64), server_default="Asia/Jakarta", nullable=False
-        ),
+        sa.Column("timezone", sa.String(length=64), server_default="Asia/Jakarta", nullable=False),
         # FOUND-04: both timestamps are TIMESTAMPTZ, never bare TIMESTAMP.
         sa.Column(
             "created_at",

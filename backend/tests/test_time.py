@@ -200,9 +200,7 @@ async def test_roundtrip_is_aware_utc(session: AsyncSession) -> None:
         await session.flush()
         session.expire(user)
 
-        stored = (
-            await session.execute(sa.select(User).where(User.id == user_id))
-        ).scalar_one()
+        stored = (await session.execute(sa.select(User).where(User.id == user_id))).scalar_one()
 
         assert stored.created_at.tzinfo is not None
         assert stored.created_at.utcoffset() == dt.timedelta(0)

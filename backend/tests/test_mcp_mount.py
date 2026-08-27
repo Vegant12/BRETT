@@ -79,9 +79,7 @@ def mcp_server() -> Iterator[ModuleType]:
 
     engine = create_async_engine(get_settings().async_database_url)
     preexisting = getattr(app.state, "sessionmaker", None)
-    app.state.sessionmaker = async_sessionmaker(
-        engine, expire_on_commit=False, autoflush=False
-    )
+    app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
     try:
         yield mcp_server_module
     finally:
