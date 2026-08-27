@@ -1,0 +1,80 @@
+# Render blueprint (DEPLOY-01). One web service serving BOTH /api and /mcp, plus
+# one managed Postgres. Two services would double the cost and force the MCP
+# layer to talk to analytics over HTTP, which blueprint section 37 forbids.
+#
+# The service's root-directory setting is deliberately left unset. Render
+# activates uv only when `uv.lock` is in the service's root directory ("To use
+# uv, a uv.lock file must be present in your service's root directory") and this
+# repo keeps uv.lock at the repo root while the package lives in backend/. Hence
+# `--app-dir backend` below.
+services:
+  - type: web
+    name: brett
+    runtime: python
+    region: oregon
+    # D-07: starts free, upgraded to `starter` in plan 02-07 BEFORE any Claude
+    # connector test. Free web services stop after 15 minutes idle and take
+    # ~1 minute to spin up; Claude's OAuth discovery timeout is 10 seconds, so a
+    # cold start presents as "Couldn't reach the MCP server" with no other clue.
+    plan: free
+    autoDeployTrigger: commit
+    # Unauthenticated on purpose so Render's platform health check reaches it.
+    healthCheckPath: /health
+    #
+    # PAID PLANS ONLY. `preDeployCommand` is "available for paid web services,
+    # private services, and background workers" -- on free there is also no
+    # shell and no one-off jobs, so there is NO server-side way to migrate.
+    # Until plan 02-07 flips `plan: starter`, migrations run from the developer
+    # machine against the database's EXTERNAL connection string.
+    # Uncomment this line in the same commit that sets `plan: starter`.
+    #
+    # preDeployCommand: cd backend && uv run python -m alembic upgrade head
+    buildCommand: uv sync --frozen
+    # `--app-dir backend` is required. pyproject.toml's `pythonpath = ["backend"]`
+    # lives under [tool.pytest.ini_options] and applies to pytest ONLY; without
+    # this flag uvicorn fails with `ModuleNotFoundError: No module named 'app'`.
+    startCommand: uv run uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: brett-db
+          property: connectionString
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      # Pin explicitly so the Render build and the developer machine agree.
+      - key: UV_VERSION
+        value: "0.12.5"
+      # Host allowlist for the MCP transport's DNS-rebinding guard. Must match
+      # the real hostname or every request returns `421 Invalid Host header`
+      # with no MCP-level error body. Comma-separated so a custom domain can be
+      # added here without a code change.
+      - key: MCP_ALLOWED_HOSTS
+        value: brett.onrender.com
+      # Must match, character for character, the URL typed into Claude's "Add
+      # custom connector" dialog and the Resource Indicator registered at the
+      # IdP. No trailing slash.
+      - key: MCP_RESOURCE_URL
+        value: https://brett.onrender.com/mcp
+      # `static` for the D-01 CLI proof; flipped to `authkit` in plan 02-07.
+      - key: MCP_AUTH_MODE
+        value: static
+      # Gitleaks triage: no credential is committed here. A `sync` flag of false
+      # means "prompt for this value in the dashboard"; the WorkOS AuthKit domain
+      # is a public hostname but is unknown until plan 02-06 creates the project.
+      - key: MCP_ISSUER_URL
+        sync: false
+      - key: MCP_JWKS_URI
+        sync: false
+      # Gitleaks triage: not a leak. `generateValue` makes Render mint the
+      # secret server-side, so it never touches a developer machine or this repo.
+      - key: MCP_AUTH_SECRET
+        generateValue: true
+
+databases:
+  - name: brett-db
+    # D-07: bumped to `basic-256mb` in plan 02-07. Free Postgres is capped at
+    # 1 GB, has no backups, and is DELETED 30 days after creation (14-day grace).
+    plan: free
+    databaseName: brett
