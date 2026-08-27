@@ -26,7 +26,7 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 - [ ] Remote MCP server exposing purpose-built, read-only tools (fitness_get_recent_workouts, fitness_get_training_summary, fitness_get_weekly_volume, fitness_get_muscle_group_volume, fitness_get_exercise_progression, fitness_get_personal_records, fitness_get_plateaus, fitness_get_training_frequency, fitness_get_body_weight_trend, fitness_compare_periods, etc.) returning compact structured JSON
 - [ ] MCP authentication via strong bearer token (env secret) + HTTPS + rate limiting; no secrets ever returned in tool responses
 - [ ] Data freshness surfaced per source (last_synced_at) so Claude knows when data may be stale
-- [ ] Deployed to Render over HTTPS, connected as a Claude custom remote MCP connector (Desktop/Web/Mobile)
+- [ ] Deployed to Google Cloud Run over HTTPS, connected as a Claude custom remote MCP connector (Desktop/Web/Mobile)
 - [ ] Claude fitness-coach system prompt/instructions document (separate doc) defining the body-recomposition coaching behavior and decision framework
 - [ ] Test coverage: Hevy sync (auth, pagination, incremental events, duplicates, deletions, failures), analytics calculations against known workouts, MCP tool schemas/auth/structured output, end-to-end mock-Hevy-to-MCP integration test
 
@@ -42,7 +42,7 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 
 - Source spec: [`BRETT blueprint.md`](../BRETT%20blueprint.md) in this repo — a detailed architecture/requirements document the user authored. Treat it as the authoritative reference for schema shapes, endpoint lists, MCP tool names, and phase ordering; this PROJECT.md scopes v1 to blueprint Phases 1–5 (backend foundation → Hevy → analytics → MCP → remote deployment).
 - Hevy Pro subscription and API key are already available — no blocker to starting Hevy integration work.
-- Render account is already set up and ready to deploy to.
+- Google Cloud account, gcloud SDK 578.0.0 and an open billing account are already set up; the BRETT-specific GCP project and the Neon Postgres project are created during Phase 2. The previously-provisioned Render account is unused.
 - User has an iPhone but no Apple Developer account yet — relevant when milestone 2 (HealthKit) is scoped; HealthKit does not work in the iOS Simulator, so real-device testing will be needed then.
 - Default user timezone is Asia/Jakarta (must be configurable, not hard-coded); daily fitness calculations should group by local day, with timestamps stored in UTC.
 - Internal units: kilograms, meters, kcal, seconds, centimeters — convert at the application boundary only.
@@ -55,7 +55,7 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 - **Security**: MCP tools read-only in v1; never expose API keys, DB credentials, or internal tokens through MCP responses or logs; HTTPS everywhere; secrets only via environment/secret storage, never committed
 - **Data integrity**: Hevy sync must be idempotent and must never corrupt existing data on partial/failed sync
 - **Provider isolation**: Hevy-specific logic confined to `backend/app/integrations/hevy/` so the API surface can change or a new provider can be added without spreading assumptions through the app
-- **Deployment**: Render for v1, but architecture should stay portable to another host later
+- **Deployment**: Google Cloud Run for v1 (supersedes Render as of 2026-08-27, revised D-06), with external managed Postgres (Neon) and Google Secret Manager; architecture stays portable to another host later
 
 ## Key Decisions
 
@@ -64,7 +64,8 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 | v1 = backend-first (blueprint Phases 1-5), iOS/HealthKit pushed to milestone 2 | No Apple Developer account yet; backend+Hevy+MCP alone already delivers real Claude coaching value | — Pending |
 | MCP auth = bearer token for v1, not OAuth | Matches blueprint's private-development guidance; simpler to ship, revisit for broader production use | — Pending |
 | Repo layout = flat at BRETT repo root, no `fitness-platform/` nesting | Project already lives at the root of this repo | — Pending |
-| Deploy target = Render | Account already provisioned; blueprint recommends it; architecture stays portable | — Pending |
+| ~~Deploy target = Render~~ | Account already provisioned; blueprint recommends it; architecture stays portable | — Superseded 2026-08-27 by the row below |
+| Deploy target = Google Cloud Run + Neon Postgres + Google Secret Manager | The original Cloud Run rejection (cost parity with a paid always-on tier, plus Cloud SQL provisioning surface) was re-presented on 2026-08-27 and the user chose to switch anyway. Neon replaces Cloud SQL, so the service needs only outbound egress and zero code change — `Settings.async_database_url` already translates the libpq DSN | — Pending Phase 2 |
 
 ## Evolution
 

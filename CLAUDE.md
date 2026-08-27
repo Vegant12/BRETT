@@ -14,7 +14,7 @@ A personal fitness data platform that normalizes Hevy workout data, Apple Health
 - **Security**: MCP tools read-only in v1; never expose API keys, DB credentials, or internal tokens through MCP responses or logs; HTTPS everywhere; secrets only via environment/secret storage, never committed
 - **Data integrity**: Hevy sync must be idempotent and must never corrupt existing data on partial/failed sync
 - **Provider isolation**: Hevy-specific logic confined to `backend/app/integrations/hevy/` so the API surface can change or a new provider can be added without spreading assumptions through the app
-- **Deployment**: Render for v1, but architecture should stay portable to another host later
+- **Deployment**: Google Cloud Run for v1 (revised 2026-08-27; see .planning/phases/02-deploy-connector-auth-spike/02-CONTEXT.md, D-06), but architecture should stay portable to another host later
 <!-- GSD:project-end -->
 
 <!-- GSD:stack-start source:research/STACK.md -->
@@ -110,6 +110,14 @@ A personal fitness data platform that normalizes Hevy workout data, Apple Health
 | Phase 5 — **fallback** | Claude connector | Managed IdP with DCR. Set `AuthSettings.issuer_url` to its issuer; keep `TokenVerifier` as a JWKS/introspection check | ~half a day of IdP setup |
 | Never | — | Token in the URL query string; hand-rolled OAuth AS; authless server | — |
 ## Deployment (Render)
+
+> **SUPERSEDED 2026-08-27.** The deploy target is Google Cloud Run, not Render. The rows below
+> stay accurate about Render and about the host-independent constraints (one service serving both
+> `/api` and `/mcp`; cold start versus Claude's 10-second discovery budget; migrations run
+> out-of-band rather than at app startup), but every Render-specific mechanism is replaced by
+> `scripts/deploy-cloud-run.sh` and the "RESEARCH ADDENDUM 2026-08-27: Cloud Run Deployment
+> Pivot" section of `.planning/phases/02-deploy-connector-auth-spike/02-RESEARCH.md`.
+
 | Concern | Recommendation | Confidence |
 |---|---|---|
 | Service shape | **One Web Service** serving both `/api/v1/*` and `/mcp`. Blueprint §45 allows this ("They may initially run in one application/service if that simplifies deployment") and it halves cost and removes cross-service DB config | HIGH |

@@ -74,9 +74,10 @@ class Settings(BaseSettings):
     # of the authorization server's own discovery document rather than assuming
     # a path -- RESEARCH assumption A1 is unverified.
     mcp_jwks_uri: str = ""
-    # Comma-separated so a Render custom domain can be added without a code
-    # change. Read via `mcp_allowed_hosts`. The env var is MCP_ALLOWED_HOSTS
-    # (not ..._RAW) because that is the name render.yaml sets.
+    # Comma-separated so a Cloud Run custom domain, or the second URL Cloud Run
+    # assigns, can be added without a code change. Read via `mcp_allowed_hosts`.
+    # The env var is MCP_ALLOWED_HOSTS (not ..._RAW) because that is the name
+    # deploy/cloud-run.env.yaml sets.
     mcp_allowed_hosts_raw: str = Field(
         default="localhost,127.0.0.1",
         validation_alias="MCP_ALLOWED_HOSTS",
@@ -120,8 +121,8 @@ class Settings(BaseSettings):
         an empty or whitespace-only entry would widen the allowlist by accident,
         so entries are stripped and empties dropped. With `transport_security`
         left at ``None`` the SDK silently allows only ``127.0.0.1``/``localhost``
-        and Render's real Host header returns ``421 Invalid Host header`` with no
-        MCP-level error body (T-02-01, RESEARCH Pitfall 2).
+        and the deployed service's real Host header returns ``421 Invalid Host
+        header`` with no MCP-level error body (T-02-01, RESEARCH Pitfall 2).
         """
         return [h.strip() for h in self.mcp_allowed_hosts_raw.split(",") if h.strip()]
 
