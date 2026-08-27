@@ -10,3 +10,11 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
+
+# Personal fitness/health data exports and scratch docs — not part of the repo
+activity_summary.csv
+export.xml
+export_cda.xml
+records.csv
+workouts.csv
+BRETT blueprint.md
