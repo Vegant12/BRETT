@@ -1,7 +1,8 @@
 # Phase 2: Deploy & Connector Auth Spike - Context
 
 **Gathered:** 2026-08-24
-**Status:** Ready for planning
+**Updated:** 2026-08-27 (deployment platform pivot: Render → Google Cloud Run)
+**Status:** Ready for planning — Waves 1-3 (02-01, 02-02, 02-04) already executed and unaffected; 02-03/02-05/02-07 need replanning for Cloud Run
 
 <domain>
 ## Phase Boundary
@@ -26,10 +27,24 @@ Resolve the project's single highest-uncertainty question — whether and how a 
 - **D-05:** Build the **real** `mcp/server.py` structure now, not a disposable script: `MCPServer` with lifespan-based `AppContext` wired to `app.state.engine`/`app.state.sessionmaker`, `TransportSecuritySettings(allowed_hosts=[...])` configured correctly from the start (CLAUDE.md flags the `421 Misdirected Request` default-reject as "the single most likely Phase-5 blocker"), mounted at `/mcp` inside the existing FastAPI app per the CLAUDE.md "FastAPI + MCP Integration Pattern".
 - Only the **one tool** registered on this server is throwaway — Phase 6 replaces it with the real tool set, but does not rebuild the mount/lifespan/security plumbing.
 
-### Render Commitment & Cost
-- **D-06:** Deployment platform is **Render**, not Google Cloud Run. Considered and rejected: Cloud Run reintroduces the same cold-start problem unless `min-instances=1` (costing about the same as Render Starter anyway), and needs separate Cloud SQL provisioning + a connector/proxy — more surface area while this phase is already resolving one hard unknown (auth). Render account is already provisioned per PROJECT.md.
-- **D-07:** Start on Render's **free** web-service tier + free Postgres. Upgrade to Starter tier + paid Postgres **before** testing against the actual Desktop/Web/Mobile connector (free tier's 30-60s cold start exceeds Claude's 10s OAuth discovery timeout and will masquerade as a broken server). The CLI-proof step (D-01) does not require the paid tier, so cost is deferred until it's actually load-bearing.
-  - **Trigger point for the upgrade:** once CLI-proof auth (D-01) is working and before attempting a real connector round-trip. Claude has discretion on exact timing within the plan, but the upgrade must happen before connector testing, not after a confusing failure.
+### Deployment Platform — REVISED 2026-08-27 (supersedes original D-06/D-07)
+- **D-06 (revised):** Deployment platform is **Google Cloud Run**, not Render. The original D-06 (2026-08-24) explicitly rejected Cloud Run for this exact reason: `min-instances=1` costs about the same as Render Starter, and Cloud SQL adds provisioning/connector surface area on top. That reasoning was put back in front of the user on 2026-08-27 and they chose to switch anyway — **plans must build the Cloud Run path, not silently re-litigate this**.
+- **D-06a:** No GCP project exists yet. Plan 02-05's equivalent (deploy checkpoint) needs a `checkpoint:human-action` gate for GCP project creation + billing account linkage, mirroring how the original 02-05 Task 1 gated on Render Blueprint creation.
+- **D-06b:** Database is **external managed Postgres via Neon**, not Cloud SQL. This keeps the simple "external connection string" pattern the Render plan already proved out — Cloud Run needs only outbound network access to Neon, no Cloud SQL Auth Proxy sidecar or Unix-socket wiring. Chosen specifically to minimize rework of the migration/auth-matrix logic already written against a plain `DATABASE_URL`.
+- **D-06c:** Container build via **`gcloud run deploy --source`** (Cloud Buildpacks) — no Dockerfile, closest analog to Render's zero-Dockerfile blueprint flow. Research/plan time must verify buildpacks handle `uv`/`uv.lock` correctly (mirrors the original RESEARCH.md's `uv.lock`-at-service-root concern for Render); if buildpacks can't, fall back to an explicit Dockerfile + Cloud Build (Claude's discretion if the buildpack path fails).
+- **D-06d:** Secrets (`MCP_AUTH_SECRET`, the Neon connection string, WorkOS issuer/JWKS values) live in **Google Secret Manager**, referenced by Cloud Run at deploy time — the GCP-native analog to Render's `generateValue: true` / `sync: false` policy. No secret value is ever written to a file in the repo, same rule as the original plan.
+- **D-06e:** The render.yaml-equivalent reproducibility artifact is a **checked-in deploy script** (e.g. `scripts/deploy-cloud-run.sh`) wrapping the full `gcloud run deploy` command and its flags — versioned, reviewable, and testable (a unit test can assert required flags/env vars are present), replacing `render.yaml` + `test_render_blueprint.py` as the thing a future developer reads to understand how this deploys.
+- **D-06f (cold start, replaces D-07):** Start Cloud Run at `min-instances=0`. Upgrade to `min-instances=1` **before** any real Desktop/Web/Mobile connector test — same trigger point as the original D-07 (after CLI-proof auth works, before the connector round-trip), because Claude's 10-second OAuth discovery timeout applies identically regardless of host.
+
+### Plans Requiring Rework (Render → Cloud Run pivot)
+- **02-03** (already executed/merged) — its deliverable (`render.yaml` + `test_render_blueprint.py`) is now a dead artifact for the chosen deploy target. Replace with the deploy-script + its test per D-06e. Default to deleting `render.yaml`/`test_render_blueprint.py` outright at plan time rather than leaving them as stale reference (Claude's discretion, but deletion is the recommended default — an unused Render blueprint sitting in the repo would mislead a future reader).
+- **02-05** — the Render dashboard walkthrough (Blueprint creation → hostname reconciliation → migration → Auth Verification Matrix → CLI proof) needs to become: GCP project creation checkpoint → Neon provisioning → `gcloud run deploy` → hostname/URL reconciliation → same Auth Verification Matrix (host-agnostic, the seven curl rows are unchanged) → same D-01 CLI-proof checkpoint. Task *structure* carries over; every Render-specific command inside it does not.
+- **02-07** — "upgrade Render tier" becomes "set Cloud Run `min-instances=1`" per D-06f. Same trigger point, same purpose (survive Claude's connector timeout), different mechanism.
+- **02-06** (WorkOS AuthKit + JWT verifier) — **unaffected**, host-agnostic as originally assessed.
+- **02-01, 02-02, 02-04** (already executed/merged: MCP SDK pin, MCP server package, FastAPI mount) — **unaffected**, none of this code has any Render dependency.
+
+### Downstream Doc Updates Required
+`.planning/PROJECT.md` (Key Decisions row + "Render account is already set up" note), `.planning/REQUIREMENTS.md` (DEPLOY-01 acceptance text currently reads "deployed to Render over HTTPS"), and `.planning/ROADMAP.md` (phase goal text, success criterion #1, plan descriptions) all still say "Render" — the planner/executor must update this language as part of re-planning, not leave it stale pointing at an abandoned target.
 
 ### Throwaway Tool Design
 - **D-08:** The one registered tool performs a **real DB round-trip** (e.g. `fitness_ping` running `SELECT 1` through `app.state.engine`), not a bare echo/no-op. This proves the lifespan-wired `AppContext` → DB-session pattern that every real Phase 6 tool will depend on, not just that the endpoint responds to a call.
@@ -38,7 +53,10 @@ Resolve the project's single highest-uncertainty question — whether and how a 
 - Exact tool name/response shape for the throwaway DB-ping tool, beyond "real SELECT 1 through the lifespan engine"
 - Exact `mcp/server.py` internal file layout (single file vs. small package) as long as it mirrors the CLAUDE.md pattern (lifespan → AppContext → tool reads `ctx.request_context.lifespan_context`)
 - Precise WorkOS configuration details (application setup, redirect URIs, JWKS endpoint wiring) — implementation detail of D-04
-- Exact Render upgrade trigger mechanics (manual dashboard change vs. `render.yaml` tier bump) as long as it happens before connector testing per D-07
+- Exact `min-instances=1` upgrade trigger mechanics (manual `gcloud run services update` vs. a flag in the deploy script) as long as it happens before connector testing per D-06f
+- Whether to delete or archive `render.yaml`/`test_render_blueprint.py` from the abandoned 02-03 deliverable (default: delete, per D-06e rationale)
+- GCP region choice (no functional requirement pins this — pick one, be consistent across Cloud Run + Secret Manager + billing)
+- Fallback to Dockerfile + Cloud Build if `gcloud run deploy --source` buildpacks can't handle `uv`/`uv.lock` cleanly (D-06c)
 
 </decisions>
 
@@ -63,9 +81,10 @@ Resolve the project's single highest-uncertainty question — whether and how a 
 - `BRETT blueprint.md` §46 "MCP Production Endpoint" — `/mcp` path convention; "do not assume a specific transport implementation without checking the current MCP SDK documentation"
 
 ### Deployment
-- `CLAUDE.md` §"Deployment (Render)" — full table: one Web Service for both `/api` and `/mcp` (D-06 confirms Render, single service already settled prior to this phase); free-tier cold-start and free-Postgres 30-day-deletion figures backing D-07; migrations via Render pre-deploy command, not app startup
-- `BRETT blueprint.md` §45 "Deployment" — Render target, may run as one service initially, required env vars (`DATABASE_URL`, `HEVY_API_KEY`, `MCP_AUTH_SECRET`, `JWT_SECRET`, `ENVIRONMENT`), never commit values
-- `BRETT blueprint.md` §47 "Claude Connection" — the manual verification steps this phase's success criteria are checked against (deploy → verify HTTPS → verify handshake/discovery → add custom connector in Claude → authenticate → enable)
+- `CLAUDE.md` §"Deployment (Render)" — **superseded by D-06 (revised) for the platform choice**, but the underlying constraints still apply on Cloud Run: one service for both `/api` and `/mcp`, cold-start-vs-cost tradeoff (now framed as `min-instances`), migrations run from the developer machine rather than a build hook (Cloud Run has no pre-deploy command either, same as Render free tier)
+- `BRETT blueprint.md` §45 "Deployment" — required env vars (`DATABASE_URL`, `HEVY_API_KEY`, `MCP_AUTH_SECRET`, `JWT_SECRET`, `ENVIRONMENT`) and "never commit values" still apply; "Render target" line is now stale per D-06 (revised) and should be corrected during re-planning
+- `BRETT blueprint.md` §47 "Claude Connection" — the manual verification steps this phase's success criteria are checked against (deploy → verify HTTPS → verify handshake/discovery → add custom connector in Claude → authenticate → enable) — host-agnostic, unaffected
+- **No canonical ref yet exists for Cloud Run + Buildpacks + Secret Manager + Neon deployment patterns.** This is new ground for the repo — 02-RESEARCH.md must be revised (not merely re-read) to cover: `gcloud run deploy --source` behavior with `uv`/`uv.lock`, Cloud Run's cold-start numbers vs. Claude's 10s timeout, Secret Manager reference syntax in `gcloud run deploy --set-secrets`, and Neon's external connection string format
 
 ### Requirements & roadmap
 - `.planning/ROADMAP.md` Phase 2 section — goal, 4 success criteria (Render live over HTTPS; connector discovers + calls throwaway tool from an actual Desktop/Web/Mobile client, not just a local test client; unauthenticated request rejected / authenticated succeeds against the deployed URL; auth mechanism chosen and recorded in PROJECT.md)
@@ -103,8 +122,9 @@ No further specific idea beyond the decisions above — this is an infrastructur
 ## Deferred Ideas
 
 - Emailing Anthropic for `static_headers` beta access — explicitly declined for this phase (D-02). Not lost, just not pursued now; if WorkOS/DCR setup hits a wall, revisit requesting beta access as an alternate path rather than assuming it's permanently off the table.
-- Cloud Run as a deployment platform — considered and explicitly rejected for this phase (D-06). The stack is already host-agnostic per CLAUDE.md ("uv + uvicorn + Postgres... Fly.io, Railway, and a $6 VPS all take it unchanged"), so this remains revisitable later without architectural rework, just not during this auth-focused phase.
 - Rate limiting on the MCP endpoint — blueprint §32 lists it as part of minimum private-dev auth, but it's not in this phase's ROADMAP.md success criteria or REQUIREMENTS.md (MCP-01/MCP-04/DEPLOY-01/DEPLOY-02); belongs with Phase 7 (Production Hardening).
+
+**Resolved, no longer deferred:** Cloud Run was originally rejected (2026-08-24, old D-06) and deferred as "revisitable later." It was revisited on 2026-08-27 — the user reviewed the original rejection reasoning and chose to switch anyway. See "Deployment Platform — REVISED 2026-08-27" above.
 
 </deferred>
 
