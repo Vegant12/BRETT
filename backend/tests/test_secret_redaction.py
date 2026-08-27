@@ -17,6 +17,7 @@ import pytest
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi.testclient import TestClient
+from starlette.routing import Mount
 
 from app.config import Settings, get_settings
 from app.logging import configure_logging
@@ -43,6 +44,20 @@ if not any(getattr(route, "path", None) == "/__test_boom__" for route in app.rou
     @app.get("/__test_boom__")
     async def _boom() -> None:
         raise ValueError(f"leaky {SEEDED}")
+
+    # Phase 2: `app/main.py` ends with `app.mount("/", mcp_app)`, a CATCH-ALL,
+    # and Starlette resolves routes in list order. Anything appended to the
+    # router after import therefore lands BEHIND it and is never reached -- the
+    # MCP sub-app answered `/__test_boom__` with its own 404 and the D-05
+    # handler under test was never exercised. Re-appending the mount puts it
+    # back to being the handler of last resort.
+    #
+    # Only this module is affected: nothing in production registers a route
+    # after import, which is exactly why `app/main.py` can register the mount
+    # last and be done with it.
+    for _mount in [route for route in app.router.routes if isinstance(route, Mount)]:
+        app.router.routes.remove(_mount)
+        app.router.routes.append(_mount)
 
 
 @pytest.fixture(autouse=True)

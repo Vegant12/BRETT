@@ -57,6 +57,25 @@ _TEST_MCP_ENV = {
     "MCP_ISSUER_URL": "https://example.authkit.app",
 }
 
+# Applied at MODULE scope, not from the fixture below, and that is load-bearing.
+# `test_secret_redaction.py` does `from app.main import app` at ITS module scope,
+# which runs during pytest's COLLECTION phase -- and collection finishes before
+# any session-scoped fixture is entered. `app.main` imports `app.mcp.server`,
+# which calls `build_token_verifier()` and `streamable_http_app()` at import, so
+# whichever module imports it first freezes the verifier's secret and the Host
+# allowlist for the entire session. Seed too late and the run dies at collection
+# with `RuntimeError: MCP_AUTH_SECRET is required to start the MCP server`; seed
+# only *some* of these and it dies more quietly, with every MCP request
+# returning `421 Invalid Host header` because `testserver` never made it into
+# `MCP_ALLOWED_HOSTS`. pytest imports a conftest before collecting the test
+# modules beside it, so this is the earliest available hook.
+#
+# `setdefault`, never assignment: a developer's real environment still wins,
+# matching `_default_database_url`'s intent.
+_PREEXISTING_MCP_ENV = {key: os.environ.get(key) for key in _TEST_MCP_ENV}
+for _key, _value in _TEST_MCP_ENV.items():
+    os.environ.setdefault(_key, _value)
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _default_database_url() -> Iterator[None]:
@@ -76,20 +95,21 @@ def _default_database_url() -> Iterator[None]:
 
 @pytest.fixture(scope="session", autouse=True)
 def _default_mcp_env() -> Iterator[None]:
-    """Seed the MCP settings the app needs at import time.
+    """Undo the module-scope MCP seeding when the session ends.
 
-    Mirrors `_default_database_url`: a developer's real environment wins, and
-    anything this fixture set is removed afterwards. `test_config.py` clears all
-    of these per-test via its own `_clean_env`, so seeding here does not weaken
-    the assertions on default values there.
+    Only the teardown half lives here. The seeding itself has to happen at
+    import time (see the block beside `_TEST_MCP_ENV`), because a fixture --
+    even a session-scoped autouse one -- runs strictly after collection, and
+    collection is when `app.mcp.server` is first imported and frozen.
+
+    Mirrors `_default_database_url` on the way out: anything a developer's real
+    environment already supplied is left exactly as found. `test_config.py`
+    clears all of these per-test via its own `_clean_env`, so seeding does not
+    weaken the assertions on default values there.
     """
-    preexisting = {k: os.environ.get(k) for k in _TEST_MCP_ENV}
-    for key, value in _TEST_MCP_ENV.items():
-        if preexisting[key] is None:
-            os.environ[key] = value
     yield
-    for key in _TEST_MCP_ENV:
-        if preexisting[key] is None:
+    for key, was_preexisting in _PREEXISTING_MCP_ENV.items():
+        if was_preexisting is None:
             os.environ.pop(key, None)
 
 
@@ -191,6 +211,23 @@ def client(postgres_url: str) -> Iterator[object]:
     from fastapi.testclient import TestClient
 
     from app.main import app
+    from app.mcp.server import mcp
+
+    # `StreamableHTTPSessionManager.run()` refuses a second call on the same
+    # instance ("can only be called once per instance. Create a new instance if
+    # you need to run again."), and the manager is built exactly once by
+    # `streamable_http_app()` at import time. Production honours that invariant
+    # for free -- one process, one lifespan -- but this fixture starts and stops
+    # the same in-process app once per test, so from the SECOND client-using
+    # test onward `lifespan` would raise before a single assertion ran.
+    #
+    # Clearing the one-shot flag is a TEST-ONLY concession, and it is a complete
+    # reset: `run()`'s own `finally` already restores `_task_group`,
+    # `_lifespan_state`, `_server_instances` and `_session_owners`, leaving this
+    # flag as the only state standing between the manager and a clean restart.
+    # Do NOT instead make `app/main.py` tolerate a repeat `run()` -- inside one
+    # process that really is a bug, and it should keep crashing.
+    mcp.session_manager._has_started = False
 
     engine = create_async_engine(postgres_url)
     try:
