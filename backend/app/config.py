@@ -15,7 +15,7 @@ Nothing here may ``print`` or log a settings value.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -56,6 +56,32 @@ class Settings(BaseSettings):
     hevy_api_key: SecretStr | None = None
     mcp_auth_secret: SecretStr | None = None
 
+    # MCP transport/auth configuration. NOT secrets: these are public hostnames
+    # and URLs that appear in the RFC 9728 metadata document Claude fetches
+    # anonymously. They must stay OUT of `_SECRET_FIELDS` -- adding a public
+    # hostname to the value scrubber would redact it from every log line and
+    # make the logs unreadable.
+    #
+    # `static` = constant-time compare against MCP_AUTH_SECRET (D-01 CLI proof).
+    # `authkit` = WorkOS AuthKit JWKS validation (D-03/D-04), landed in 02-06.
+    mcp_auth_mode: Literal["static", "authkit"] = "static"
+    mcp_issuer_url: str = "https://example.authkit.app"
+    # Must match, character for character, the URL the user types into Claude's
+    # "Add custom connector" dialog and the Resource Indicator registered in
+    # WorkOS. No trailing slash. (RESEARCH Pitfall 8.)
+    mcp_resource_url: str = "http://localhost:8000/mcp"
+    # Empty means "not yet discovered". Set explicitly from the `jwks_uri` field
+    # of the authorization server's own discovery document rather than assuming
+    # a path -- RESEARCH assumption A1 is unverified.
+    mcp_jwks_uri: str = ""
+    # Comma-separated so a Render custom domain can be added without a code
+    # change. Read via `mcp_allowed_hosts`. The env var is MCP_ALLOWED_HOSTS
+    # (not ..._RAW) because that is the name render.yaml sets.
+    mcp_allowed_hosts_raw: str = Field(
+        default="localhost,127.0.0.1",
+        validation_alias="MCP_ALLOWED_HOSTS",
+    )
+
     @field_validator("database_url")
     @classmethod
     def _validate_db_url(cls, v: SecretStr) -> SecretStr:
@@ -85,6 +111,19 @@ class Settings(BaseSettings):
             query["ssl"] = "require"
         query.pop("channel_binding", None)  # libpq-only
         return url.set(query=query).render_as_string(hide_password=False)
+
+    @property
+    def mcp_allowed_hosts(self) -> list[str]:
+        """Host header allowlist for the MCP transport's DNS-rebinding guard.
+
+        A list in the environment is a comma-separated string by necessity, and
+        an empty or whitespace-only entry would widen the allowlist by accident,
+        so entries are stripped and empties dropped. With `transport_security`
+        left at ``None`` the SDK silently allows only ``127.0.0.1``/``localhost``
+        and Render's real Host header returns ``421 Invalid Host header`` with no
+        MCP-level error body (T-02-01, RESEARCH Pitfall 2).
+        """
+        return [h.strip() for h in self.mcp_allowed_hosts_raw.split(",") if h.strip()]
 
     def secret_values(self) -> list[str]:
         """Every literal secret string the log scrubber must never emit.
