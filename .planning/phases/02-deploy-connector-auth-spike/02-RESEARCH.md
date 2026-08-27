@@ -1120,3 +1120,775 @@ Directives extracted from `./CLAUDE.md` that the plan must comply with:
 
 **Research date:** 2026-08-24
 **Valid until:** 2026-09-07 (14 days). `mcp` 2.0.0 shipped 2026-07-28 and is a fresh major; Claude connector auth (`static_headers` beta status, CIMD rollout) and WorkOS's MCP surface are all moving. Re-verify `mcp`'s latest version and re-read the connector auth page before Phase 6.
+
+---
+
+## RESEARCH ADDENDUM 2026-08-27: Cloud Run Deployment Pivot
+
+**Researched:** 2026-08-27
+**Domain:** Google Cloud Run source deploys (Cloud Buildpacks + uv) + Neon Postgres + Secret Manager
+**Confidence:** HIGH for build/deploy mechanics (verified against buildpack source and a live `gcloud` 578.0.0 install); HIGH for the app's Neon compatibility (verified by reading `backend/app/config.py`); MEDIUM for cold-start figures and Neon dashboard specifics (no tenant to probe).
+
+**Status:** *Additive.* Everything above this line about the MCP SDK, the mount pattern, the auth verification matrix, WorkOS/CIMD/DCR, and the throwaway tool is **unchanged and still correct** — none of it has a host dependency. This addendum replaces only the Render-specific material.
+
+| Section above | Status after the pivot |
+|---|---|
+| `## Standard Stack`, `## Architecture Patterns` (Patterns 1-5), `## Don't Hand-Roll` | **Unchanged** |
+| `## Common Pitfalls` 1, 3, 4, 5, 8, 9 | **Unchanged** |
+| Pitfall 2 (`421 Invalid Host header`) | **Still applies** — the hostname changes, the mechanism does not (see D-CR-04) |
+| Pitfall 6 (free tier cannot run migrations) | **Superseded** by Q7 — same conclusion, different reason |
+| Pitfall 7 (`uv.lock` at service root) | **Superseded** by Q1 — same underlying `--app-dir backend` requirement, enforced differently |
+| Pitfall 10 (free-tier cold start) | **Superseded** by Q4 |
+| `## Render Deployment` (render.yaml, Python/uv pinning, Free→Starter checklist) | **Dead.** Replaced by Q1/Q5/Q6 |
+| `## Auth Verification Matrix` | **Unchanged** — all 7 rows are host-agnostic; only `HOST=` changes |
+| `## Environment Availability` | **Extended** by section A below |
+| `## Validation Architecture` | **One row changes** (DEPLOY-01) — see Q5 |
+
+---
+
+## A. Environment Availability — Cloud Run edition
+
+Probed on the development machine, 2026-08-27. **This materially changes D-06a's premise.**
+
+| Dependency | Required by | Available | Detail |
+|---|---|---|---|
+| `gcloud` CLI | Every deploy step | ✓ | **Google Cloud SDK 578.0.0**, core `2026.07.24` `[VERIFIED: gcloud version]` |
+| `gcloud` authenticated account | All of the above | ✓ | `hovegant12@gmail.com` is the active credentialed account `[VERIFIED: gcloud auth list]` |
+| Active `core/project` | `gcloud run deploy` | ⚠️ | Currently `idx-yfinance-mcp-1785725283` — **an unrelated project.** The deploy script must set `--project` explicitly rather than inherit this `[VERIFIED: gcloud config list]` |
+| Billing account | Cloud Run + Neon paid tiers | ✓ | Two exist; **`01E8E3-6C54F5-D6B9B6` ("My Billing Account 1") is OPEN**. `01438D-49BD0E-61F138` is closed `[VERIFIED: gcloud billing accounts list]` |
+| GCP projects | D-06a | ✓ (7 exist) | `angular-spider-306613`, `gen-lang-client-0735153694`, `gen-lang-client-0921756352`, `gen-lang-client-0928434030`, `habit-tracker-app-441414`, `idx-yfinance-mcp-1785725283`, `propertypulse-490701` `[VERIFIED: gcloud projects list]` |
+| Neon account | D-06b | **Unknown — not probed** | Human checkpoint, same shape as the WorkOS checkpoint in 02-06 |
+| `psql` | Inspecting Neon | ✓ | 18.6 |
+| `uv` | Local dep management | ✓ | 0.12.1 local (0.12.5 is latest) |
+| Docker daemon | `-m integration` tests | ✗ (client 29.4.2 installed, daemon down) | Unchanged from the 2026-08-24 probe |
+| `pack` CLI | Local buildpack reproduction | ✗ | Optional. `gcloud run deploy --source` needs no local builder |
+
+> **D-06a correction for the planner.** D-06a states *"No GCP project exists yet."* That is true for a *BRETT-specific* project, but the account, the CLI, and an **open billing account already exist**, and seven other projects are already linked. The human checkpoint therefore shrinks from *"create a Google Cloud account and a billing account"* to *"decide the project ID and confirm this billing account may be charged."* Every remaining step is scriptable (Q6). `[VERIFIED]`
+
+---
+
+## Q1. `gcloud run deploy --source` + Cloud Buildpacks + uv/uv.lock
+
+**Answer: yes, buildpacks handle `uv`/`uv.lock` natively — but this repo will fail to build without a `Procfile`.** Both halves are source-verified.
+
+### Q1.1 — uv detection and the exact install command
+
+Read from `GoogleCloudPlatform/buildpacks` at `main` `[VERIFIED: source read, 2026-08-27]`:
+
+`pkg/python/pyproject.go :: IsUVPyproject()` opts the uv buildpack in when **`pyproject.toml` and `uv.lock` both exist at the source root** and `requirements.txt` does **not**:
+
+```go
+if isBothPyprojectAndRequirementsPresent(ctx) {
+    return false, "... prefer requirements.txt"      // requirements.txt WINS
+}
+if uvLockExists { return true, "found pyproject.toml and uv.lock" }
+```
+
+`pkg/python/pyproject.go :: UVInstallDependenciesAndConfigureEnv()` then runs, verbatim:
+
+```
+uv venv <layer>/.venv --clear --python <resolved-version>
+uv sync --active --link-mode=copy --python <resolved-version>      # VIRTUAL_ENV=<layer>/.venv
+uv pip check                                                        # hard-fails the build on conflicts
+```
+
+and prepends `<layer>/.venv/bin` to `PATH` in the layer's **shared** environment (build *and* launch), so `uvicorn` is directly on `PATH` at runtime — **`uv run` is not needed in the entrypoint.** `[VERIFIED: pyproject.go lines 317-360]`
+
+Four consequences the plan must act on:
+
+| # | Finding | Impact | Action |
+|---|---|---|---|
+| a | **No `--frozen` / `--locked`.** Plain `uv sync` re-locks if `uv.lock` is stale relative to `pyproject.toml`, and `EnsureUVLockfile()` runs `uv lock` outright if the lockfile is missing | Silent loss of build reproducibility — the Render plan's `uv sync --frozen` guarantee is gone | Set build env var `UV_FROZEN=1` (uv's documented env alias for `--frozen` `[VERIFIED: uv sync --help]`) |
+| b | **No `--no-dev`.** uv's `default-groups` defaults to `["dev"]`, so the `[dependency-groups] dev` block ships to production | `uv sync --frozen` installs **32 extra packages** on top of the 41 production ones — pytest, coverage, mypy, ruff, pre-commit, testcontainers, docker `[VERIFIED: uv sync --frozen --dry-run` in this repo] — image bloat plus a needless supply-chain surface in a health-data service | Either `[tool.uv] default-groups = []` in `pyproject.toml` (**recommended**, see below) or build env var `UV_NO_DEV=1` |
+| c | `uv pip check` gates the build | A resolver conflict fails the deploy with `found incompatible dependencies` | **Already clean:** `uv sync --frozen --no-dev` → 41 packages, `uv pip check` → *"All installed packages are compatible"* `[VERIFIED: run locally 2026-08-27]` |
+| d | Python version resolution is `GOOGLE_PYTHON_VERSION` → **`.python-version` file** → per-stack default (`3.13.*` on Ubuntu 22.04, **`3.14.*` on Ubuntu 24.04**) | Same trap as Render's 3.14.3 default | **Already safe:** this repo has `.python-version` = `3.13` and `requires-python = ">=3.13,<3.14"`, so an accidental 3.14 build fails loudly at `uv sync` `[VERIFIED: python.go lines 79-83, 114-145 + repo files]` |
+
+**Verified fix for (b):**
+
+```toml
+[tool.uv]
+default-groups = []
+```
+
+`[VERIFIED: reproduced in a scratch project with uv 0.12.1 — plain `uv sync --frozen` installs nothing extra; `uv sync --frozen --group dev` installs the dev group]`. The cost is that local/CI invocations become `uv sync --group dev` (or `--all-groups`); that is a one-line change in the contributor docs and any CI file, and unlike a build env var it is **checked in and testable**.
+
+**Does a build env var actually reach `uv sync`?** Yes. `pkg/gcpbuildpack/exec.go:210` reads `ecmd.Env = append(append(ecmd.Env, os.Environ()...), params.env...)`, and the `uv sync` call passes `gcp.WithEnv("VIRTUAL_ENV=...")`, so the whole build-container environment is inherited `[VERIFIED: source read]`. Whether gcloud's `--set-build-env-vars` accepts non-`GOOGLE_`-prefixed keys is `[ASSUMED]` (see A-CR-1) — which is why the `pyproject.toml` route is the primary recommendation and `UV_NO_DEV`/`UV_FROZEN` are belt-and-braces.
+
+**Optional: pin the build's uv version.** `RequestedUVVersion()` reads `[tool.uv] required-version` from `pyproject.toml` and passes it straight to `pip install uv<constraint>` `[VERIFIED: pyproject.go lines 227-279]`. This is the exact analog of Render's `UV_VERSION` env var. Caveat: uv *itself* enforces `required-version` locally too, and the dev machine has 0.12.1 — so `">=0.12.1"` works everywhere while `"==0.12.5"` would break local `uv` until it is upgraded.
+
+### Q1.2 — **The blocker: a `Procfile` is mandatory for this repo**
+
+The GCP base builder's Python order groups come in two tiers `[VERIFIED: builders/gcp/base/builder.toml]`:
+
+```toml
+# "Python 1/2" — UV order group           # "Python 2/2" — UV order group
+google.python.runtime                     google.python.runtime
+google.python.uv                          google.python.webserver  (optional)
+google.config.entrypoint     <-- REQUIRED google.python.uv
+google.utils.label-image                  google.python.missing-entrypoint  <-- REQUIRED
+                                          google.utils.label-image
+```
+
+CNB picks the **first** order group whose required members all pass detect.
+
+- `google.config.entrypoint.DetectFn` opts in **only** if `GOOGLE_ENTRYPOINT` is set, a `Procfile` exists, or an `app.yaml` entrypoint exists — otherwise it opts out and tier 1 fails `[VERIFIED: cmd/config/entrypoint/lib/lib.go]`.
+- Falling through to tier 2, `google.python.missing-entrypoint.BuildFn` runs. For **this repo** — no `main.py` or `app.py` at the source root (the app is `backend/app/main.py`), `pyproject.toml` present, no `[project.scripts]`, and Python 3.13 so the "smart default entrypoint" path (gated on `>= 3.14`) is off — it takes this branch:
+
+```go
+} else if !hasMain && !hasApp && !adkPresent {
+    return gcp.UserErrorf("for Python with pyproject.toml, provide a main.py or app.py file "+
+        "or a script command in pyproject.toml or set an entrypoint with %q env var "+
+        "or by creating a %q file", env.Entrypoint, "Procfile")
+}
+```
+
+`[VERIFIED: cmd/python/missing_entrypoint/lib/lib.go]`
+
+**So `gcloud run deploy --source .` fails today with a clear-but-fatal error.** The fix is a two-line file at the repo root:
+
+```
+# Procfile  (repo root, committed)
+web: uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port $PORT
+```
+
+Three details that make this correct rather than merely plausible:
+
+1. **`$PORT` expands.** `ctx.AddProcess` wraps every process as `bash -c "<command>"` `[VERIFIED: pkg/gcpbuildpack/gcpbuildpack.go:504-514]`, and Cloud Run injects `PORT` (default `8080`) `[CITED: cloud.google.com/run/docs/container-contract]`.
+2. **`--app-dir backend` is still load-bearing.** `uv.lock` records the root project as `source = { virtual = "." }` `[VERIFIED: uv.lock:133]`, so `uv sync` installs *dependencies only* and never puts `backend/` on `sys.path`. This is the identical constraint the existing `test_render_blueprint.py::test_start_command_points_at_the_backend_package` guards — carry that assertion over verbatim.
+3. **`--host 0.0.0.0` is required**, not stylistic: *"the ingress container should not listen on `127.0.0.1`"* `[CITED: cloud.google.com/run/docs/container-contract]`.
+
+`Procfile` is also strictly better than `GOOGLE_ENTRYPOINT` here: it is checked in, reviewable, and testable (Q5), and it avoids having to escape `$PORT` through the deploy shell.
+
+### Q1.3 — Fallback if buildpacks misbehave (D-06c's escape hatch)
+
+The fallback is unusually cheap, because `--source` already prefers a Dockerfile:
+
+> *"If a Dockerfile is present in the source code directory, it will be built using that Dockerfile, otherwise it will use Google Cloud buildpacks."* `[VERIFIED: gcloud run deploy --help, --source flag]`
+
+So **the fallback is "add a `Dockerfile`", with the deploy command unchanged.** A minimal one:
+
+```dockerfile
+FROM python:3.13-slim
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --frozen --no-dev --no-install-project
+COPY backend/ ./backend/
+ENV PATH="/app/.venv/bin:$PATH"
+CMD exec uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port ${PORT:-8080}
+```
+
+Explicit two-step (only needed if the plan wants to inspect or reuse the image):
+
+```bash
+gcloud builds submit --project="$PROJECT_ID" \
+  --tag "$REGION-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/brett:$(git rev-parse --short HEAD)" .
+gcloud run deploy brett --project="$PROJECT_ID" --region="$REGION" \
+  --image "$REGION-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/brett:$(git rev-parse --short HEAD)" ...
+```
+
+**Recommendation: take the buildpack path.** The only real gap it has (entrypoint) is closed by a two-line `Procfile`, and the Dockerfile route would put dependency-install semantics in a file nobody re-reads. Keep the Dockerfile drafted in the plan as a documented fallback, per D-06c, but do not ship it pre-emptively — a `Dockerfile` in the repo **silently overrides** buildpacks, which is a nasty surprise if it is added "just in case" and then drifts.
+
+### Q1.4 — `.gcloudignore` is not optional here
+
+`--source .` uploads the source directory to Cloud Storage. This repo root currently holds:
+
+| Path | Size | Gitignored? |
+|---|---|---|
+| `export.xml` (Apple Health export) | **182 MB** | yes |
+| `records.csv` | **131 MB** | yes |
+| `.venv/` | **177 MB** | yes |
+| `.git/` | 2.7 MB | n/a |
+| **repo total** | **515 MB** | |
+
+`[VERIFIED: du -sh, 2026-08-27]`
+
+Today gcloud saves us by accident: *"If a `.gcloudignore` file is absent and a `.gitignore` file is present ... gcloud will use a generated Git-compatible `.gcloudignore`"* `[VERIFIED: gcloud run deploy --help]`. That safety net **disappears the moment anyone adds a `.gcloudignore` for any other reason** — after which every deploy uploads ~490 MB of personal health data to a Cloud Storage bucket. Commit an explicit one:
+
+```
+# .gcloudignore  (repo root)
+.git/
+.gitignore
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.DS_Store
+# Personal health-data exports — must never reach a build bucket
+export.xml
+export_cda.xml
+records.csv
+workouts.csv
+activity_summary.csv
+BRETT blueprint.md
+.planning/
+```
+
+> Note it does **not** exclude `backend/`, `pyproject.toml`, `uv.lock`, `.python-version`, or `Procfile` — all five must reach the builder.
+
+**Confidence: HIGH** for Q1 throughout — every claim is either read out of the buildpack source at `main` or executed locally today.
+
+---
+
+## Q2. Neon Postgres from Cloud Run (D-06b)
+
+### Q2.1 — No special networking. Confirmed.
+
+Neon is reached over the public internet on TCP 5432 with TLS. Cloud Run gives every instance unrestricted **egress** by default; a Serverless VPC Access connector is required only for reaching *private* IPs (VPC-internal resources, Cloud SQL over private IP). **No `--vpc-connector`, no `--network`/`--subnet`, no Cloud SQL Auth Proxy sidecar, no `--add-cloudsql-instances`.** The deploy command is correspondingly shorter than a Cloud SQL one. `[CITED: cloud.google.com/run/docs/configuring/connecting-vpc — VPC access is for private-IP destinations]`, `[VERIFIED: no networking flags are required in `gcloud run deploy --help`'s minimal form]`
+
+This is exactly the property D-06b was chosen for, and it holds.
+
+### Q2.2 — Connection string format
+
+`[CITED: neon.com/docs/connect/connect-from-any-app]` and `[CITED: neon.com/docs/connect/connection-pooling]`:
+
+| Variant | Host | Example |
+|---|---|---|
+| **Pooled** (default in the console) | `-pooler` suffix | `postgresql://USER:PW@ep-cool-darkness-a1b2c3d4-pooler.us-east-2.aws.neon.tech/brett?sslmode=require&channel_binding=require` |
+| **Direct / unpooled** | no suffix | `postgresql://USER:PW@ep-cool-darkness-a1b2c3d4.us-east-2.aws.neon.tech/brett?sslmode=require&channel_binding=require` |
+
+Both carry `?sslmode=require&channel_binding=require`. Neon mandates TLS.
+
+### Q2.3 — **The libpq-parameter trap is already solved in this repo**
+
+`asyncpg.connect()` has no `sslmode` parameter and no `**kwargs`; `channel_binding` is likewise libpq-only. Passing Neon's DSN through unchanged raises at connect time. **`backend/app/config.py::Settings.async_database_url` already translates it:**
+
+```python
+sslmode = query.pop("sslmode", None)
+if sslmode in _SSL_REQUIRING_MODES and "ssl" not in query:
+    query["ssl"] = "require"
+query.pop("channel_binding", None)  # libpq-only
+```
+
+`[VERIFIED: read backend/app/config.py, 2026-08-27]`
+
+**So Neon's connection string can be pasted into `DATABASE_URL` verbatim, with zero code change.** This is the single strongest argument that D-06b's "minimise rework" rationale was correct — the translation layer was written for Render's libpq-flavoured URL and covers Neon exactly.
+
+Two further pre-existing defences that matter more on Neon than they did on Render:
+
+- `make_engine(...)` sets **`pool_pre_ping=True`** with the comment *"A spun-down or restarted managed Postgres silently kills idle connections"* `[VERIFIED: backend/app/db/session.py]`. Neon's compute suspends after 5 minutes idle on the Free plan and **cannot be disabled there** `[CITED: neon.com/docs/introduction/plans]`, which kills every pooled connection. Pre-ping is what turns that from a 500 into a transparent reconnect.
+- `migrations/env.py` uses `NullPool` `[VERIFIED: docstring]` — correct for a short-lived migration process against a serverless compute.
+
+### Q2.4 — Pooled or direct for the app?
+
+| | Pooled (`-pooler`) | Direct |
+|---|---|---|
+| Backing | PgBouncer, `pool_mode = transaction`, `max_client_conn = 10000`, `default_pool_size = 0.9 × max_connections` `[CITED: neon.com/docs/connect/connection-pooling]` | Postgres directly; `max_connections` = **104** at 0.25 CU `[CITED: same]` |
+| asyncpg prepared statements | Supported — Neon runs PgBouncer ≥1.21 with protocol-level prepared statement support `[CITED: neon.com/blog/pgbouncer-the-one-with-prepared-statements]`. SQL-level `PREPARE`/`EXECUTE` is not | Fully supported |
+| Session state (`SET`, `LISTEN/NOTIFY`, temp tables, advisory locks) | Not usable | Usable |
+| Neon's own guidance for migrations | Do **not** use | **Use this** |
+
+**Recommendation for v1: direct/unpooled for the Cloud Run service, direct/unpooled for Alembic.**
+
+Rationale: a Cloud Run instance is a long-lived process with SQLAlchemy's own `QueuePool` (`pool_size=5, max_overflow=5` → 10 connections max per instance), not a connection-per-request Lambda. Bounding `--max-instances` bounds total connections deterministically — at `--max=4` the worst case is 40 of 104. That keeps PgBouncer's transaction-mode semantics entirely out of the picture for a system that has exactly one user. Revisit only if instance count ever needs to exceed ~8.
+
+**If the planner prefers pooled anyway** (it is a defensible choice), the one-line hedge is a query parameter, which `async_database_url` preserves untouched and SQLAlchemy's asyncpg dialect consumes as a dialect kwarg:
+
+```
+...-pooler.<region>.aws.neon.tech/brett?sslmode=require&channel_binding=require&prepared_statement_cache_size=0
+```
+
+`[VERIFIED: sqlalchemy/dialects/postgresql/asyncpg.py:1160 — `util.coerce_kw_type(opts, "prepared_statement_cache_size", int)` in `create_connect_args`, documented at lines 78-94]`
+
+### Q2.5 — Neon Free plan facts worth putting in the plan
+
+`[CITED: neon.com/docs/introduction/plans]`
+
+| Limit | Value | Comment |
+|---|---|---|
+| Storage | 0.5 GB / project | Ample for years of Hevy sets |
+| Compute | 100 CU-hours / month | At the 0.25 CU minimum that is 400 wall-clock hours of *active* compute |
+| Scale-to-zero | after **5 min** idle, **cannot be disabled on Free** | The wake-up is the first-query latency, ~300-500 ms typical `[MEDIUM: third-party measurements]` |
+| Projects | 100 | |
+| **Data retention** | *"None of these limits delete your data"* | **Strictly better than Render's free Postgres**, which is deleted 30 days after creation. Old Assumption A5 and old Pitfall 6's data-loss concern are both retired |
+
+**Idle-connection interaction (checked, and it is fine):** Neon's scale-to-zero *"works even if clients are connected"* — suspension is triggered by absence of query activity, not absence of connections, though an `idle-in-transaction` connection is deliberately treated as active `[CITED: neon.com/docs/introduction/scale-to-zero]`. So a Cloud Run instance held warm by `--min=1` with 5 idle pooled connections will **not** burn CU-hours, and `pool_pre_ping` absorbs the connection kill on the next request. Do **not** add a keep-alive `SELECT 1` — it would convert a free database into a 180 CU-hour/month one.
+
+**Confidence: HIGH** for the code-compatibility findings (read from this repo); **MEDIUM** for the Neon plan limits (vendor docs, no tenant probed).
+
+---
+
+## Q3. Google Secret Manager + Cloud Run (D-06d)
+
+### Q3.1 — Exact syntax
+
+`--set-secrets` maps `ENV_VAR=SECRET_NAME:VERSION`, comma-separated. **It removes every existing secret binding first**, so the deploy script must always list the complete set. `[VERIFIED: gcloud run deploy --help — "List of key-value pairs to set as secrets. All existing secrets will be removed first."]`
+
+```bash
+# 1. Create the secrets (once). Note `printf`, not `echo` — echo appends \n,
+#    which becomes part of the secret value and silently breaks compare_digest.
+printf '%s' "$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')" \
+  | gcloud secrets create brett-mcp-auth-secret --project="$PROJECT_ID" --data-file=-
+
+printf '%s' "$NEON_DIRECT_URL" \
+  | gcloud secrets create brett-database-url --project="$PROJECT_ID" --data-file=-
+
+# 2. Rotate later (never `create` twice — it errors)
+printf '%s' "$NEW_VALUE" | gcloud secrets versions add brett-database-url --data-file=-
+
+# 3. Bind at deploy time
+gcloud run deploy brett ... \
+  --set-secrets="MCP_AUTH_SECRET=brett-mcp-auth-secret:latest,DATABASE_URL=brett-database-url:latest"
+```
+
+`[VERIFIED: gcloud secrets create --help, gcloud secrets versions add --help, both from SDK 578.0.0]`
+
+Cross-project form, if it is ever needed: `ENV_VAR=projects/PROJECT_NUMBER/secrets/NAME:VERSION` `[CITED: cloud.google.com/run/docs/configuring/services/secrets]`. Not needed here.
+
+### Q3.2 — IAM: yes, an explicit grant is required
+
+The Cloud Run **runtime** service account needs `roles/secretmanager.secretAccessor`. By default that account is the Compute Engine default SA (`PROJECT_NUMBER-compute@developer.gserviceaccount.com`), which is *not* granted the role automatically. `[CITED: cloud.google.com/run/docs/configuring/services/secrets]`
+
+Given CLAUDE.md's *"never expose API keys, DB credentials, or internal tokens"* constraint, **create a dedicated runtime service account** rather than reusing the broad Compute Engine default (which typically also carries `roles/editor`):
+
+```bash
+gcloud iam service-accounts create brett-run \
+  --project="$PROJECT_ID" --display-name="BRETT Cloud Run runtime"
+
+RUNTIME_SA="brett-run@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# Grant per-secret, not project-wide — least privilege.
+for S in brett-mcp-auth-secret brett-database-url; do
+  gcloud secrets add-iam-policy-binding "$S" --project="$PROJECT_ID" \
+    --member="serviceAccount:${RUNTIME_SA}" \
+    --role="roles/secretmanager.secretAccessor"
+done
+
+# The deploying human needs this to attach the SA to the service.
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+  --project="$PROJECT_ID" \
+  --member="user:$(gcloud config get-value account)" \
+  --role="roles/iam.serviceAccountUser"
+```
+
+then `gcloud run deploy ... --service-account="$RUNTIME_SA"`.
+
+### Q3.3 — Which values are actually secrets
+
+D-06d names *"`MCP_AUTH_SECRET`, the Neon connection string, WorkOS issuer/JWKS values"*. Flagging a tension for the planner rather than re-deciding it:
+
+| Value | Genuinely secret? | Note |
+|---|---|---|
+| `MCP_AUTH_SECRET` | **yes** | In `_SECRET_FIELDS`; feeds the log scrubber |
+| `DATABASE_URL` | **yes** | In `_SECRET_FIELDS`; contains the Neon password |
+| `MCP_ISSUER_URL`, `MCP_JWKS_URI` | **no** | `config.py` documents these as *"public hostnames and URLs that appear in the RFC 9728 metadata document Claude fetches anonymously"* and explicitly keeps them **out** of `_SECRET_FIELDS`, because adding a public hostname to the value scrubber would redact it from every log line `[VERIFIED: backend/app/config.py]` |
+| WorkOS client secret | **n/a** | The Stage-B design is a pure resource server validating JWTs against JWKS. No client secret exists (Pattern 5 above) |
+
+Secret Manager works perfectly well for non-secret values, so honouring D-06d literally costs nothing but friction. The mechanical constraint that *does* matter: **a key may not appear in both `--set-secrets` and the env-var source** — Cloud Run rejects a deploy where one name is bound twice. Whichever way the planner goes, the deploy artifacts must partition the key set cleanly, and the Q5 test should assert that partition.
+
+**Confidence: HIGH** (gcloud help read locally; IAM role name confirmed against Google's docs).
+
+---
+
+## Q4. Cold start (D-06f)
+
+### Q4.1 — Is Cloud Run at `min=0` materially better than Render free?
+
+**Yes, by roughly an order of magnitude — but not enough to skip D-06f.**
+
+| | Render free | Cloud Run `min=0` |
+|---|---|---|
+| Idle-to-stop | 15 min `[CITED: render.com/docs/free]` | Instance may be reclaimed at any point after the last request |
+| Restart cost | **~60 s** (`"about one minute"`) `[CITED: render.com/docs/free]` | image pull (streamed, usually near-zero when node-cached) + container start + app import |
+| Measured app-side contribution | — | **~2.5 s** cold-filesystem `import app.main`; **~0.45 s** warm `[VERIFIED: `/usr/bin/time` and `-X importtime` on the production-only venv, 2026-08-27]` |
+| Realistic total | ~60 s | **~3-5 s** `[MEDIUM: app import measured; sandbox/image-pull figures are third-party, 0.5-2 s typical for Python]` |
+| Claude's discovery budget | **10 s** (30 s for refresh) `[CITED: claude.com/docs/connectors/building/authentication]` | same |
+
+Import breakdown, for anyone tempted to optimise: of the ~515 ms warm import, `app.mcp.server` accounts for ~250 ms (almost all of it `import mcp`) and `fastapi` ~105 ms `[VERIFIED: -X importtime]`. There is nothing worth lazy-loading here — the MCP server object *must* exist at import time (Pattern 5), and 0.5 s warm is not the problem.
+
+So Cloud Run at `min=0` would probably squeak under Claude's 10 s budget where Render free provably could not. **That is not a reason to skip the upgrade.** The 10 s ceiling applies to discovery, registration *and* token endpoints, a cold start lands squarely in the 3-5 s range with real variance above it, and a marginal pass presents as the same undiagnosable *"Couldn't reach the MCP server"*. D-06f's trigger point — flip before the first real connector round-trip — is correct and should be followed as written.
+
+### Q4.2 — Does `min-instances=1` actually eliminate it?
+
+Close, with an honest caveat Google states directly:
+
+> minimum instances are *"a best-effort target to keep instances warm and ready"*; residual risks are infrastructure rebalancing, application crashes, and capacity exhaustion. `[CITED: cloud.google.com/run/docs/configuring/min-instances]`
+
+For a one-user personal service that is a non-issue: the warm instance keeps the Python process, every import, and the SQLAlchemy pool alive, so the connector round-trip pays neither the 2.5 s import nor a TCP/TLS handshake to Neon. What it does *not* remove is Neon's own 5-minute autosuspend wake (~0.3-0.5 s) on the first query after idle — irrelevant to the 10 s discovery probe, which never touches the database, and comfortably inside a tool-call timeout.
+
+### Q4.3 — The exact flag: use `--min`, not `--min-instances`
+
+This distinction is new-ish and matters for D-06f's "Claude's discretion on upgrade mechanics":
+
+| Flag | Scope | Behaviour |
+|---|---|---|
+| `--min=MIN` | **Service** | *"divided among all Revisions receiving a percentage of traffic and **can be modified without deploying a new Revision**"* |
+| `--min-instances=MIN` | **Revision** | *"immutably set on each new Revision and modifying its value will deploy another Revision. Consider using `--min` ..."* |
+
+`[VERIFIED: gcloud run deploy --help, SDK 578.0.0 — gcloud's own help text steers you to `--min`]`
+
+Therefore:
+
+```bash
+# Deploy-time default (D-06f start state)
+gcloud run deploy brett --project="$PROJECT_ID" --region="$REGION" --source=. --min=0 ...
+
+# The D-06f upgrade — no rebuild, no new revision, takes effect in seconds
+gcloud run services update brett --project="$PROJECT_ID" --region="$REGION" --min=1
+
+# Revert after the connector test if cost matters
+gcloud run services update brett --project="$PROJECT_ID" --region="$REGION" --min=0
+```
+
+Because `--min` is revision-independent, the cleanest shape for the deploy script is to read it from an env var (`BRETT_MIN_INSTANCES`, default `0`) *and* to have plan 02-07's equivalent flip it with `services update` — the two are consistent, and the flip is instant and reversible. That fully satisfies the discretion item in CONTEXT.md.
+
+**Also set `--cpu-boost`** (*"allocate extra CPU to containers on startup to reduce the perceived latency of a cold start"*, already default-on for new services `[VERIFIED: gcloud run deploy --help]`) and **cap `--max`** — see Q2.4.
+
+**Startup probe — do not point it at `/health`.** Cloud Run's default startup probe is TCP on the container port, and the deploy waits for it (`--deploy-health-check` on by default). `/health` performs a live `SELECT 1`, so an HTTP startup probe against it would make every deploy's success depend on Neon being awake, which is a slow and needless coupling. Keep the default TCP probe. The Render `healthCheckPath: /health` assertion in `test_render_blueprint.py` has **no Cloud Run analog** and should be dropped rather than translated.
+
+**Confidence: HIGH** on the flag semantics (read from the installed CLI) and on Claude's 10 s budget (Anthropic docs); **MEDIUM** on the absolute cold-start figure (app import measured locally; platform overhead is third-party).
+
+---
+
+## Q5. Reproducibility artifact + its test (D-06e)
+
+### Q5.1 — Shape: script + a **YAML** config file, not a monolithic script
+
+A shell script alone cannot be drift-tested the way `render.yaml` could, because `test_render_blueprint.py`'s real power came from `yaml.safe_load` + comparison against `Settings.model_fields`. Recover that by moving the env vars into a file `gcloud` already understands:
+
+> `--env-vars-file=FILE_PATH`: *"Path to a local YAML file with definitions for all environment variables. All existing environment variables will be removed before the new environment variables are added."* — example content `KEY_1: "value1"` `[VERIFIED: gcloud run deploy --help]`
+
+`--env-vars-file` and `--set-secrets` sit in **separate** mutually-exclusive groups, so they compose `[VERIFIED: gcloud run deploy --help synopsis]`. That gives a near-exact structural analog of `render.yaml`'s `envVars` block, and the existing test's assertions port over almost verbatim.
+
+**Files:**
+
+```
+Procfile                          # NEW  (Q1.2 — mandatory)
+.gcloudignore                     # NEW  (Q1.4)
+deploy/cloud-run.env.yaml         # NEW  — the render.yaml `envVars` analog
+scripts/deploy-cloud-run.sh       # NEW  — the D-06e artifact
+backend/tests/test_cloud_run_deploy.py   # NEW  — the test_render_blueprint.py analog
+render.yaml                       # DELETE (D-06e / "Plans Requiring Rework")
+backend/tests/test_render_blueprint.py   # DELETE
+```
+
+### Q5.2 — `deploy/cloud-run.env.yaml`
+
+```yaml
+# Non-secret runtime configuration for the Cloud Run service. Secrets are bound
+# separately via --set-secrets and must NOT appear here: a key present in both
+# the env-vars file and --set-secrets is rejected by Cloud Run.
+ENVIRONMENT: "production"
+LOG_LEVEL: "INFO"
+# Host allowlist for the MCP transport's DNS-rebinding guard. Cloud Run forwards
+# the ORIGINAL public Host header to the container, so this must match the real
+# hostname or every request returns 421 Invalid Host header with no MCP-level
+# error body (RESEARCH Pitfall 2). Cloud Run assigns BOTH a deterministic and a
+# legacy hash URL; list both if `gcloud run services describe` shows two.
+MCP_ALLOWED_HOSTS: "brett-PROJECT_NUMBER.REGION.run.app"
+# Must match, character for character, the URL typed into Claude's connector
+# dialog and the Resource Indicator registered in WorkOS. No trailing slash.
+MCP_RESOURCE_URL: "https://brett-PROJECT_NUMBER.REGION.run.app/mcp"
+MCP_AUTH_MODE: "static"          # flipped to "authkit" by the 02-07 equivalent
+MCP_ISSUER_URL: "https://PROJECT.authkit.app"
+MCP_JWKS_URI: ""
+```
+
+> **The hostname is knowable before the first deploy.** Cloud Run's deterministic URL — `https://[TAG---]SERVICE_NAME-PROJECT_NUMBER.REGION.run.app` — is **GA** `[CITED: cloud.google.com/run/docs/triggering/https-request]`. `brett-<12-digit-project-number>` is ~18 characters, far inside the 63-character DNS-segment limit. This **removes the "hostname reconciliation → redeploy" round trip** the Render plan needed: once `gcloud projects describe --format='value(projectNumber)'` returns the number, `MCP_ALLOWED_HOSTS` and `MCP_RESOURCE_URL` can be filled in *before* the first deploy. Caveat: Cloud Run assigns a legacy random-hash URL **as well**, and both are served — verify with `gcloud run services describe brett --format='value(status.url)'` and add the second host to the allowlist if it appears.
+
+### Q5.3 — `scripts/deploy-cloud-run.sh`
+
+```bash
+#!/usr/bin/env bash
+# The single reproducible description of how BRETT deploys (D-06e). Replaces
+# render.yaml. Every flag here is load-bearing; see backend/tests/test_cloud_run_deploy.py.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+PROJECT_ID="${BRETT_GCP_PROJECT:?set BRETT_GCP_PROJECT}"   # never inherit `gcloud config`
+REGION="${BRETT_GCP_REGION:-us-central1}"
+SERVICE="${BRETT_SERVICE:-brett}"
+MIN_INSTANCES="${BRETT_MIN_INSTANCES:-0}"   # D-06f: 1 before any connector test
+MAX_INSTANCES="${BRETT_MAX_INSTANCES:-2}"   # bounds Neon connections: 10 per instance
+RUNTIME_SA="brett-run@${PROJECT_ID}.iam.gserviceaccount.com"
+
+exec gcloud run deploy "$SERVICE" \
+  --project="$PROJECT_ID" \
+  --region="$REGION" \
+  --source="$REPO_ROOT" \
+  --service-account="$RUNTIME_SA" \
+  --allow-unauthenticated \
+  --port=8080 \
+  --min="$MIN_INSTANCES" \
+  --max="$MAX_INSTANCES" \
+  --cpu-boost \
+  --memory=512Mi \
+  --timeout=300 \
+  --env-vars-file="$REPO_ROOT/deploy/cloud-run.env.yaml" \
+  --set-secrets="DATABASE_URL=brett-database-url:latest,MCP_AUTH_SECRET=brett-mcp-auth-secret:latest" \
+  --set-build-env-vars="UV_FROZEN=1,UV_NO_DEV=1" \
+  --quiet
+```
+
+Notes on two flags that look optional and are not:
+
+- **`--allow-unauthenticated` is required.** Claude's connectors cannot mint a Google ID token, so Cloud Run's IAM invoker check must be off; MCP-level auth (the `TokenVerifier` + `AuthSettings`, Pattern 5) is the real gate. This is a deliberate, testable choice, not an oversight — the Auth Verification Matrix rows 1-3 are exactly what proves the service is not actually open.
+- **`--project` from an env var, never from `gcloud config`.** The active project on this machine is an unrelated one (section A); a script that inherits it would deploy BRETT into `idx-yfinance-mcp-1785725283`.
+
+### Q5.4 — `backend/tests/test_cloud_run_deploy.py`: what it should assert
+
+Direct translations from `test_render_blueprint.py` (reuse its `_settings_env_names()` helper wholesale — the `validation_alias` handling for `MCP_ALLOWED_HOSTS` is still needed):
+
+| # | Assertion | Ported from |
+|---|---|---|
+| 1 | `deploy/cloud-run.env.yaml` parses to a flat `dict[str, str]` | `test_blueprint_parses` |
+| 2 | Every key maps to a real `Settings` field (minus platform vars `PORT`) — `extra="ignore"` still means a typo'd key is silently dropped | `test_every_env_var_maps_to_a_settings_field` |
+| 3 | `ENVIRONMENT` is one of `Settings.environment`'s `Literal` values | `test_environment_value_is_a_valid_literal` |
+| 4 | **No** key matching `SECRET\|KEY\|TOKEN\|PASSWORD\|DATABASE_URL` appears in the env file at all — on Cloud Run there is no `sync: false`/`generateValue` escape hatch, so the rule sharpens from *"no literal value"* to *"not present"* | `test_no_secret_is_committed_as_a_literal` |
+| 5 | `MCP_RESOURCE_URL` is https, ends in `/mcp`, has no query string, and its host is in `MCP_ALLOWED_HOSTS` | `test_resource_url_and_allowed_hosts_agree` (unchanged) |
+
+New assertions, over `scripts/deploy-cloud-run.sh` read as text:
+
+| # | Assertion | Catches |
+|---|---|---|
+| 6 | Contains `--source`, `--region`, `--project`, `--service-account`, `--allow-unauthenticated`, `--env-vars-file`, `--set-secrets` | A flag silently dropped during an edit |
+| 7 | Every `--set-secrets` right-hand side matches `^[a-z0-9-]+:(latest\|[0-9]+)$` — i.e. a Secret Manager reference, never a literal | A credential pasted into the script and committed (the Cloud Run analog of T-02-10) |
+| 8 | The union of env-file keys and `--set-secrets` keys is **disjoint**, and together covers every `Settings` field that has no usable default in production | The "bound twice → deploy rejected" failure, and the reverse (a required var forgotten entirely) |
+| 9 | Does **not** contain `--set-env-vars` (which would silently wipe `--env-vars-file`) or `--add-cloudsql-instances`/`--vpc-connector` (D-06b says neither is needed) | Drift back toward a Cloud SQL shape |
+| 10 | `Procfile` exists at the repo root, its `web:` line contains `--app-dir backend`, `--host 0.0.0.0`, and `$PORT` | `test_start_command_points_at_the_backend_package` — the `ModuleNotFoundError: No module named 'app'` failure, which is remote and silent |
+| 11 | `.gcloudignore` exists and lists `export.xml`, `records.csv`, `.venv/` | 490 MB of personal health data uploaded to a build bucket |
+| 12 | `render.yaml` does **not** exist | Resurrection of the abandoned target |
+
+All twelve are static file reads — no container, no network, **no `integration` marker**, so the drift fails the fast suite on the commit that introduces it. That is the same design rationale the docstring of `test_render_blueprint.py` already states, and it should be carried into the new file's docstring.
+
+**Confidence: HIGH** — every flag referenced was read from `gcloud run deploy --help` on SDK 578.0.0, and every ported assertion exists today in `backend/tests/test_render_blueprint.py`.
+
+---
+
+## Q6. GCP project + billing checkpoint (D-06a)
+
+### Q6.1 — What genuinely needs a human
+
+Given section A (CLI installed, account authenticated, **an open billing account already linked to seven projects**), the irreducibly-human decisions are:
+
+1. **Choose the project ID** and confirm creating an 8th project is acceptable (personal accounts have a project-creation quota).
+2. **Authorise charging `01E8E3-6C54F5-D6B9B6`.** Spending money is a human decision, not an agent's — this is the real content of the `checkpoint:human-action` gate, and it is the same shape as plan 02-05 Task 1's original "create the Render Blueprint" gate.
+3. **Create the Neon project** and hand back the direct connection string (dashboard-only, exactly like the WorkOS checkpoint in 02-06).
+
+Everything else below is scriptable and should be a normal task, not a checkpoint.
+
+### Q6.2 — The exact bootstrap sequence
+
+```bash
+PROJECT_ID="brett-fitness"          # must be globally unique
+REGION="us-central1"
+BILLING_ACCOUNT="01E8E3-6C54F5-D6B9B6"
+
+gcloud projects create "$PROJECT_ID" --name="BRETT"
+gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING_ACCOUNT"
+
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  compute.googleapis.com \
+  --project="$PROJECT_ID"
+
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+
+# --- the trap: build permissions in a NEW project ---
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/run.builder"
+
+# Deterministic URL is now knowable, BEFORE the first deploy:
+echo "https://brett-${PROJECT_NUMBER}.${REGION}.run.app/mcp"
+```
+
+`[VERIFIED: every command's syntax read from `gcloud <cmd> --help` on SDK 578.0.0]`
+
+### Q6.3 — Three traps in a brand-new project
+
+| Trap | Why | Fix |
+|---|---|---|
+| **The Compute Engine default service account may not exist.** `gcloud run deploy --source` builds with it by default; Google's own troubleshooting page names *"The default Compute Engine service account doesn't exist in the project"* as a common cause of first-deploy failure | The `PROJECT_NUMBER-compute@developer.gserviceaccount.com` identity is materialised when `compute.googleapis.com` is enabled — a Run-only project never has it | Enable `compute.googleapis.com` (above), **or** pass `--build-service-account` `[CITED: cloud.google.com/run/docs/troubleshooting]` |
+| **Insufficient build permissions.** *"Starting in July 2024, Cloud Build changed the default behavior for how Cloud Build uses service accounts in new projects"* — the Compute Engine default SA does not inherit the legacy Cloud Build role | Manifests as an opaque build failure, often *"could not write logs"* | Grant `roles/run.builder` (above); `roles/cloudbuild.builds.builder` is the broader alternative `[CITED: cloud.google.com/build/docs/securing-builds/configure-access-for-cloud-build-service-account]` |
+| **Artifact Registry repo is created implicitly.** First `--source` deploy auto-creates a repo named `cloud-run-source-deploy` in the target region | Harmless, but it is a resource nobody declared and it accrues storage cost | Note it in the plan so it is not mistaken for stray state; it is also where the fallback `gcloud builds submit --tag` path should push |
+
+Deployer-side roles, for completeness: `roles/run.sourceDeveloper`, `roles/serviceusage.serviceUsageConsumer`, and `roles/iam.serviceAccountUser` on the runtime SA `[CITED: cloud.google.com/run/docs/deploying-source-code]`. As project **Owner** (the creator), the human satisfies all three implicitly — worth stating so the plan does not add ceremony that is already covered.
+
+### Q6.4 — Region
+
+CONTEXT.md leaves this to Claude's discretion. Recommend **`us-central1`**: it is Cloud Run's most feature-complete region, it is the cheapest tier, and — the only consideration that actually affects latency here — it should be chosen to sit **in the same cloud region family as the Neon project** (Neon offers `aws-us-east-2`, `aws-us-west-2`, `azure-eastus2`, `aws-eu-central-1`, `aws-ap-southeast-1`, and others). Cross-continent Cloud Run↔Neon adds ~100-200 ms to *every* query. Since the user is in Asia/Jakarta but Claude's connector traffic originates from Anthropic's US egress range (`160.79.104.0/21`), **US co-location beats Asia co-location** for this workload. Pick a Neon region in the same US area (e.g. Neon `aws-us-east-2` with Cloud Run `us-east4`, or accept the ~30 ms `us-central1`↔`us-east-2` hop). Whatever is chosen must be used consistently for Cloud Run, Secret Manager replication, and Artifact Registry.
+
+**Confidence: HIGH** for command syntax (local CLI); **HIGH** for the new-project traps (Google troubleshooting docs, corroborated by the July-2024 Cloud Build change).
+
+---
+
+## Q7. Migrations from a Cloud Run context
+
+### Q7.1 — Confirmed: Cloud Run has no pre-deploy hook
+
+`gcloud run deploy`'s full flag list contains no pre-deploy, release-phase, or migration hook of any kind `[VERIFIED: gcloud run deploy --help synopsis, SDK 578.0.0]`. Cloud Run's model is "build image → create revision → shift traffic"; anything that must run *between* build and traffic-shift has to be an external step. CONTEXT.md's note is correct.
+
+Running migrations at app startup remains forbidden for the reason `backend/app/main.py`'s lifespan docstring already gives: concurrent revisions race. On Cloud Run this is strictly worse than on Render, because a deploy briefly runs old and new revisions simultaneously by design.
+
+### Q7.2 — Recommended: run Alembic from the developer machine (unchanged pattern)
+
+```bash
+DATABASE_URL="postgresql://USER:PW@ep-xxxx.REGION.aws.neon.tech/brett?sslmode=require&channel_binding=require" \
+  uv run --directory backend python -m alembic upgrade head
+```
+
+Everything needed for this already exists and is verified:
+
+- `Settings.async_database_url` strips `sslmode`/`channel_binding` for asyncpg (Q2.3) `[VERIFIED]`
+- `migrations/env.py` injects the URL at runtime (`alembic.ini` deliberately carries no `sqlalchemy.url`, per FOUND-05) and uses `NullPool` `[VERIFIED]`
+- `backend/tests/conftest.py` already invokes Alembic exactly this way — `[sys.executable, "-m", "alembic", "upgrade", "head"]`, `cwd=backend`, `DATABASE_URL` injected via env `[VERIFIED: conftest.py:127-134]`
+
+Use the **direct/unpooled** Neon endpoint, per Neon's explicit guidance that migrations belong on the unpooled connection `[CITED: neon.com/docs/connect/connection-pooling]`.
+
+**Ordering:** migrate **before** the first `gcloud run deploy`, not after. Otherwise the first revision's `/health` reports `{"status":"degraded","database":"error"}` and the first `fitness_ping` returns `database: "error"` — a confusing signal in the exact step where the plan is trying to prove the MCP path works. (Both degrade cleanly rather than 500, per the existing `health.py` pattern and D-08 — but a green first deploy is worth more here than a graceful failure.)
+
+### Q7.3 — The GCP-native alternative, if the planner wants server-side migrations
+
+`gcloud run jobs` is the closest analog to Render's paid `preDeployCommand`, and it accepts `--source`, `--set-secrets`, and `--execute-now --wait` `[VERIFIED: gcloud run jobs deploy --help]`:
+
+```bash
+gcloud run jobs deploy brett-migrate \
+  --project="$PROJECT_ID" --region="$REGION" --source=. \
+  --service-account="$RUNTIME_SA" \
+  --command="bash" --args="-c","cd backend && python -m alembic upgrade head" \
+  --set-secrets="DATABASE_URL=brett-database-url:latest" \
+  --max-retries=0 --task-timeout=10m \
+  --execute-now --wait
+```
+
+**Recommendation: do not do this in Phase 2.** It doubles the build surface (a second source build of the same repo) to solve a problem the laptop already solves in one command, and it introduces a second Cloud Run resource for a phase whose entire purpose is to isolate one unknown (connector auth). Note it in the plan as the Phase-7 hardening path — that is where "migrations should not depend on a developer's laptop" becomes a real requirement.
+
+**Confidence: HIGH** — the "no pre-deploy hook" claim is verified negatively against the complete flag list, and every component of the laptop path is already exercised by the test suite.
+
+---
+
+## New and revised pitfalls (Cloud Run)
+
+### Pitfall CR-1: `--source` deploy fails with "provide a main.py or app.py file"
+**What goes wrong:** The build fails before any dependency is installed, with a message about `main.py`/`app.py` that seems to have nothing to do with a FastAPI app in `backend/`.
+**Why:** No `Procfile`/`GOOGLE_ENTRYPOINT` → CNB falls through to the `missing-entrypoint` order group, which looks for `main.py`/`app.py` **at the source root** and finds neither. Q1.2.
+**Avoid:** Commit the two-line `Procfile`.
+**Warning sign:** The literal string `for Python with pyproject.toml, provide a main.py or app.py file` in the Cloud Build log. `[VERIFIED: buildpack source]`
+
+### Pitfall CR-2: dev dependencies silently ship to production
+**What goes wrong:** Nothing visibly breaks. The image is ~2× larger and contains pytest, mypy, ruff, pre-commit and the `docker` client.
+**Why:** The buildpack runs bare `uv sync` — no `--no-dev` — and uv's `default-groups` is `["dev"]`. Q1.1(b).
+**Avoid:** `[tool.uv] default-groups = []`.
+**Warning sign:** `Installing dependencies with 'uv sync'` followed by ~73 packages instead of 41 in the build log. `[VERIFIED: uv sync --frozen --dry-run` → 32 extra packages]
+
+### Pitfall CR-3: `--set-env-vars` / `--env-vars-file` / `--set-secrets` wipe what they do not list
+**What goes wrong:** A one-off `gcloud run services update --set-env-vars=LOG_LEVEL=DEBUG` removes every other environment variable, and the next request 500s on a missing `DATABASE_URL`.
+**Why:** *"All existing environment variables will be removed before the new environment variables are added"* / *"All existing secrets will be removed first."* `[VERIFIED: gcloud run deploy --help]`
+**Avoid:** Only ever change configuration by re-running `scripts/deploy-cloud-run.sh`; use `--update-env-vars`/`--update-secrets` for genuine one-offs. Never both bind a key as a secret and list it in the env-vars file.
+
+### Pitfall CR-4: `421 Invalid Host header` — Pitfall 2, relocated
+Unchanged in mechanism. Cloud Run **forwards the original public `Host` header** to the container rather than rewriting it to an internal name (it sets `X-Forwarded-For`/`X-Forwarded-Proto` but leaves `Host` alone) `[MEDIUM: corroborated by multiple practitioner reports; the same behaviour is what makes Cloud Run custom domains work]`. So `TransportSecuritySettings(allowed_hosts=[...])` behaves exactly as on Render — and so does the failure. **New wrinkle:** Cloud Run assigns *two* default URLs (deterministic + legacy hash) and serves both `[CITED: cloud.google.com/run/docs/triggering/https-request]`. Run `gcloud run services describe brett --format='value(status.url,status.urls)'` after the first deploy and add every hostname it reports to `MCP_ALLOWED_HOSTS`.
+
+### Pitfall CR-5: 490 MB of health data uploaded on every deploy
+See Q1.4. Currently prevented only by gcloud's implicit `.gitignore` fallback. Commit `.gcloudignore`.
+
+### Pitfall CR-6: `echo` corrupts a Secret Manager secret
+`echo "$TOKEN" | gcloud secrets create ... --data-file=-` stores a **trailing newline** as part of the value. The runtime then compares `"<token>\n"` against the header token with `secrets.compare_digest` and every authenticated request 401s, while the secret "looks right" in the console. Use `printf '%s'`. Google's own examples use `printf`. `[VERIFIED: gcloud secrets create --help examples]`
+
+---
+
+## Revised Validation Architecture rows
+
+Only the DEPLOY-01 rows change; every MCP-01 / MCP-04 / D-08 row above stands.
+
+| Req ID | Behavior | Test Type | Automated Command | File |
+|---|---|---|---|---|
+| DEPLOY-01 | `deploy/cloud-run.env.yaml` parses; every key maps to a `Settings` field; no secret-shaped key present | unit | `uv run pytest backend/tests/test_cloud_run_deploy.py -x` | ❌ Wave 0 |
+| DEPLOY-01 | `scripts/deploy-cloud-run.sh` carries every required flag and no literal credential | unit | same file | ❌ Wave 0 |
+| DEPLOY-01 | `Procfile` `web:` line has `--app-dir backend`, `--host 0.0.0.0`, `$PORT` | unit | same file | ❌ Wave 0 |
+| DEPLOY-01 | `.gcloudignore` excludes the health-data exports and `.venv/` | unit | same file | ❌ Wave 0 |
+| DEPLOY-01 | `render.yaml` and `test_render_blueprint.py` are gone | unit | same file | ❌ Wave 0 |
+| DEPLOY-01 | Service live over HTTPS, `/health` → 200 | **manual** | Auth Verification Matrix row 6 against `https://brett-<num>.<region>.run.app` | manual-only |
+
+**Wave 0 delta:** add `backend/tests/test_cloud_run_deploy.py`; **delete** `backend/tests/test_render_blueprint.py` and `render.yaml`. No new dev dependency — `pyyaml==6.0.3` is already in the dev group (it was added for the render.yaml test) `[VERIFIED: pyproject.toml]`.
+
+---
+
+## Downstream doc-language updates (from CONTEXT.md "Downstream Doc Updates Required")
+
+Concrete, so the planner can task them rather than rediscover them:
+
+| File | Text to change |
+|---|---|
+| `.planning/REQUIREMENTS.md` | **DEPLOY-01** currently reads *"deployed to Render over HTTPS with environment-based secrets"* → Cloud Run + Google Secret Manager |
+| `.planning/ROADMAP.md` | Phase 2 goal, success criterion #1, and the 02-03/02-05/02-07 plan descriptions all say "Render" |
+| `.planning/PROJECT.md` | Key Decisions row + the *"Render account is already set up"* note |
+| `CLAUDE.md` | §"Deployment (Render)" — the whole table is Render-specific. Also §"Constraints" (*"Deployment: Render for v1"*) and §"Stack Patterns by Variant". The portability claim in that section (*"Fly.io, Railway, and a $6 VPS ... all take it unchanged"*) is now **empirically confirmed** by this pivot: the only code-level change required for Cloud Run is zero — the entire delta is deploy artifacts |
+| `backend/app/config.py` | Two comments reference Render by name (`"a Render custom domain"`, `"the name render.yaml sets"`). Cosmetic, but they are the kind of stale pointer the CONTEXT.md instruction is aimed at |
+
+---
+
+## Addendum Assumptions Log
+
+| # | Claim | Section | Risk if wrong |
+|---|---|---|---|
+| **A-CR-1** | `gcloud run deploy --set-build-env-vars` accepts arbitrary non-`GOOGLE_`-prefixed keys (`UV_FROZEN`, `UV_NO_DEV`) and they reach the buildpack's `uv sync` process environment | Q1.1 | Dev deps ship to production and the lockfile can drift. **Low impact, cheaply mitigated:** the primary recommendation is `[tool.uv] default-groups = []` in `pyproject.toml`, which is verified and needs no env var. Confirm by grepping the first build log for the package count |
+| **A-CR-2** | `gcloud run deploy --source` uses the `gcr.io/buildpacks/builder` order groups read from `builders/gcp/base/builder.toml` at `main` | Q1.2 | If Cloud Run pins an older builder, `missing-entrypoint` might behave differently. **Does not change the conclusion** — a `Procfile` satisfies every version of the entrypoint logic. Falsifiable in one deploy |
+| **A-CR-3** | Cloud Run forwards the original public `Host` header unmodified | Pitfall CR-4 | Every MCP request returns 421. This is the Cloud Run successor to old assumption A3 and is diagnosable in one request (Auth Verification Matrix row 7's inverse). Setting `enable_dns_rebinding_protection=False` is the emergency escape, but do not ship it |
+| **A-CR-4** | The Neon Free plan permits creating a project and a direct connection string without a paid upgrade, and 0.5 GB is enough for v1 | Q2.5 | Unbudgeted cost. Vendor pricing page only; no tenant probed. Hevy set data is tiny — 0.5 GB is not a real constraint |
+| **A-CR-5** | Creating an 8th GCP project on this personal account is within quota | Q6.1 | `gcloud projects create` fails with a quota error. Fallback: reuse an existing project (not recommended — mixes unrelated IAM and billing) or request a quota increase |
+| **A-CR-6** | Cloud Run cold start at `min=0` totals ~3-5 s for this app | Q4.1 | If it is materially worse, `min=0` is unusable even for the CLI-proof stage. The app-import component (~2.5 s cold, ~0.45 s warm) **is** measured; only the platform overhead is estimated. D-06f's upgrade already covers this |
+| **A-CR-7** | Secret Manager env-var bindings are resolved at instance start, so a rotated `:latest` version reaches a running service only after the next instance start | Q3.1 | A rotated `MCP_AUTH_SECRET` appears not to take effect. Mitigation is trivial: redeploy or `gcloud run services update` after rotating |
+
+---
+
+## Addendum Sources
+
+### Primary (HIGH confidence)
+
+- **`GoogleCloudPlatform/buildpacks` @ `main`, source read 2026-08-27** — `cmd/python/uv/lib/lib.go`, `cmd/python/missing_entrypoint/lib/lib.go`, `cmd/python/runtime/lib/lib.go`, `cmd/python/webserver/main.go`, `cmd/config/entrypoint/lib/lib.go`, `pkg/python/pyproject.go`, `pkg/python/python.go`, `pkg/gcpbuildpack/{exec,filepath,gcpbuildpack}.go`, `builders/gcp/base/builder.toml`. *This is the strongest evidence in the addendum* — uv detection, the exact `uv sync` invocation, the Procfile requirement, `bash -c` wrapping, `.python-version` precedence, and the order-group fallthrough all come from reading the code that runs.
+- **Local `gcloud` SDK 578.0.0 (core 2026.07.24)** — `gcloud run deploy --help`, `gcloud run services update --help`, `gcloud run jobs deploy --help`, `gcloud secrets create --help`, `gcloud secrets versions add --help`, `gcloud projects create --help`, `gcloud billing projects link --help`, `gcloud services enable --help`. Every flag, every semantic ("all existing … removed first"), and the `--min` vs `--min-instances` distinction are quoted from the installed CLI.
+- **Local environment probes, 2026-08-27** — `gcloud auth list`, `gcloud config list`, `gcloud billing accounts list`, `gcloud projects list`, `gcloud services list --enabled`, `du -sh`.
+- **Local execution against this repo, 2026-08-27** — `uv sync --frozen --no-dev` (41 packages) + `uv pip check` (clean); `uv sync --frozen --dry-run` (32 extra dev packages); `UV_NO_DEV=1 uv sync --frozen --dry-run` (no changes); a scratch-project verification of `[tool.uv] default-groups = []`; `python -X importtime -c "import app.main"` and `/usr/bin/time` (2.5 s cold / 0.45 s warm).
+- **Repo file reads** — `pyproject.toml`, `uv.lock` (`source = { virtual = "." }`), `.python-version`, `.gitignore`, `render.yaml`, `backend/app/config.py`, `backend/app/db/session.py`, `backend/migrations/env.py`, `backend/tests/conftest.py`, `backend/tests/test_render_blueprint.py`.
+- **Installed SQLAlchemy 2.0.52 source** — `dialects/postgresql/asyncpg.py` (`prepared_statement_cache_size` as a URL query parameter).
+- `https://docs.cloud.google.com/docs/buildpacks/python` — package-manager precedence, `GOOGLE_PYTHON_PACKAGE_MANAGER`, entrypoint precedence, `.python-version`.
+- `https://docs.cloud.google.com/run/docs/deploying-source-code` — required APIs, `roles/run.builder` on the Compute Engine default SA, implicit `cloud-run-source-deploy` Artifact Registry repo, deployer roles.
+- `https://docs.cloud.google.com/run/docs/configuring/services/secrets` — `--set-secrets` / `--update-secrets` syntax, cross-project form, `roles/secretmanager.secretAccessor`.
+- `https://docs.cloud.google.com/run/docs/configuring/min-instances` — `--min` vs `--min-instances`, "best-effort target", idle billing.
+- `https://docs.cloud.google.com/run/docs/container-contract` — `PORT` injection, `0.0.0.0` requirement, 4-minute listen deadline, TLS termination, `K_SERVICE`/`K_REVISION`.
+- `https://docs.cloud.google.com/run/docs/triggering/https-request` — deterministic URL format (**GA**), legacy hash URL, both assigned.
+- `https://docs.cloud.google.com/run/docs/troubleshooting` — "The default Compute Engine service account doesn't exist in the project".
+- `https://docs.cloud.google.com/build/docs/securing-builds/configure-access-for-cloud-build-service-account` — the July-2024 default-service-account change.
+- `https://docs.cloud.google.com/run/docs/tips/general` — cold-start stages, startup CPU boost, request pending window.
+
+### Secondary (MEDIUM confidence)
+
+- `https://neon.com/docs/connect/connect-from-any-app` — pooled vs direct DSN, `sslmode`/`channel_binding`.
+- `https://neon.com/docs/connect/connection-pooling` — `-pooler` hostname, `pool_mode = transaction`, `max_client_conn = 10000`, `max_connections` per CU, unpooled-for-migrations guidance.
+- `https://neon.com/docs/introduction/plans` — Free plan: 0.5 GB, 100 CU-hours, 5-min scale-to-zero (not disableable), data never deleted.
+- `https://neon.com/docs/introduction/scale-to-zero` — suspension is activity-driven, not connection-driven; `idle-in-transaction` counts as active.
+- `https://neon.com/blog/pgbouncer-the-one-with-prepared-statements` — protocol-level prepared statements through Neon's pooler.
+- `https://docs.cloud.google.com/run/docs/runtimes/python-dependencies` — `GOOGLE_PYTHON_PACKAGE_MANAGER`, `pyproject.toml` GA for source deploys.
+
+### Tertiary (LOW confidence — flagged)
+
+- Practitioner reports that Cloud Run leaves the `Host` header intact (siipo.la, dotnet/yarp#1804). Corroborative only; A-CR-3 remains the honest label.
+- Third-party Cloud Run cold-start benchmarks (0.5-2 s platform overhead for Python). Used only to bracket A-CR-6; the app-side 2.5 s figure is measured, the platform figure is not.
+
+---
+
+## Addendum Metadata
+
+**Confidence breakdown:**
+
+- **Buildpack + uv behaviour, and the Procfile requirement:** HIGH — read from the buildpack source that executes, cross-checked against Google's published docs, with the dependency-set behaviour reproduced locally against this repo's actual `pyproject.toml`/`uv.lock`.
+- **`gcloud` flag semantics:** HIGH — quoted from the installed SDK 578.0.0, not from memory.
+- **Neon compatibility with this codebase:** HIGH — `Settings.async_database_url` already performs exactly the `sslmode`→`ssl` translation and `channel_binding` drop that Neon's DSN requires, and `pool_pre_ping=True` already covers scale-to-zero. Zero code change.
+- **Neon plan limits and pooler internals:** MEDIUM — vendor docs only; no tenant probed.
+- **Secret Manager + IAM:** HIGH for syntax and role names; MEDIUM for the new-project default-SA edge cases, which are documented but vary by project age.
+- **Cold-start figures:** MEDIUM — the app's own import cost is measured on this machine; platform overhead is third-party.
+- **Environment/account state:** HIGH — probed directly today, and it materially relaxes D-06a.
+
+**Research date:** 2026-08-27
+**Valid until:** 2026-09-10 (14 days). Cloud Buildpacks' Python/uv support is actively changing (the `pyproject.toml` path went GA recently, and the `>= 3.14` "smart default entrypoint" branch is new), and Cloud Build's default service-account behaviour has shifted twice since 2024. Re-read `cmd/python/missing_entrypoint` and re-run `gcloud run deploy --help` before Phase 7.
