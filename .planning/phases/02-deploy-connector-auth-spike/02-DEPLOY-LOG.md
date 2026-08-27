@@ -190,9 +190,39 @@ gcloud run services describe brett --project=brett-fitness --region=us-central1 
 | `/health` status | `200` |
 | `/health` body | `{"status":"ok","database":"connected"}` |
 | Protocol | `HTTP/2`, `server: Google Frontend` (TLS terminated by Cloud Run) |
-| First request after a deploy | ~1.74 s |
-| Warm requests | ~0.62 s, ~0.56 s |
+| First request after a deploy | ~1.74 s (an instance is already running post-deploy — **not** a true cold start) |
+| Warm requests | ~0.62 s, ~0.58 s, ~0.56 s, ~0.55 s |
+| **Genuine cold start** (16 min idle → scale-to-zero → first request) | **7.53 s** |
+| Warm immediately after that cold start | 0.58 s, 0.57 s |
 | Startup TCP probe | `succeeded after 1 attempt` on every revision |
+
+### The cold-start number is worse than the research assumed — read this before plan 02-07
+
+A **genuine** cold start was measured by leaving the service idle for 16 minutes at `--min=0` so
+Cloud Run scaled to zero, then issuing a single request:
+
+```
+=== COLD (after 16min idle) ===
+code=200 time_total=7.532573s
+=== WARM immediately after ===
+code=200 time_total=0.584431s
+code=200 time_total=0.568208s
+```
+
+**7.53 s against Claude's 10-second discovery budget leaves ~2.5 s of headroom — about 25%.** The
+plan and research addendum both estimated "~3-5 s with real variance above that"; the measured
+reality is roughly double the low end. Two effects compound at `--min=0`: the Cloud Run container
+cold start *and* Neon's compute resuming from its own 5-minute autosuspend, which cannot be disabled
+on the Free plan.
+
+Note the earlier 1.74 s figure is **not** a cold start — an instance is already warm immediately
+after a deploy. Quoting it would have understated the risk by a factor of four.
+
+This converts D-06f's `--min=1` flip from a prudent precaution into a **hard prerequisite** for any
+Claude connector test. It does not, however, eliminate the Neon wake-up component: `--min=1` keeps
+the Cloud Run instance warm but Neon still autosuspends after 5 minutes idle. Plan 02-07 should
+expect a first-query penalty of roughly 0.3-0.5 s even with `--min=1`, which is comfortably inside
+budget once the ~7 s container start is removed.
 
 `"database":"connected"` is the proof that Task 2's migration landed against the same database the
 service is wired to, reached through the `brett-database-url` Secret Manager binding and the
@@ -273,6 +303,71 @@ The allowlist was then reverted (`brett-00004-s6h`) and the final script-produce
 is live and enforcing on the deployed service (T-02-01 mitigated), rather than merely observing that
 some layer rejected a malformed request — and it establishes that Cloud Run's edge routing is an
 independent second barrier in front of it.
+
+---
+
+## D-01 CLI proof — PENDING human verification
+
+**Status: not yet performed.** `claude mcp add` writes to the developer's own Claude Code
+configuration, and invoking a tool inside a Claude Code session cannot be done by an agent. This
+section is completed after the developer reports back. Nothing below is a claim that the CLI test
+has passed.
+
+### Pre-verification completed by Claude
+
+1. **All seven Auth Verification Matrix rows read PASS** (see above) — so a CLI failure would isolate
+   cleanly to the client, not the deploy, mount, or auth pipeline.
+2. **CLI present and flag shapes intact.** `claude` is **2.1.246** (the plan verified against
+   2.1.237). `claude mcp add --help` still lists `-t, --transport` and `-H, --header`, so the
+   command shape below is current despite the version drift.
+3. **Instance warmed** so the developer does not hit the 7.53 s cold start mid-test:
+   `warm-1 200 0.554s`, `warm-2 200 0.550s`.
+
+### Supporting proof — a real MCP client already succeeded
+
+`curl` proves the wire contract but not that a real MCP client can complete discovery and a tool
+call. That gap was closed **without touching any Claude Code configuration**, using the official
+SDK's unified `Client` over Streamable HTTP against the deployed URL, with the token supplied as an
+`Authorization` header:
+
+```
+=== WITH Authorization header ===
+  discovery OK -- tools: ['fitness_ping']
+  structuredContent: {"status": "ok", "database": "connected"}
+  isError: False
+
+=== WITHOUT Authorization header ===
+  MCPError: Server returned an error response
+
+=== VERDICT ===
+  authenticated client succeeded  : True
+  unauthenticated client succeeded: False
+  D-01 SUPPORTING PROOF: PASS (auth enforced, not merely present)
+```
+
+This establishes every substantive property D-01 asks for — a genuine MCP client discovers exactly
+one tool, calls it, receives the correct structured result, and **fails when the header is removed**.
+What remains for the developer is confirming the same through the Claude Code CLI specifically.
+
+### Commands for the developer
+
+```bash
+MCP_AUTH_SECRET="$(gcloud secrets versions access latest --secret=brett-mcp-auth-secret --project=brett-fitness)"
+
+claude mcp add --transport http brett "https://brett-792870654598.us-central1.run.app/mcp" \
+  --header "Authorization: Bearer $MCP_AUTH_SECRET"
+
+claude mcp list       # `brett` should appear, health-checked, no connection error
+claude mcp get brett  # should show connection status plus the discovered tools
+```
+
+### Observations to record here afterwards
+
+1. `claude mcp list` shows `brett` without a connection error
+2. `claude mcp get brett` lists exactly one tool, `fitness_ping`
+3. Invoking `fitness_ping` in a Claude Code session returns `{"status": "ok", "database": "connected"}`
+4. Re-adding **without** `--header` fails to connect (proves auth is enforced, not decorative)
+5. The observed first-call latency
 
 ---
 
