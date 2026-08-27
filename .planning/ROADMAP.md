@@ -2,7 +2,7 @@
 
 ## Overview
 
-BRETT starts as an empty repo and ends as a live, authenticated remote MCP server that Claude can query to coach body recomposition from real data. The path: stand up the FastAPI/PostgreSQL foundation with correct timezone and secret handling (Phase 1), then immediately spike the riskiest unknown — whether a real Claude client can authenticate to a Render-hosted MCP endpoint at all (Phase 2) — before any real functionality is built on that assumption. With the transport proven, Hevy becomes the data source of truth: workouts, exercise templates, and body measurements sync idempotently into normalized tables with a canonical muscle map (Phase 3). Analytics then layer on as pure, testable functions — volume and frequency first, establishing the freshness/uncertainty envelope every answer carries (Phase 4), then progression, records, plateaus, and recomposition status (Phase 5). Only once the computation exists do the read-only MCP tools compose it into compact, budgeted responses (Phase 6). The final phase makes the deployment production-grade — full test coverage, rate limiting, backup/restore, secret rotation — and ships the coaching instructions document that turns the data layer into an actual coach (Phase 7).
+BRETT starts as an empty repo and ends as a live, authenticated remote MCP server that Claude can query to coach body recomposition from real data. The path: stand up the FastAPI/PostgreSQL foundation with correct timezone and secret handling (Phase 1), then immediately spike the riskiest unknown — whether a real Claude client can authenticate to a Cloud Run-hosted MCP endpoint at all (Phase 2) — before any real functionality is built on that assumption. With the transport proven, Hevy becomes the data source of truth: workouts, exercise templates, and body measurements sync idempotently into normalized tables with a canonical muscle map (Phase 3). Analytics then layer on as pure, testable functions — volume and frequency first, establishing the freshness/uncertainty envelope every answer carries (Phase 4), then progression, records, plateaus, and recomposition status (Phase 5). Only once the computation exists do the read-only MCP tools compose it into compact, budgeted responses (Phase 6). The final phase makes the deployment production-grade — full test coverage, rate limiting, backup/restore, secret rotation — and ships the coaching instructions document that turns the data layer into an actual coach (Phase 7).
 
 ## Phases
 
@@ -13,7 +13,7 @@ BRETT starts as an empty repo and ends as a live, authenticated remote MCP serve
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 1: Backend Foundation** - FastAPI app, PostgreSQL, Alembic, configurable timezone, secret-safe logging, health endpoint
-- [ ] **Phase 2: Deploy & Connector Auth Spike** - Prove a real Claude client can authenticate to a Render-hosted MCP endpoint before building on the assumption
+- [ ] **Phase 2: Deploy & Connector Auth Spike** - Prove a real Claude client can authenticate to a Cloud Run-hosted MCP endpoint before building on the assumption
 - [ ] **Phase 3: Hevy Integration & Normalization** - Idempotent sync of workouts, exercise templates, and body measurements into a canonical muscle-mapped schema
 - [ ] **Phase 4: Volume & Frequency Analytics** - Hard-set volume, per-muscle direct/indirect breakdown, training frequency, and the freshness/uncertainty envelope
 - [ ] **Phase 5: Progression, Records & Recomposition Analytics** - Progression trends, plateau detection, PRs, period comparison, weight trend, recomposition verdict
@@ -46,20 +46,23 @@ Plans:
 **Depends on**: Phase 1
 **Requirements**: MCP-01, MCP-04, DEPLOY-01, DEPLOY-02
 **Success Criteria** (what must be TRUE):
-  1. The service is live on Render over HTTPS with every secret supplied through environment configuration and nothing committed to the repo
+  1. The service is live on Google Cloud Run over HTTPS, backed by Neon Postgres, with every credential supplied from Google Secret Manager and nothing committed to the repo
   2. A Claude custom connector pointed at the deployed `/mcp` endpoint discovers a throwaway tool and successfully calls it from an actual Claude client (Desktop/Web/Mobile), not just a local test client
   3. An unauthenticated request to the MCP endpoint is rejected and an authenticated one succeeds, verified against the deployed URL
   4. The auth mechanism that actually works — static bearer header or a minimal OAuth 2.1 resource-server shim — is chosen and recorded in PROJECT.md Key Decisions, confirming or explicitly overturning the "bearer token, not OAuth" decision
-**Plans**: 7 plans
+**Plans**: 8 plans
 
-Plans:
+Plans (listed in execution order):
 - [x] 02-01-PLAN.md — mcp==2.0.0 pin, MCP_* settings fields, test env seeding (MCP-01, MCP-04, DEPLOY-01)
 - [x] 02-02-PLAN.md — backend/app/mcp package: lifespan context, static bearer verifier, fitness_ping, MCPServer wiring (MCP-01, MCP-04)
-- [x] 02-03-PLAN.md — render.yaml blueprint + static test binding it to Settings (DEPLOY-01)
+- [x] 02-03-PLAN.md — render.yaml blueprint + static test binding it to Settings (DEPLOY-01) — deliverable superseded by 02-08 after the 2026-08-27 Cloud Run pivot
 - [x] 02-04-PLAN.md — FastAPI mount at / + full local HTTP verification suite (MCP-01, MCP-04)
-- [ ] 02-05-PLAN.md — Render free-tier deploy, laptop migration, deployed Auth Verification Matrix, D-01 CLI proof (DEPLOY-01, MCP-01, MCP-04)
+- [ ] 02-08-PLAN.md — Cloud Run deploy script + env-vars file + Procfile + .gcloudignore + 12-assertion drift test; Render artifacts deleted; docs retargeted (DEPLOY-01)
+- [ ] 02-05-PLAN.md — GCP project + Neon provisioning, gcloud run deploy, deployed Auth Verification Matrix, D-01 CLI proof (DEPLOY-01, MCP-01, MCP-04)
 - [ ] 02-06-PLAN.md — WorkOS AuthKit project checkpoint + JWKS token verifier (MCP-04, DEPLOY-02)
-- [ ] 02-07-PLAN.md — Starter upgrade, authkit cutover, Claude connector round-trip, decision recorded (DEPLOY-02, MCP-04, DEPLOY-01)
+- [ ] 02-07-PLAN.md — authkit cutover, Cloud Run --min=1 warm instance, Claude connector round-trip, decision recorded (DEPLOY-02, MCP-04, DEPLOY-01)
+
+*Plan 02-08 was inserted on 2026-08-27 when the deploy target moved from Render to Google Cloud Run (revised D-06). It must run before 02-05, which deploys using the script 02-08 creates. Remaining execution order: 02-08 → 02-05 → 02-06 → 02-07.*
 
 ### Phase 3: Hevy Integration & Normalization
 **Goal**: PostgreSQL becomes the trustworthy source of truth for all Hevy data — workouts, exercise templates, and body measurements — normalized to a canonical muscle taxonomy
@@ -128,7 +131,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Backend Foundation | 0/5 | Planned | - |
-| 2. Deploy & Connector Auth Spike | 0/7 | Planned | - |
+| 2. Deploy & Connector Auth Spike | 4/8 | Executing | - |
 | 3. Hevy Integration & Normalization | 0/TBD | Not started | - |
 | 4. Volume & Frequency Analytics | 0/TBD | Not started | - |
 | 5. Progression, Records & Recomposition Analytics | 0/TBD | Not started | - |
