@@ -41,6 +41,22 @@ DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 # without a container.
 _PLACEHOLDER_DB_URL = "postgresql://test:test@localhost:5432/test"
 
+# Phase 2: `app.main` imports `app.mcp.server`, which calls `get_settings()` and
+# `streamable_http_app()` at IMPORT time. These values must already be in the
+# environment when the `client` fixture performs its lazy `from app.main import
+# app`, which is why the seeding fixture below is session-scoped and autouse.
+#
+# `testserver` is `TestClient`'s default `base_url` host. Omit it from the
+# allowlist and every MCP request in the suite returns `421 Invalid Host header`
+# instead of the status the test is asserting on (RESEARCH Pitfall 2).
+_TEST_MCP_ENV = {
+    "MCP_AUTH_SECRET": "test-mcp-secret-not-a-real-credential",
+    "MCP_AUTH_MODE": "static",
+    "MCP_ALLOWED_HOSTS": "testserver,localhost,127.0.0.1",
+    "MCP_RESOURCE_URL": "http://testserver/mcp",
+    "MCP_ISSUER_URL": "https://example.authkit.app",
+}
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _default_database_url() -> Iterator[None]:
@@ -56,6 +72,25 @@ def _default_database_url() -> Iterator[None]:
     yield
     if not preexisting:
         os.environ.pop("DATABASE_URL", None)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _default_mcp_env() -> Iterator[None]:
+    """Seed the MCP settings the app needs at import time.
+
+    Mirrors `_default_database_url`: a developer's real environment wins, and
+    anything this fixture set is removed afterwards. `test_config.py` clears all
+    of these per-test via its own `_clean_env`, so seeding here does not weaken
+    the assertions on default values there.
+    """
+    preexisting = {k: os.environ.get(k) for k in _TEST_MCP_ENV}
+    for key, value in _TEST_MCP_ENV.items():
+        if preexisting[key] is None:
+            os.environ[key] = value
+    yield
+    for key in _TEST_MCP_ENV:
+        if preexisting[key] is None:
+            os.environ.pop(key, None)
 
 
 @pytest.fixture(scope="session")
@@ -147,6 +182,11 @@ def client(postgres_url: str) -> Iterator[object]:
     ``app.main`` is imported lazily -- it reads settings and configures logging
     at import time, so importing it at module scope would run that bootstrap
     before any test had a chance to seed the environment.
+
+    The lazy import is doubly load-bearing from Phase 2 on: ``app.main`` imports
+    ``app.mcp.server``, which builds the MCP ASGI app at import time from these
+    settings. ``_default_mcp_env`` is session-scoped and autouse, so it has
+    already run by the time this line executes.
     """
     from fastapi.testclient import TestClient
 
