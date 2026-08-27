@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings, get_settings
+from app.config import _SECRET_FIELDS, Settings, get_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -23,6 +23,11 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "DATABASE_URL",
         "HEVY_API_KEY",
         "MCP_AUTH_SECRET",
+        "MCP_AUTH_MODE",
+        "MCP_ISSUER_URL",
+        "MCP_RESOURCE_URL",
+        "MCP_JWKS_URI",
+        "MCP_ALLOWED_HOSTS",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
@@ -101,3 +106,86 @@ def test_invalid_url_error_does_not_echo_input(monkeypatch: pytest.MonkeyPatch) 
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", DB_URL)
     assert get_settings() is get_settings()
+
+
+def test_mcp_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every MCP_* var is optional: the app must still boot for local dev."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    settings = Settings(_env_file=None)
+
+    assert settings.mcp_auth_mode == "static"
+    assert settings.mcp_issuer_url == "https://example.authkit.app"
+    assert settings.mcp_resource_url == "http://localhost:8000/mcp"
+    assert settings.mcp_jwks_uri == ""
+    assert settings.mcp_allowed_hosts == ["localhost", "127.0.0.1"]
+
+
+def test_mcp_allowed_hosts_splits_and_strips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-02-01: whitespace and empty entries must not widen the Host allowlist.
+
+    A bare ``split(",")`` on ``"a,,b"`` yields an empty-string entry, and an
+    empty host in the allowlist is the difference between a closed allowlist and
+    one that matches more than intended.
+    """
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "brett.onrender.com, testserver ,")
+    settings = Settings(_env_file=None)
+
+    assert settings.mcp_allowed_hosts == ["brett.onrender.com", "testserver"]
+
+
+def test_mcp_config_is_not_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-02-04: public MCP config must not reach the log value scrubber.
+
+    These are hostnames and URLs published anonymously in the RFC 9728 metadata
+    document. Scrubbing a public hostname would redact it from every log line
+    that mentions the service and make the logs unreadable. ``MCP_AUTH_SECRET``
+    is the control: it must still be scrubbed.
+
+    Asserting only ``value not in secret_values()`` would be vacuous, because
+    ``secret_values`` skips anything that is not a ``SecretStr``. The field types
+    are asserted directly so this test also fails if a public field is later
+    redeclared as ``SecretStr`` -- the half of the mistake that a value-only
+    assertion cannot see.
+    """
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("MCP_AUTH_SECRET", "mcp-secret-token")
+    monkeypatch.setenv("MCP_ISSUER_URL", "https://distinctive-issuer.example")
+    monkeypatch.setenv("MCP_RESOURCE_URL", "https://distinctive-resource.example/mcp")
+    monkeypatch.setenv("MCP_JWKS_URI", "https://distinctive-jwks.example/keys")
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "distinctive-host.example")
+    settings = Settings(_env_file=None)
+    values = settings.secret_values()
+
+    assert "mcp-secret-token" in values, "MCP_AUTH_SECRET must still be scrubbed"
+    for name in (
+        "mcp_auth_mode",
+        "mcp_issuer_url",
+        "mcp_resource_url",
+        "mcp_jwks_uri",
+        "mcp_allowed_hosts_raw",
+    ):
+        assert name not in _SECRET_FIELDS, (
+            f"T-02-04 violated: public MCP field {name!r} was added to _SECRET_FIELDS"
+        )
+        assert isinstance(getattr(settings, name), str), (
+            f"T-02-04 violated: public MCP field {name!r} is not a plain str"
+        )
+    for public in (
+        "https://distinctive-issuer.example",
+        "https://distinctive-resource.example/mcp",
+        "https://distinctive-jwks.example/keys",
+        "distinctive-host.example",
+    ):
+        assert public not in values, (
+            f"T-02-04 violated: public MCP config {public!r} was treated as a secret"
+        )
+
+
+def test_mcp_auth_mode_rejects_unknown_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unrecognised auth mode must fail at boot, not silently fall through."""
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("MCP_AUTH_MODE", "nonsense")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
