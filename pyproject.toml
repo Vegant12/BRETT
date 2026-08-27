@@ -31,6 +31,19 @@ dev = [
     "pyyaml==6.0.3",
 ]
 
+[tool.uv]
+# The Cloud Buildpacks uv buildpack runs a bare `uv sync` - no --no-dev, no
+# --frozen. uv's default `default-groups = ["dev"]` would therefore ship 32
+# development packages (pytest, mypy, ruff, pre-commit, the docker client) into
+# the production image of a health-data service. Emptying the default here is
+# checked in and testable, unlike a build-time environment variable.
+# Local and CI installs become `uv sync --group dev`.
+default-groups = []
+# The build-time analog of the UV_VERSION pin the Render blueprint carried. A
+# floor, not an equality: uv enforces `required-version` locally too, and the
+# developer machine is on 0.12.1.
+required-version = ">=0.12.1"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["backend/tests"]

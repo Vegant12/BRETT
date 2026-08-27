@@ -11,7 +11,7 @@ See `.planning/PROJECT.md` for scope and `.planning/ROADMAP.md` for the phase pl
 
 ## Local setup
 
-    uv sync
+    uv sync --group dev
     uv run pre-commit install
     cp .env.example .env        # then fill in DATABASE_URL
     docker compose up -d db
