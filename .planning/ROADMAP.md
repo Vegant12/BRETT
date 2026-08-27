@@ -54,8 +54,8 @@ Plans:
 
 Plans:
 - [x] 02-01-PLAN.md — mcp==2.0.0 pin, MCP_* settings fields, test env seeding (MCP-01, MCP-04, DEPLOY-01)
-- [ ] 02-02-PLAN.md — backend/app/mcp package: lifespan context, static bearer verifier, fitness_ping, MCPServer wiring (MCP-01, MCP-04)
-- [ ] 02-03-PLAN.md — render.yaml blueprint + static test binding it to Settings (DEPLOY-01)
+- [x] 02-02-PLAN.md — backend/app/mcp package: lifespan context, static bearer verifier, fitness_ping, MCPServer wiring (MCP-01, MCP-04)
+- [x] 02-03-PLAN.md — render.yaml blueprint + static test binding it to Settings (DEPLOY-01)
 - [ ] 02-04-PLAN.md — FastAPI mount at / + full local HTTP verification suite (MCP-01, MCP-04)
 - [ ] 02-05-PLAN.md — Render free-tier deploy, laptop migration, deployed Auth Verification Matrix, D-01 CLI proof (DEPLOY-01, MCP-01, MCP-04)
 - [ ] 02-06-PLAN.md — WorkOS AuthKit project checkpoint + JWKS token verifier (MCP-04, DEPLOY-02)
