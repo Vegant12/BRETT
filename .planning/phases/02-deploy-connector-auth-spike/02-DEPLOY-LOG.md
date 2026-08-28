@@ -435,3 +435,69 @@ The deploy script reads `BRETT_MIN_INSTANCES` (default `0`), but the service-lev
 
 The developer explicitly authorised charging billing account `01E8E3-6C54F5-D6B9B6` for this
 project's Cloud Run, Cloud Build, Artifact Registry and Secret Manager usage.
+
+---
+
+## WorkOS AuthKit — BLOCKED at the plan 02-06 Task 1 checkpoint
+
+> **This is deliberately NOT the heading plan 02-06 Task 3 asks for** — that one ends in the word
+> *verified*, and Task 3's automated check greps for it literally. Writing it over invented values
+> would turn a tripwire into a rubber stamp, so the phrase is kept out of this file entirely (a
+> `grep` for it must still return zero) until a real WorkOS discovery document has been read. What
+> follows is only the half that could be established without a WorkOS account.
+
+### Established (2026-08-28, plan 02-06 execution)
+
+| Item | Value | How known |
+|---|---|---|
+| Resource Indicator to register in WorkOS | `https://brett-792870654598.us-central1.run.app/mcp` | Read back from the **live** RFC 9728 document, not retyped — see below |
+| Protected-resource metadata document | `https://brett-792870654598.us-central1.run.app/.well-known/oauth-protected-resource/mcp` | `200` in `0.37 s`, valid JSON |
+| `resource` field it currently serves | `https://brett-792870654598.us-central1.run.app/mcp` | byte-identical to the Resource Indicator above |
+| `authorization_servers` it currently serves | `["https://example.authkit.app"]` | the Stage-A placeholder; plan 02-07 replaces it |
+
+The Resource Indicator was obtained by **reading the deployed document** rather than by composing
+the string by hand. RESEARCH Pitfall 8 is a character-for-character match across three separate
+places — the WorkOS Connect setting, `MCP_RESOURCE_URL`, and the URL typed into Claude's connector
+dialog — and a hand-composed string is exactly how a trailing slash or a wrong hostname variant gets
+in. A mismatch produces a *completed* OAuth flow followed by a `401` on every request, which is one
+of the hardest failures in this phase to diagnose.
+
+### Outstanding — requires a WorkOS dashboard session
+
+Four values, all to be read verbatim from the tenant's discovery document, none to be assumed:
+
+| Field | Why it matters |
+|---|---|
+| `issuer` | becomes `MCP_ISSUER_URL`; resolves RESEARCH assumption A1 |
+| `jwks_uri` | becomes `MCP_JWKS_URI`. **`/oauth2/jwks` is a documentation claim, not a contract** — the verifier takes this from configuration precisely so it is never derived |
+| `client_id_metadata_document_supported` | with the next row, decides CIMD vs DCR (assumption A2) |
+| `"none"` in `token_endpoint_auth_methods_supported` | Claude selects CIMD only when **both** this and the row above hold; otherwise it falls back to DCR |
+
+Probe command, prepared with the domain left as a placeholder:
+
+```bash
+curl -s https://<your-authkit-domain>/.well-known/oauth-authorization-server | jq '{issuer, jwks_uri, client_id_metadata_document_supported, token_endpoint_auth_methods_supported}'
+```
+
+Also outstanding: confirmation that CIMD, DCR and the Resource Indicator are all enabled, and
+whether any of the three is paid-gated (assumption A7 — report the cost, do not silently upgrade).
+
+**No WorkOS client secret is needed by any of this.** The Stage-B design is a pure resource server
+that validates signatures against the public JWKS; there is no client secret to obtain, and none
+should be pasted anywhere.
+
+### Stage A re-verified after the Stage-B code landed
+
+The deployed service is intentionally **unchanged** by plan 02-06 — `MCP_AUTH_MODE` is still
+`static` in `deploy/cloud-run.env.yaml`, and the cutover is plan 02-07. Re-checked against
+`https://brett-792870654598.us-central1.run.app` after the `AuthKitJWTVerifier` commit:
+
+| Row | Observed | Verdict |
+|---|---|---|
+| 1 — `POST /mcp`, no `Authorization` | `401`; `WWW-Authenticate` byte-identical to the row-1 string recorded above | **PASS** |
+| 3 — `POST /mcp`, `Authorization: Bearer $MCP_AUTH_SECRET`, `tools/list` | `200` in `0.329 s`; exactly one tool, `fitness_ping` | **PASS** |
+
+The secret was read out of Secret Manager into a temporary file outside the repository, loaded from
+that file by the requesting script — so it never appeared in a command line, a shell history entry
+or a transcript — and the file was deleted immediately afterwards. Its value is not recorded here,
+per this file's redaction rule.
