@@ -58,7 +58,7 @@ Plans (listed in execution order):
 - [x] 02-03-PLAN.md — render.yaml blueprint + static test binding it to Settings (DEPLOY-01) — deliverable superseded by 02-08 after the 2026-08-27 Cloud Run pivot
 - [x] 02-04-PLAN.md — FastAPI mount at / + full local HTTP verification suite (MCP-01, MCP-04)
 - [x] 02-08-PLAN.md — Cloud Run deploy script + env-vars file + Procfile + .gcloudignore + 12-assertion drift test; Render artifacts deleted; docs retargeted (DEPLOY-01)
-- [ ] 02-05-PLAN.md — GCP project + Neon provisioning, gcloud run deploy, deployed Auth Verification Matrix, D-01 CLI proof (DEPLOY-01, MCP-01, MCP-04)
+- [x] 02-05-PLAN.md — GCP project + Neon provisioning, gcloud run deploy, deployed Auth Verification Matrix, D-01 CLI proof (DEPLOY-01, MCP-01, MCP-04)
 - [ ] 02-06-PLAN.md — WorkOS AuthKit project checkpoint + JWKS token verifier (MCP-04, DEPLOY-02)
 - [ ] 02-07-PLAN.md — authkit cutover, Cloud Run --min=1 warm instance, Claude connector round-trip, decision recorded (DEPLOY-02, MCP-04, DEPLOY-01)
 
