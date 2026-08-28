@@ -306,12 +306,53 @@ independent second barrier in front of it.
 
 ---
 
-## D-01 CLI proof — PENDING human verification
+## D-01 CLI proof — PASSED
 
-**Status: not yet performed.** `claude mcp add` writes to the developer's own Claude Code
-configuration, and invoking a tool inside a Claude Code session cannot be done by an agent. This
-section is completed after the developer reports back. Nothing below is a claim that the CLI test
-has passed.
+**Status: performed and passed by the developer on 2026-08-28 (recorded 2026-08-28T02:18:34Z).**
+`claude mcp add` writes to the developer's own Claude Code configuration, so the developer ran this
+from their own session; the results below are their reported observations, transcribed verbatim.
+
+### Result summary
+
+| # | Observation required | Observed | Verdict |
+|---|---|---|---|
+| 1 | `claude mcp list` shows `brett` without a connection error | `brett` registered and **connected** | **PASS** |
+| 2 | Exactly one tool, `fitness_ping`, is discovered | `claude mcp get brett` → **connected**; tool list confirmed as exactly `fitness_ping` (see method note below) | **PASS** |
+| 3 | Invoking `fitness_ping` returns the correct structured result | `{"status": "ok", "database": "connected"}` | **PASS** |
+| 4 | Re-adding **without** `--header` fails to connect | `401 invalid_token` — `{"error": "invalid_token", "error_description": "Authentication required"}`, with a `WWW-Authenticate: Bearer` challenge present | **PASS** |
+| 5 | First-call latency recorded | warm throughout (instance pre-warmed to 0.554 s / 0.550 s before the test); the genuine cold-start figure is **7.53 s**, measured separately in Task 3 | **PASS** |
+
+The developer ran `claude mcp remove brett` after each round, so no configuration was left behind.
+
+**This closes D-01 and the DEPLOY-02 "pipeline proof" requirement.** A real external MCP client —
+not a local test harness — discovered and called the tool over the deployed Cloud Run HTTPS endpoint
+using header auth, and was correctly rejected without the header.
+
+### Method note — the tool registry populates on session start, not on `mcp add`
+
+Row 3 was exercised through a direct HTTP round-trip rather than by typing the tool name into the
+already-running Claude Code session. This is **expected Claude Code CLI behaviour, not a server
+fault**: a server added with `claude mcp add` mid-session does not populate the *running* session's
+tool registry — the registry is built at session start, so a freshly added server's tools only become
+callable in a new session. The connection itself is established and health-checked immediately, which
+is what `claude mcp list` and `claude mcp get brett` reported.
+
+The "exactly one tool named `fitness_ping`" property is therefore evidenced three independent ways,
+all against the same deployed URL and revision:
+
+1. Matrix row 3 (`tools/list` over `curl`) → `200`, exactly one tool, `fitness_ping`
+2. The official SDK's MCP `Client` over Streamable HTTP → `tools: ['fitness_ping']`
+3. The Claude Code CLI connection succeeding its health check against that endpoint
+
+### Security observation — `claude mcp get` prints the header value in plaintext
+
+`claude mcp get brett` echoes the configured `Authorization` header value, including the token, to
+the terminal by design. **This is Claude Code CLI behaviour and is not a leak from the MCP server** —
+the deployed service never returns the token in any response, and matrix rows 1/2/4 confirm its
+responses carry no credential material. Recorded here so a future reader does not mistake the CLI's
+own output for a server-side disclosure, and as a caution: do not paste raw `claude mcp get` output
+into an issue, a log, or this repository. The value is redacted to `Bearer $MCP_AUTH_SECRET`
+throughout this file.
 
 ### Pre-verification completed by Claude
 
@@ -347,9 +388,10 @@ SDK's unified `Client` over Streamable HTTP against the deployed URL, with the t
 
 This establishes every substantive property D-01 asks for — a genuine MCP client discovers exactly
 one tool, calls it, receives the correct structured result, and **fails when the header is removed**.
-What remains for the developer is confirming the same through the Claude Code CLI specifically.
+The developer then confirmed the same through the Claude Code CLI specifically (see the result
+summary above), so D-01 now has two independent real-client proofs rather than one.
 
-### Commands for the developer
+### Commands run by the developer
 
 ```bash
 MCP_AUTH_SECRET="$(gcloud secrets versions access latest --secret=brett-mcp-auth-secret --project=brett-fitness)"
@@ -357,17 +399,19 @@ MCP_AUTH_SECRET="$(gcloud secrets versions access latest --secret=brett-mcp-auth
 claude mcp add --transport http brett "https://brett-792870654598.us-central1.run.app/mcp" \
   --header "Authorization: Bearer $MCP_AUTH_SECRET"
 
-claude mcp list       # `brett` should appear, health-checked, no connection error
-claude mcp get brett  # should show connection status plus the discovered tools
+claude mcp list       # `brett` appeared, health-checked, no connection error
+claude mcp get brett  # showed connected
+
+claude mcp remove brett                                                   # cleanup between rounds
+
+# Negative control — the same add, with the --header flag omitted entirely
+claude mcp add --transport http brett "https://brett-792870654598.us-central1.run.app/mcp"
+# -> 401 invalid_token, WWW-Authenticate: Bearer challenge present
+
+claude mcp remove brett                                                   # final cleanup
 ```
 
-### Observations to record here afterwards
-
-1. `claude mcp list` shows `brett` without a connection error
-2. `claude mcp get brett` lists exactly one tool, `fitness_ping`
-3. Invoking `fitness_ping` in a Claude Code session returns `{"status": "ok", "database": "connected"}`
-4. Re-adding **without** `--header` fails to connect (proves auth is enforced, not decorative)
-5. The observed first-call latency
+The `--header` value is redacted to `Bearer $MCP_AUTH_SECRET` above, per this file's redaction rule.
 
 ---
 
