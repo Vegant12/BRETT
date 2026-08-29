@@ -849,3 +849,89 @@ against the real hostname, so the guard is live and correctly configured for it.
 **To re-run the literal control if ever needed:** set `MCP_AUTH_MODE=static`, redeploy, apply the
 bogus allowlist on an env-only revision, present the static bearer, observe `421`, then revert both.
 Recorded so the method is not lost, not because it is owed.
+
+---
+
+## DEPLOY-02 — BLOCKED at the plan 02-07 Task 3 checkpoint
+
+**Everything up to the client boundary is proven. The client boundary itself is not, and cannot be
+by this agent** — adding a custom connector requires the Claude connector UI on Desktop, Web or
+Mobile and a real OAuth consent flow on the developer's own account (RESEARCH assumption A4). That
+is the single question this entire phase exists to answer, and it has no automatable substitute.
+
+The section heading Task 4's automated check greps for is deliberately **not** written yet, and the
+literal phrase is kept out of this file entirely, so that `grep` still certifies something once real
+observations exist. Plan 02-06 learned this the hard way with `## WorkOS AuthKit (verified)`.
+
+### Claude's discovery sequence, walked by hand from the developer machine
+
+Run so that any failure inside the Claude client is known to be **client-side**. Every hop
+succeeded.
+
+| Step | Check | Observed |
+|---|---|---|
+| 1 | `POST /mcp` with no token returns `401` carrying a `resource_metadata=` pointer | `www-authenticate: Bearer error="invalid_token", error_description="Authentication required", resource_metadata="https://brett-792870654598.us-central1.run.app/.well-known/oauth-protected-resource/mcp"` |
+| 2 | That pointer resolves to a valid RFC 9728 document | `200`; `resource` and a **single-entry** `authorization_servers` |
+| 3 | `authorization_servers[0]` serves RFC 8414 AS metadata | `200`; `authorization_endpoint`, `token_endpoint` and `registration_endpoint` all present |
+| 4 | CIMD preconditions | `client_id_metadata_document_supported: true` **and** `"none"` present — **both hold** |
+| 5 | The `aud` three-way identity | all three strings identical |
+| 6 | Service responsive | `/health` `200` in `0.485 s`, `{"status":"ok","database":"connected"}` |
+
+**Step 3, verbatim:**
+
+```
+issuer                 = https://quiet-fireplace-16-staging.authkit.app
+authorization_endpoint = https://quiet-fireplace-16-staging.authkit.app/oauth2/authorize
+token_endpoint         = https://quiet-fireplace-16-staging.authkit.app/oauth2/token
+registration_endpoint  = https://quiet-fireplace-16-staging.authkit.app/oauth2/register
+```
+
+`registration_endpoint` being present means **DCR is still enabled** as the automatic fallback, which
+is what D-03 asked for.
+
+### The two CIMD preconditions, verbatim (Task 4 must record which mechanism was exercised)
+
+```
+client_id_metadata_document_supported = true
+token_endpoint_auth_methods_supported = ["none","client_secret_post","client_secret_basic"]
+```
+
+Both hold simultaneously, so **Claude is expected to select CIMD, not DCR**. This is a prediction
+about client behaviour, not a server configuration: nothing in our code differs between the two
+paths, and DCR is live either way. Task 4 records what was *observed*, not this expectation.
+
+### The `aud` binding — the three strings that must be one string
+
+RESEARCH Pitfall 8. A mismatch here produces a **completed** OAuth flow followed by a `401` on every
+request, which is the hardest failure in this phase to diagnose because nothing looks broken.
+
+| # | Source | Value |
+|---|---|---|
+| 1 | `MCP_RESOURCE_URL` in `deploy/cloud-run.env.yaml` | `https://brett-792870654598.us-central1.run.app/mcp` |
+| 2 | `resource` in the live metadata document | `https://brett-792870654598.us-central1.run.app/mcp` |
+| 3 | WorkOS Resource Indicator registered in plan 02-06 | `https://brett-792870654598.us-central1.run.app/mcp` |
+| 4 | **The URL the developer must type into Claude** | the same 50-character string |
+
+Asserted programmatically, not by eye. Length `50`, no trailing slash, no query string (T-02-03).
+
+Separately, `authorization_servers[0]` and the AS document's own `issuer` are also byte-identical —
+`https://quiet-fireplace-16-staging.authkit.app` — so Claude will not be redirected to an issuer that
+then disowns the tokens it mints.
+
+### Post-cutover matrix rows, all accounted for before pausing
+
+The plan forbids presenting this checkpoint while any row is an unexplained failure. **None is.**
+Rows 1, 2, 5, 6 pass; row 7 is verified by configuration readback plus the edge barrier; rows 3 and 4
+were not executed for a stated, non-security reason and carry three independent substitutes. No row
+is an unexplained failure.
+
+### What is being asked of the developer
+
+Adding the connector, completing the WorkOS consent screen, calling `fitness_ping`, and confirming
+the negative (connector disabled ⇒ no path to the tool). The five-rung diagnosis ladder in plan
+02-07 Task 3 is the fallback path; **hand-rolling an OAuth authorization server is explicitly out of
+bounds**, and the last rung is a `static_headers` beta request to Anthropic.
+
+**A note on timing for whoever runs it:** Cloud Run stays warm at `--min=1`, so discovery will be
+fast regardless. Neon still autosuspends after 5 minutes, so the *first* `fitness_ping` after a quiet
+period may take ~1.5–2 s. That is the database waking, not the connector failing.
