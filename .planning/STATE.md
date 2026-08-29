@@ -64,7 +64,8 @@ Recent decisions affecting current work:
 - [Roadmap]: MCP auth = bearer token for v1 — **unverified**, resolved by the Phase 2 spike
 - [Roadmap]: Deploy + connector auth spike promoted to Phase 2, ahead of Hevy/analytics work, per unanimous researcher recommendation
 - [Roadmap]: Hevy `/v1/body_measurements` synced in Phase 3 instead of manual-entry-only, unlocking weight trend and recomposition status in v1
-- [Roadmap]: Repo layout flat at BRETT root (`backend/`, `ios/`, `docs/`); deploy target Render
+- [Roadmap]: Repo layout flat at BRETT root (`backend/`, `ios/`, `docs/`); deploy target Google Cloud Run
+- [Phase 2]: MCP connector auth = OAuth 2.1 via WorkOS AuthKit with CIMD; "bearer token, not OAuth" is overturned
 
 ### Pending Todos
 
@@ -76,7 +77,7 @@ None yet.
 
 [Issues that affect future work]
 
-- **Open (Phase 2):** Whether a personal Claude account can authenticate a custom remote MCP connector via bearer token. `static_headers` is beta and org-admin-shaped; the GitHub request for connector bearer support was closed "not planned." Fallback is a minimal OAuth 2.1 resource-server shim.
+- **Resolved (Phase 2, 2026-08-29):** A personal Claude account authenticates a custom remote MCP connector via WorkOS AuthKit (OAuth 2.1, CIMD client identification), not a bearer token — verified on Claude Desktop. See `.planning/phases/02-deploy-connector-auth-spike/02-DEPLOY-LOG.md`.
 - **Open (Phase 3):** Build against the *live* Hevy schema, not the blueprint's assumed one — no `rir`, no `weight_unit`, `pageSize` caps at 10, no stable child-object IDs, events return newest-to-oldest.
 - **Open (Phase 3):** Hevy's real rate limits are undocumented and whether dumbbell weight is per-dumbbell or combined is unverified — both must be discovered empirically during the first full sync and recorded.
 - **Open (Phase 6):** MCP Python SDK had a breaking `FastMCP` → `MCPServer` rework (spec revision 2026-07-28); re-read SDK docs at phase start rather than trusting cached knowledge.

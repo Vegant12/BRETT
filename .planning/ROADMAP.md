@@ -60,7 +60,7 @@ Plans (listed in execution order):
 - [x] 02-08-PLAN.md — Cloud Run deploy script + env-vars file + Procfile + .gcloudignore + 12-assertion drift test; Render artifacts deleted; docs retargeted (DEPLOY-01)
 - [x] 02-05-PLAN.md — GCP project + Neon provisioning, gcloud run deploy, deployed Auth Verification Matrix, D-01 CLI proof (DEPLOY-01, MCP-01, MCP-04)
 - [x] 02-06-PLAN.md — WorkOS AuthKit project checkpoint + JWKS token verifier (MCP-04, DEPLOY-02)
-- [ ] 02-07-PLAN.md — authkit cutover, Cloud Run --min=1 warm instance, Claude connector round-trip, decision recorded (DEPLOY-02, MCP-04, DEPLOY-01)
+- [x] 02-07-PLAN.md — authkit cutover, Cloud Run --min=1 warm instance, Claude connector round-trip, decision recorded (DEPLOY-02, MCP-04, DEPLOY-01)
 
 *Plan 02-08 was inserted on 2026-08-27 when the deploy target moved from Render to Google Cloud Run (revised D-06). It must run before 02-05, which deploys using the script 02-08 creates. Remaining execution order: 02-08 → 02-05 → 02-06 → 02-07.*
 
