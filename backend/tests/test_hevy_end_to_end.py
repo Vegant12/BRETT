@@ -95,7 +95,11 @@ def _mock_hevy(
     workout_pages: dict[int, dict[str, Any]] | None = None,
     remote_count: int = 2,
 ) -> dict[str, Route]:
-    """Serve every endpoint `sync_all` can reach, repeatably.
+    """Serve every endpoint the FULL path reaches, repeatably.
+
+    The events feed is deliberately NOT registered here: respx asserts every registered route
+    was called, so a run that legitimately never goes incremental would fail on teardown for
+    a route it was right not to touch. `_mock_events` is opted into by the tests that drain.
 
     CALLABLE side effects rather than a list of pre-built responses: an `httpx.Response` is a
     one-shot object whose stream is consumed on first use, and every test here runs the whole
@@ -111,9 +115,6 @@ def _mock_hevy(
     def _serve_count(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"workout_count": remote_count})
 
-    def _serve_events(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=hevy_fixture("workout_events_page1"))
-
     def _serve_templates(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=hevy_fixture("exercise_templates_page1"))
 
@@ -125,10 +126,18 @@ def _mock_hevy(
     return {
         "count": mock.get(WORKOUT_COUNT).mock(side_effect=_serve_count),
         "workouts": mock.get(WORKOUTS).mock(side_effect=_serve_workouts),
-        "events": mock.get(EVENTS).mock(side_effect=_serve_events),
         "templates": mock.get(TEMPLATES).mock(side_effect=_serve_templates),
         "body": mock.get(MEASUREMENTS).mock(side_effect=_serve_body),
     }
+
+
+def _mock_events(mock: Router) -> Route:
+    """Serve `/v1/workouts/events` with the canned edit-and-delete feed."""
+
+    def _serve_events(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=hevy_fixture("workout_events_page1"))
+
+    return mock.get(EVENTS).mock(side_effect=_serve_events)
 
 
 async def _cleanup(maker: async_sessionmaker[AsyncSession]) -> None:
@@ -257,6 +266,7 @@ async def test_second_sync_all_takes_the_incremental_path(
     """
     maker = _maker(engine)
     _mock_hevy(httpx2_mock)
+    _mock_events(httpx2_mock)
     try:
         async with _client() as client:
             service = _service(client, maker)
