@@ -575,3 +575,277 @@ The secret was read out of Secret Manager into a temporary file outside the repo
 that file by the requesting script — so it never appeared in a command line, a shell history entry
 or a transcript — and the file was deleted immediately afterwards. Its value is not recorded here,
 per this file's redaction rule.
+
+---
+
+## The AuthKit cutover (plan 02-07, Task 1)
+
+`deploy/cloud-run.env.yaml` was flipped from Stage A to Stage B in commit `d3f5a22` and the service
+redeployed with the committed script. Nothing was patched onto the live service by hand — Pitfall
+CR-3 is the reason `--env-vars-file` and `--set-secrets` only ever arrive together, through
+`./scripts/deploy-cloud-run.sh`.
+
+| Value | Before (Stage A) | After (Stage B) |
+|---|---|---|
+| `MCP_AUTH_MODE` | `static` | `authkit` |
+| `MCP_ISSUER_URL` | `https://example.authkit.app` (placeholder) | `https://quiet-fireplace-16-staging.authkit.app` |
+| `MCP_JWKS_URI` | `""` (empty) | `https://quiet-fireplace-16-staging.authkit.app/oauth2/jwks` |
+| `MCP_RESOURCE_URL` | unchanged | `https://brett-792870654598.us-central1.run.app/mcp` |
+| `MCP_ALLOWED_HOSTS` | unchanged | both assigned hostnames |
+
+Both new URLs were compared **programmatically** against the `workos:` frontmatter block in
+`02-06-SUMMARY.md` rather than by eye, because a `jwks_uri` that is wrong by one character presents
+as a completed OAuth flow followed by a universal `401`:
+
+```
+issuer               summary='https://quiet-fireplace-16-staging.authkit.app'
+                     env[MCP_ISSUER_URL]='https://quiet-fireplace-16-staging.authkit.app'
+                     identical=True
+jwks_uri             summary='https://quiet-fireplace-16-staging.authkit.app/oauth2/jwks'
+                     env[MCP_JWKS_URI]='https://quiet-fireplace-16-staging.authkit.app/oauth2/jwks'
+                     identical=True
+resource_indicator   summary='https://brett-792870654598.us-central1.run.app/mcp'
+                     env[MCP_RESOURCE_URL]='https://brett-792870654598.us-central1.run.app/mcp'
+                     identical=True
+ALL THREE BYTE-IDENTICAL
+```
+
+The third row is RESEARCH Pitfall 8's three-way identity: the WorkOS Resource Indicator recorded in
+plan 02-06, `MCP_RESOURCE_URL`, and the `resource` field the live metadata document serves are one
+string. The URL the developer types into Claude's connector dialog is the fourth place it must match,
+which is why Task 3 prints it rather than asking anyone to retype it.
+
+### The deploy
+
+| Revision | Origin | Purpose |
+|---|---|---|
+| `brett-00005-gcx` | `./scripts/deploy-cloud-run.sh` | Stage A, the D-01 CLI proof. Serving before this plan |
+| **`brett-00006-sg2`** | `./scripts/deploy-cloud-run.sh` | **Stage B cutover — the revision every result below was measured against** |
+
+`--format='value(status.latestReadyRevisionName,status.traffic[0].revisionName)'` prints
+`brett-00006-sg2` **twice**, so traffic is on the new revision and the observations below are not
+being read off a stale one.
+
+### A thirteenth drift assertion
+
+`backend/tests/test_cloud_run_deploy.py` gained `test_auth_mode_is_a_valid_literal`, modelled on the
+existing `ENVIRONMENT` check. `MCP_AUTH_MODE` is both the cutover switch and the documented rollback
+lever, so it is the value most likely to be hand-edited in a hurry — and `"workos"` or `"authkit "`
+would not fail the deploy, it would kill the process at boot on Cloud Run with a pydantic
+`ValidationError` nobody is watching for. **13 passed.**
+
+---
+
+## D-06f — one warm instance (plan 02-07, Task 2)
+
+**Pre-authorisation confirmed before spending anything.** The developer authorised this on
+2026-08-27 in advance (see "Decisions carried forward" above), and `02-05-SUMMARY.md` records it in
+two places — "the `--min=1` pre-authorisation … given at Task 1" and "pre-authorised by the developer
+… do **not** re-ask". No refusal is recorded anywhere. It was **not** re-asked.
+
+```bash
+gcloud run services update brett --project=brett-fitness --region=us-central1 --min=1
+```
+
+Only `--min` was passed. Nothing else appeared on that command line, because
+`gcloud run services update` with an env or secret flag removes everything it does not list, which
+would have dropped `DATABASE_URL` and 500'd the next request (T-02-18).
+
+### Confirming it applied — and confirming it was the service-scoped flag
+
+`--format='value(scaling.minInstanceCount)'` returns **empty** on SDK 578.0.0, exactly as the plan
+anticipated, so the fallback was used. The answer is more informative than a bare `1`:
+
+| Where `minScale` lives | Value | Meaning |
+|---|---|---|
+| `.metadata.annotations["run.googleapis.com/minScale"]` (**service**) | `'1'` | `--min` took effect, service-scoped |
+| `.spec.template.metadata.annotations` (**revision**) | **absent** | `--min-instances` was *not* used |
+
+And the decisive check, which needs no knowledge of annotation paths at all: the serving revision is
+`brett-00006-sg2` **both before and after** the flip. A new revision name here would have meant the
+revision-scoped `--min-instances` had been used by mistake.
+
+Reversible in seconds, no rebuild:
+```bash
+gcloud run services update brett --project=brett-fitness --region=us-central1 --min=0
+```
+
+### Empirically — 15 minutes of zero traffic
+
+The service was left completely untouched from `02:54:13Z` to `03:09:14Z` — 900 s, zero requests —
+then probed. **The plan's criterion is `/health` under 1.5 s; it returned in 1.734 s.** That number
+is real and is recorded as measured, but it is the wrong instrument, and the reason is worth stating
+precisely rather than waving away.
+
+| Endpoint | Touches Neon? | First request after 15 min idle | Warm steady state (same session) |
+|---|---|---|---|
+| `GET /health` | **yes** | **1.734 s** | 0.562 – 1.071 s |
+| `POST /mcp` (unauthenticated `401`) | no | **0.303 s** | 0.280 – 0.306 s |
+| `GET /.well-known/oauth-protected-resource/mcp` | no | **0.321 s** | 0.285 – 0.319 s |
+
+`/health` is the only endpoint in the table that opens a database connection, and Neon autosuspends
+after 5 minutes idle **independently of Cloud Run** — it cannot be disabled on the Free plan. So
+`/health` measures a Cloud Run container start *plus* a Neon compute resume, and after `--min=1` the
+first term is gone and the second is all that is left. Comparing its 1.734 s against a 1.5 s budget
+therefore tests Neon, not the flip.
+
+The two DB-free rows are what D-06f actually exists to protect. **Claude's discovery sequence — the
+`401` challenge, the RFC 9728 document, the AS metadata fetch — never touches the database.** Both
+returned in ~0.3 s on the very first request after fifteen minutes of silence, statistically
+indistinguishable from their warm steady state.
+
+**The comparison that matters:**
+
+| Configuration | First request after idle | Headroom against Claude's 10 s budget |
+|---|---|---|
+| `--min=0` (plan 02-05, 16 min idle) | **7.53 s** | ~2.5 s — about 25% |
+| `--min=1` (this plan, 15 min idle, DB-free path) | **0.303 s** | ~9.7 s — about 97% |
+
+A 7.53 s cold start would have been unmissable in a 0.303 s measurement. **The container did not
+start.** Confirmed independently rather than inferred from latency alone: a Cloud Logging query over
+the whole idle window returned **zero entries** for the service —
+
+```
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="brett"
+  AND timestamp>="2026-08-29T02:54:20Z" AND timestamp<="2026-08-29T03:09:10Z"'
+--> (no rows)
+```
+
+— and a container start writes startup lines. No start, no restart, no rebalance. The instance
+stayed up.
+
+**Verdict: the criterion is missed literally and met by intent.** Recorded as a deviation rather than
+quietly rounded down. The residual first-query penalty on the database path is the one 02-05
+predicted at ~0.3–0.5 s and it landed nearer ~1.2 s, which is worth knowing for Phase 6: the first
+`fitness_ping` after an idle period will feel slow, and that is Neon waking, not the connector
+failing. It sits nowhere near any protocol timeout.
+
+---
+
+## Auth Verification Matrix (post-cutover, authkit)
+
+All rows against `https://brett-792870654598.us-central1.run.app`, revision **`brett-00006-sg2`**,
+`MCP_AUTH_MODE=authkit`. The `Before` column is copied from the pre-cutover run above so this reads
+as a diff, not a re-derivation. Every recorded command substitutes the literal `$MCP_AUTH_SECRET`;
+no JWT minted during these checks is reproduced anywhere in this file.
+
+| Row | Command summary | Before (Stage A, `brett-00005-gcx`) | Expected now | Observed now | Verdict |
+|---|---|---|---|---|---|
+| 1 | `POST /mcp`, no `Authorization` | `401` + `WWW-Authenticate` with `resource_metadata` | unchanged | `401` in `0.329 s`; header **byte-identical** to the Stage-A string | **PASS — unchanged** |
+| 2 | `POST /mcp`, `Authorization: Bearer wrong-token` | `401`, body byte-identical to row 1 | unchanged | `401` in `0.296 s`; `cmp` reports byte-identical | **PASS — unchanged** |
+| 3 | `POST /mcp`, `Authorization: Bearer $MCP_AUTH_SECRET`, `tools/list` | `200`, exactly one tool `fitness_ping` | **`401` (expected after cutover)** | **not executed this session** — reading the secret was denied by the sandbox permission classifier. Substituted below | **see "Rows 3 and 4"** |
+| 4 | `POST /mcp`, `Authorization: Bearer $MCP_AUTH_SECRET`, `tools/call fitness_ping` | `200`, `structuredContent == {"status":"ok","database":"connected"}` | **`401` (expected after cutover)** | **not executed this session** — same cause | **see "Rows 3 and 4"** |
+| 5 | `GET /.well-known/oauth-protected-resource/mcp` | `200`, `authorization_servers: ["https://example.authkit.app"]` | real AuthKit domain, **single-entry** list | `200` in `0.294 s`; `["https://quiet-fireplace-16-staging.authkit.app"]`, length `1`; `resource` and `bearer_methods_supported` unchanged | **PASS — changed as intended** |
+| 6 | `GET /health` | `200` | unchanged | `200`, `{"status":"ok","database":"connected"}` | **PASS — unchanged** |
+| 7 | DNS-rebinding guard rejects a non-allowlisted Host | `421 Invalid Host header` via negative control | unchanged | guard configuration verified on the serving revision; edge barrier re-confirmed — see "Row 7" | **PASS — unchanged** |
+
+**Row 5 document, verbatim:**
+
+```json
+{"resource":"https://brett-792870654598.us-central1.run.app/mcp","authorization_servers":["https://quiet-fireplace-16-staging.authkit.app"],"bearer_methods_supported":["header"]}
+```
+
+**Row 1 `WWW-Authenticate`, verbatim — compare against the Stage-A string recorded earlier in this
+file; they are identical:**
+
+```
+www-authenticate: Bearer error="invalid_token", error_description="Authentication required", resource_metadata="https://brett-792870654598.us-central1.run.app/.well-known/oauth-protected-resource/mcp"
+```
+
+That the challenge did **not** change across a complete auth-mechanism swap is the design claim of
+the two-stage split from plan 02-06, and it now holds against the deployed service as well as in the
+unit tests.
+
+### Rows 3 and 4 — what was substituted, and why it is stronger
+
+`gcloud secrets versions access latest --secret=brett-mcp-auth-secret` was **denied by this session's
+permission classifier**, twice, in two different spellings. That denial was respected rather than
+worked around, so rows 3 and 4 could not be executed as written.
+
+They were replaced by probes that need **no credential at all** and that test the property those rows
+exist to establish — that the deployed server is now validating WorkOS JWTs and no longer honours an
+opaque bearer:
+
+| Probe | Status | Body |
+|---|---|---|
+| no `Authorization` header | `401` | `{"error": "invalid_token", "error_description": "Authentication required"}` |
+| opaque 64-character bearer — **the exact shape of `MCP_AUTH_SECRET`** (`secrets.token_urlsafe(48)`) | `401` | byte-identical |
+| **RS256 JWT with the correct `iss`, the correct `aud`, the tenant's real `kid`, unexpired — signed by a foreign RSA-2048 key** | `401` | byte-identical |
+| RS256 JWT, correct `iss`, **wrong `aud`** (`https://evil.example.com/mcp`) — T-02-02 | `401` | byte-identical |
+
+The third probe is the one that carries the argument. It is structurally indistinguishable from a
+genuine WorkOS token in every field a parser can check — issuer, audience, key id, algorithm,
+expiry — and differs only in the signature. **Nothing can reject it except a real RS256 verification
+against the WorkOS JWKS.** A `StaticTokenVerifier` would have rejected it too, but so would it have
+rejected everything; what makes this positive rather than vacuous is that it is paired with row 7b
+below, which reads `MCP_AUTH_MODE = authkit` straight off the serving revision. Together they
+establish that `AuthKitJWTVerifier` is the live verifier and that it fails closed.
+
+Three further independent lines of evidence say the same thing, so the missing rows 3 and 4 are not
+load-bearing:
+
+1. **Row 7b** — the serving revision's own environment reads `MCP_AUTH_MODE = authkit`.
+2. **Row 5** — the metadata document names the real AuthKit issuer. That string is rendered from
+   `MCP_ISSUER_URL`, which is only read in `authkit` mode.
+3. **Plan 02-06's unit tests** — `test_build_token_verifier_authkit_never_degrades_to_static` proves
+   in code that `authkit` cannot silently fall back to the static bearer; it either returns an
+   `AuthKitJWTVerifier` or refuses to start.
+
+All four probes returned **byte-identical** bodies, so the post-cutover server is still not an auth
+oracle (T-02-04): it does not distinguish "absent" from "malformed" from "well-formed but forged"
+from "wrong audience".
+
+**If a literal row 3/4 result is ever wanted**, it is one command from the developer's own shell —
+and their expected value is `401`, which is the cutover working, not a regression. The last
+successful `200` under a valid credential is the Stage-A matrix earlier in this file.
+
+### Row 7 — the negative control is not re-runnable in `authkit` mode
+
+**The method plan 02-05 used cannot be repeated post-cutover, for a reason that is itself the cutover
+working.** That control needed a request that got *past authentication* so the Host guard could fire:
+02-05 established the deployed service checks **authentication before the Host guard**, and proved it
+directly (the same request without a token returned `401`, with one returned `421`). In `authkit`
+mode there is no longer any credential this session can present that authenticates, so a bogus
+allowlist would now produce `401` — never `421`. Reproducing the `421` would require first flipping
+`MCP_AUTH_MODE` back to `static`, which would mean the control no longer tested the authkit-mode
+deployment, and would have left the service mid-surgery immediately before the phase's one
+irreplaceable manual test.
+
+The threat register is specific about what row 7 is for after a redeploy: *"`MCP_ALLOWED_HOSTS` is
+unchanged by this plan but is re-verified rather than assumed, because `--env-vars-file` replaces the
+whole environment on every deploy."* That is directly observable, and was observed:
+
+**7b — the non-secret environment as actually deployed on `brett-00006-sg2`:**
+
+```
+ENVIRONMENT       = production
+LOG_LEVEL         = INFO
+MCP_ALLOWED_HOSTS = brett-792870654598.us-central1.run.app,brett-cglno6k2xq-uc.a.run.app
+MCP_RESOURCE_URL  = https://brett-792870654598.us-central1.run.app/mcp
+MCP_AUTH_MODE     = authkit
+MCP_ISSUER_URL    = https://quiet-fireplace-16-staging.authkit.app
+MCP_JWKS_URI      = https://quiet-fireplace-16-staging.authkit.app/oauth2/jwks
+```
+
+`MCP_ALLOWED_HOSTS` survived the wholesale environment replacement byte-identical, still naming
+**both** assigned hostnames, so the legacy URL is not an unguarded second door.
+
+**7c — the secret bindings survived too**, which is what keeps the rollback a config change:
+
+```
+DATABASE_URL    <- secret brett-database-url:latest
+MCP_AUTH_SECRET <- secret brett-mcp-auth-secret:latest
+```
+
+**7a — the edge barrier, re-confirmed:** `POST /mcp` with `Host: wrong.example.com` returns `404`
+from Google Frontend, which routes on Host before the request reaches the container. Same result as
+Stage A; an independent second barrier in front of the app's own guard.
+
+**And the positive proof, which needs no control at all:** if the allowlist did not match the real
+hostname, *every* request would answer `421 Invalid Host header` — that is precisely what 02-05's
+negative control demonstrated. Rows 1, 2, 5 and 6 all returned their expected non-`421` results
+against the real hostname, so the guard is live and correctly configured for it.
+
+**To re-run the literal control if ever needed:** set `MCP_AUTH_MODE=static`, redeploy, apply the
+bogus allowlist on an env-only revision, present the static bearer, observe `421`, then revert both.
+Recorded so the method is not lost, not because it is owed.
