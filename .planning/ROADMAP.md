@@ -74,7 +74,23 @@ Plans (listed in execution order):
   3. An injected mid-sync failure (network drop, malformed page, rate limit) leaves all previously-synced data intact and the sync resumable from where it left off
   4. Every synced exercise resolves to canonical muscle groups with direct/indirect distinction and a front/side/rear deltoid split, and a manual override changes the effective mapping while the original source mapping stays visible for audit
   5. Each data source reports a readable `last_synced_at`, and all Hevy request/response code lives only under `backend/app/integrations/hevy/`
-**Plans**: TBD
+**Plans**: 12 plans
+
+Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
+- [ ] 03-01-PLAN.md — Wave 1: dependency/packaging fixes (httpx2 to runtime, tenacity, pytest-httpx2), `api-key` on the log deny-list, canned Hevy fixtures + conftest loader (HEVY-08)
+- [ ] 03-02-PLAN.md — Wave 1: workouts / workout_exercises / workout_sets models + migration 0003 + live-schema tests (HEVY-03, HEVY-04)
+- [ ] 03-03-PLAN.md — Wave 1: 19-group canonical muscle taxonomy, Hevy 20-value translation, curated deltoid/oblique split (NORM-01, NORM-03)
+- [ ] 03-04-PLAN.md — Wave 2: exercise_templates / exercise_muscles / overrides / body_measurements / sync_state + migration 0004 + sync-state repository (HEVY-06, HEVY-07, HEVY-09, NORM-02, NORM-03)
+- [ ] 03-05-PLAN.md — Wave 2: HevyClient — errors, wire schemas, per-endpoint page sizes, tenacity retry policy, HEVY-05 isolation test (HEVY-01, HEVY-02, HEVY-05..08)
+- [ ] 03-06-PLAN.md — Wave 3: idempotent workout persistence + full sync with per-page commit, checkpoint resume and SAVEPOINT quarantine (HEVY-01, HEVY-03, HEVY-08, HEVY-09)
+- [ ] 03-07-PLAN.md — Wave 3: exercise-template sync + effective muscle-mapping resolver with auditable override (HEVY-06, HEVY-09, NORM-01, NORM-02, NORM-03)
+- [ ] 03-08-PLAN.md — Wave 3: body-measurement sync keyed on the calendar date, with the 404 page terminator (HEVY-07, HEVY-09)
+- [ ] 03-09-PLAN.md — Wave 4: incremental event sync — frozen-cursor drain, oldest-first apply, deletion propagation (HEVY-02, HEVY-04, HEVY-09)
+- [ ] 03-10-PLAN.md — Wave 5: HevySyncService facade, `python -m app.cli sync-hevy`, end-to-end mock-Hevy test (HEVY-01, HEVY-02, HEVY-05, HEVY-09)
+- [ ] 03-11-PLAN.md — Wave 6 (checkpoints): live Hevy Pro sync; record real rate limits, page ordering, dumbbell semantics and measurement units (HEVY-01, HEVY-02, HEVY-07, HEVY-09)
+- [ ] 03-12-PLAN.md — Wave 7: close the curation gap against the real exercise inventory + `mapping-gaps` command (HEVY-06, NORM-01, NORM-02, NORM-03)
+
+*Plan 03-01 is this phase's Wave 0: it moves `httpx2` from the dev group into runtime dependencies (a bare `uv sync` in Cloud Run would otherwise ship an image that ImportErrors on first sync), adds `api-key` to `DENY_KEYS`, and commits the canned Hevy fixtures every later plan mocks against.*
 
 ### Phase 4: Volume & Frequency Analytics
 **Goal**: The system can answer "how much work am I doing, and which muscles is it reaching?" from stored data, with honest metadata attached to every answer
@@ -132,7 +148,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 |-------|----------------|--------|-----------|
 | 1. Backend Foundation | 0/5 | Planned | - |
 | 2. Deploy & Connector Auth Spike | 4/8 | Executing | - |
-| 3. Hevy Integration & Normalization | 0/TBD | Not started | - |
+| 3. Hevy Integration & Normalization | 0/12 | Planned | - |
 | 4. Volume & Frequency Analytics | 0/TBD | Not started | - |
 | 5. Progression, Records & Recomposition Analytics | 0/TBD | Not started | - |
 | 6. MCP Tools | 0/TBD | Not started | - |
