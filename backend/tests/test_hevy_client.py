@@ -137,17 +137,17 @@ async def test_events_request_serialises_since_as_utc_z(httpx2_mock: Router) -> 
 async def test_events_request_rejects_naive_since(httpx2_mock: Router) -> None:
     """FOUND-04: a naive datetime has no defined instant, so it cannot be a cursor.
 
-    Rejected BEFORE any request is issued -- `route.call_count == 0` is half the assertion.
-    Sending a naive value would silently reinterpret the checkpoint in whatever offset the
-    machine happens to run in.
+    Rejected BEFORE any request is issued, and that half of the claim is asserted twice
+    over. No route is registered at all, so respx's `assert_all_mocked` would raise on any
+    request the client managed to send; `httpx2_mock.calls` then states the same property
+    positively. Sending a naive value would silently reinterpret the checkpoint in whatever
+    offset the process happens to run in.
     """
-    route = httpx2_mock.get(EVENTS).mock(side_effect=[_ok()])
-
     async with _client() as client:
         with pytest.raises(ValueError, match="naive datetime"):
             await client.get_workout_events(since=dt.datetime(2026, 8, 1, 0, 0), page=1)  # noqa: DTZ001
 
-    assert route.call_count == 0
+    assert not httpx2_mock.calls, "the guard must fire before the transport, not after it"
 
 
 async def test_rate_limit_is_retried_then_succeeds(httpx2_mock: Router) -> None:
