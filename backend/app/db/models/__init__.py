@@ -9,5 +9,6 @@ Every new model must be imported here.
 """
 
 from app.db.models.user import User
+from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
 
-__all__ = ["User"]
+__all__ = ["User", "Workout", "WorkoutExercise", "WorkoutSet"]
