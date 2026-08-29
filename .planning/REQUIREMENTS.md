@@ -59,17 +59,17 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 ### MCP Server
 
-- [ ] **MCP-01**: A remote MCP server is deployed and reachable over HTTPS, independent of any specific device's local configuration
+- [x] **MCP-01**: A remote MCP server is deployed and reachable over HTTPS, independent of any specific device's local configuration
 - [ ] **MCP-02**: MCP server exposes purpose-built, read-only tools covering: recent workouts, a composed training summary, weekly volume, muscle-group volume, exercise progression, personal records, plateaus, training frequency, body-weight trend, recomposition status, and period comparison
 - [ ] **MCP-03**: MCP tools return compact, structured JSON — never raw database access or unbounded result sets
-- [ ] **MCP-04**: MCP server authenticates requests and rejects unauthenticated ones; the authentication mechanism is verified working end-to-end from an actual Claude client (not just a local test client) before being considered done
+- [x] **MCP-04**: MCP server authenticates requests and rejects unauthenticated ones; the authentication mechanism is verified working end-to-end from an actual Claude client (not just a local test client) before being considered done
 - [ ] **MCP-05**: No MCP tool can modify, delete, or write any data — the server is read-only in v1
 - [ ] **MCP-06**: No API keys, database credentials, or internal secrets are ever returned in an MCP tool response
 
 ### Deployment & Coaching
 
-- [ ] **DEPLOY-01**: Backend and MCP server are deployed to Google Cloud Run over HTTPS, with every credential supplied from Google Secret Manager and nothing committed
-- [ ] **DEPLOY-02**: A Claude custom connector can be added pointing at the deployed MCP endpoint and successfully discovers and calls tools
+- [x] **DEPLOY-01**: Backend and MCP server are deployed to Google Cloud Run over HTTPS, with every credential supplied from Google Secret Manager and nothing committed
+- [x] **DEPLOY-02**: A Claude custom connector can be added pointing at the deployed MCP endpoint and successfully discovers and calls tools
 - [ ] **DEPLOY-03**: System includes automated tests covering Hevy sync (auth, pagination, incremental events, duplicate prevention, deletions, failures), analytics calculations against known workouts, and MCP tool schemas/auth/output structure
 - [ ] **COACH-01**: A separate system-prompt/instructions document defines the body-recomposition coaching behavior and decision framework for Claude to follow when using the MCP tools
 
@@ -127,10 +127,10 @@ Every v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for p
 | FOUND-03 | Phase 1 | Backend Foundation | Complete |
 | FOUND-04 | Phase 1 | Backend Foundation | Complete |
 | FOUND-05 | Phase 1 | Backend Foundation | Complete |
-| MCP-01 | Phase 2 | Deploy & Connector Auth Spike | Pending |
-| MCP-04 | Phase 2 | Deploy & Connector Auth Spike | Pending |
-| DEPLOY-01 | Phase 2 | Deploy & Connector Auth Spike | Pending |
-| DEPLOY-02 | Phase 2 | Deploy & Connector Auth Spike | Pending |
+| MCP-01 | Phase 2 | Deploy & Connector Auth Spike | Complete |
+| MCP-04 | Phase 2 | Deploy & Connector Auth Spike | Complete |
+| DEPLOY-01 | Phase 2 | Deploy & Connector Auth Spike | Complete |
+| DEPLOY-02 | Phase 2 | Deploy & Connector Auth Spike | Complete |
 | HEVY-01 | Phase 3 | Hevy Integration & Normalization | Pending |
 | HEVY-02 | Phase 3 | Hevy Integration & Normalization | Pending |
 | HEVY-03 | Phase 3 | Hevy Integration & Normalization | Pending |
