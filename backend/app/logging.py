@@ -41,6 +41,10 @@ from app.config import Settings
 DENY_KEYS = frozenset(
     {
         "api_key",
+        # Hevy's live OpenAPI declares the auth header as the literal name `api-key`
+        # (lowercase, hyphen). `api_key` and `x-api-key` were already here; this exact
+        # spelling was not, and it is the one this project actually sends (Pitfall 9).
+        "api-key",
         "apikey",
         "hevy_api_key",
         "authorization",
