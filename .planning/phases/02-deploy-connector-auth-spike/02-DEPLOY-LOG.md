@@ -998,3 +998,56 @@ The connector-disabled check is a **client-side UX confirmation** that Claude do
 it has not been granted. It is not a server control, and no server behaviour depends on it. The gap
 is therefore narrow and non-blocking, and it is cheap to close: toggle the connector off in Claude
 Desktop and confirm `fitness_ping` is no longer offered.
+
+---
+
+## Connector round-trip (DEPLOY-02)
+
+**The spike's question is answered: yes.** A personal Claude account, on Claude Desktop, authenticated
+to a self-hosted remote MCP server on Cloud Run through WorkOS AuthKit, discovered `fitness_ping` and
+called it successfully — at the first attempt, with no diagnosis rung needed and the Advanced OAuth
+fields left empty.
+
+| Field | Observed |
+|---|---|
+| Date | 2026-08-29 |
+| Client | **Claude Desktop** (satisfies DEPLOY-02; Claude Code would not) |
+| Authentication setting | Always required |
+| Client identification | **CIMD** — Anthropic's hosted client metadata document |
+| DCR | Enabled and available, **never exercised** — `registration_endpoint` is live but was not needed |
+| Consent flow | WorkOS AuthKit sign-in + consent completed; connector connected |
+| Tool result | `{"status": "ok", "database": "connected"}` |
+| Diagnosis rung reached | **0 — none needed** |
+| Advanced OAuth client ID/secret | Left empty, so CIMD/DCR is what was actually tested |
+| Serving revision | `brett-00006-sg2`, `MCP_AUTH_MODE=authkit` |
+
+**Why CIMD and not DCR.** The tenant's RFC 8414 document advertises
+`client_id_metadata_document_supported: true` *and* `"none"` in
+`token_endpoint_auth_methods_supported`. Claude selects CIMD only when **both** hold; both held, and
+CIMD is what Claude used. This was recorded as a prediction *before* the test and is now an
+observation. Nothing in BRETT's code differs between the two paths — the server is a resource server
+and never sees client registration either way.
+
+### Assumption resolutions
+
+| ID | Assumption | Resolution |
+|---|---|---|
+| **A4** | A personal Claude account can complete the connector OAuth consent flow against a self-hosted MCP resource server | **RESOLVED — YES.** Claude Desktop completed the AuthKit consent flow on the developer's own personal account and called the tool. This was the phase's central unknown and the reason Phase 2 existed as a spike |
+| **A6** | `stateless_http=True` is compatible with Claude's connector | **RESOLVED — YES.** `backend/app/mcp/server.py:78` sets `stateless_http=True`, and the connector completed discovery, consent and a tool call against exactly that configuration. Under the `2026-07-28` transport there is no session to lose, and Claude never attempted a `GET` stream |
+| **A-CR-3** | Cloud Run forwards the original public `Host` header rather than an internal one | **RESOLVED — YES**, in plan 02-05, by row 7 returning `421 Invalid Host header` against the deployed service. Post-cutover the allowlist was re-verified by reading `MCP_ALLOWED_HOSTS` back off the serving revision (byte-identical) rather than by re-running the `421` control, which is not reproducible in `authkit` mode — auth precedes the host guard, so a bogus allowlist now returns `401`, never `421`. The connector's success is itself a positive proof: a wrong allowlist would have made **every** request `421` |
+| **A-CR-6** | Cloud Run cold start is ~3–5 s at `min=0` | **RESOLVED — REFUTED IN MAGNITUDE, THEN MITIGATED.** Measured **7.53 s**, roughly double the assumed range and leaving only ~2.5 s of headroom against Claude's 10-second discovery budget. `--min=1` (D-06f) removed it: **0.303 s** on `POST /mcp` and **0.321 s** on the metadata document, on the first request after 900 s of zero traffic, corroborated by an empty Cloud Logging query across the whole idle window. Had the assumption been trusted rather than measured, the connector test would have been a coin toss |
+| **A-CR-7** | A rotated `:latest` secret only reaches a running service after the next instance start | **UNRESOLVED — remains untested.** No secret was rotated during this phase, so nothing was observed either way. **`--min=1` makes this sharper, not softer:** an instance now stays up indefinitely instead of being recycled by scale-to-zero, so a rotated secret may never reach the running service without a forced new revision. Treat a rotation as requiring a deliberate redeploy until proven otherwise — relevant to Phase 7's secret-rotation work |
+
+### Requirements closed
+
+- **DEPLOY-02** — a Claude custom connector on a real Desktop client discovered and successfully
+  called the throwaway tool against the deployed `/mcp` endpoint.
+- **MCP-04** — unauthenticated rejected (matrix rows 1–2 plus four credential-free probes, all
+  `401` with byte-identical bodies), authenticated succeeds (the connector's `fitness_ping` call),
+  both verified against the deployed URL after the cutover. The client-boundary negative
+  (connector disabled) is the one narrow item not explicitly confirmed — see the gap note above.
+- **DEPLOY-01** — the service is live on Cloud Run over HTTPS with every credential from Google
+  Secret Manager and nothing committed.
+
+Every credential remains redacted throughout this log: `MCP_AUTH_SECRET` is referred to by name only,
+and no JWT — including the forged ones minted for the probes — was ever written here.
