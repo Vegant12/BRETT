@@ -77,9 +77,9 @@ Plans (listed in execution order):
 **Plans**: 12 plans
 
 Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
-- [ ] 03-01-PLAN.md — Wave 1: dependency/packaging fixes (httpx2 to runtime, tenacity, pytest-httpx2), `api-key` on the log deny-list, canned Hevy fixtures + conftest loader (HEVY-08)
-- [ ] 03-02-PLAN.md — Wave 1: workouts / workout_exercises / workout_sets models + migration 0003 + live-schema tests (HEVY-03, HEVY-04)
-- [ ] 03-03-PLAN.md — Wave 1: 19-group canonical muscle taxonomy, Hevy 20-value translation, curated deltoid/oblique split (NORM-01, NORM-03)
+- [x] 03-01-PLAN.md — Wave 1: dependency/packaging fixes (httpx2 to runtime, tenacity, pytest-httpx2), `api-key` on the log deny-list, canned Hevy fixtures + conftest loader (HEVY-08)
+- [x] 03-02-PLAN.md — Wave 1: workouts / workout_exercises / workout_sets models + migration 0003 + live-schema tests (HEVY-03, HEVY-04)
+- [x] 03-03-PLAN.md — Wave 1: 19-group canonical muscle taxonomy, Hevy 20-value translation, curated deltoid/oblique split (NORM-01, NORM-03)
 - [ ] 03-04-PLAN.md — Wave 2: exercise_templates / exercise_muscles / overrides / body_measurements / sync_state + migration 0004 + sync-state repository (HEVY-06, HEVY-07, HEVY-09, NORM-02, NORM-03)
 - [ ] 03-05-PLAN.md — Wave 2: HevyClient — errors, wire schemas, per-endpoint page sizes, tenacity retry policy, HEVY-05 isolation test (HEVY-01, HEVY-02, HEVY-05..08)
 - [ ] 03-06-PLAN.md — Wave 3: idempotent workout persistence + full sync with per-page commit, checkpoint resume and SAVEPOINT quarantine (HEVY-01, HEVY-03, HEVY-08, HEVY-09)
