@@ -852,16 +852,25 @@ Recorded so the method is not lost, not because it is owed.
 
 ---
 
-## DEPLOY-02 — BLOCKED at the plan 02-07 Task 3 checkpoint
+## DEPLOY-02 — the pre-checkpoint state (RESOLVED 2026-08-29)
+
+> **RESOLVED.** The checkpoint described below was completed successfully by the developer on
+> 2026-08-29. This section is kept exactly as it was written at the pause, because it is the evidence
+> that makes the result *interpretable*: every automatable hop was proven **before** the manual test,
+> so a success is attributable and a failure would have been isolable to the client. The outcome is
+> in **"The developer's report back"** at the end of this section; the formal record and the
+> assumption resolutions are in the final round-trip section below, written by Task 4.
 
 **Everything up to the client boundary is proven. The client boundary itself is not, and cannot be
 by this agent** — adding a custom connector requires the Claude connector UI on Desktop, Web or
 Mobile and a real OAuth consent flow on the developer's own account (RESEARCH assumption A4). That
 is the single question this entire phase exists to answer, and it has no automatable substitute.
 
-The section heading Task 4's automated check greps for is deliberately **not** written yet, and the
-literal phrase is kept out of this file entirely, so that `grep` still certifies something once real
-observations exist. Plan 02-06 learned this the hard way with `## WorkOS AuthKit (verified)`.
+The section heading Task 4's automated check greps for was deliberately **not** written at the time
+of the pause, and the literal phrase was kept out of this file entirely, so that `grep` still
+certified something once real observations existed. Plan 02-06 learned this the hard way with
+`## WorkOS AuthKit (verified)`. That heading is now written, by Task 4, below — on the strength of
+observations rather than expectations.
 
 ### Claude's discovery sequence, walked by hand from the developer machine
 
@@ -935,3 +944,57 @@ bounds**, and the last rung is a `static_headers` beta request to Anthropic.
 **A note on timing for whoever runs it:** Cloud Run stays warm at `--min=1`, so discovery will be
 fast regardless. Neon still autosuspends after 5 minutes, so the *first* `fitness_ping` after a quiet
 period may take ~1.5–2 s. That is the database waking, not the connector failing.
+
+### The developer's report back (2026-08-29)
+
+The checkpoint was completed. Reported verbatim:
+
+| Question asked | Answer |
+|---|---|
+| Which client? | **Claude Desktop** |
+| Authentication setting | **Always required** |
+| Client identification | **Anthropic's hosted client metadata (CIMD)** — DCR was not used or needed |
+| OAuth flow | Completed the WorkOS AuthKit sign-in/consent screen; **connector connected successfully** |
+| `fitness_ping` result | `{"status": "ok", "database": "connected"}` |
+| Diagnosis rung needed | **None** — first attempt succeeded |
+| Problems | None reported |
+
+**CIMD was exercised, as predicted, and the prediction is now an observation.** The discovery
+document advertised `client_id_metadata_document_supported: true` *and* `"none"` in
+`token_endpoint_auth_methods_supported`, and Claude Desktop duly selected CIMD. `registration_endpoint`
+remains live, so **DCR stays available as an untested-but-configured fallback** — it was never
+exercised because it was never needed.
+
+#### Task 3 acceptance criteria, each checked against the report
+
+| Criterion | Result |
+|---|---|
+| Client named, and is Desktop/Web/Mobile — not Claude Code | **PASS** — Claude Desktop |
+| Advanced OAuth client ID/secret left empty on the first attempt, so CIMD/DCR is what was tested | **PASS, by inference** — the developer reported CIMD identified the client and that no diagnosis rung was needed; entering pre-registered credentials *is* rung 4, so reaching success at rung 0 entails the fields were empty |
+| `fitness_ping` returned `{"status": "ok", "database": "connected"}` verbatim | **PASS** — byte-identical to the expected string, a real structured result |
+| Developer confirmed the negative (connector disabled ⇒ no path to the tool) | **NOT EXPLICITLY CONFIRMED — see the gap note below** |
+| Diagnosis rung and observed error recorded if any was needed | **PASS (vacuous)** — none needed; recorded as rung 0 |
+| The two CIMD preconditions recorded verbatim | **PASS** — recorded above at the pause, before the result was known |
+| `authorization_servers` is a single-entry list | **PASS** — asserted `len(...) == 1` |
+| No token entered into a URL query string (T-02-03) | **PASS** — the URL entered carries no query string; asserted programmatically at length 50 |
+
+#### The one gap, stated rather than assumed
+
+**The connector-disabled negative was not explicitly confirmed in the report-back.** It was included
+in the instructions given to the developer, and nothing was reported as failing, but the literal
+observation "with the connector disabled, Claude had no path to the tool" was **not** stated. It is
+recorded here as unconfirmed rather than inferred from silence.
+
+**Why this does not weaken MCP-04.** The requirement is that unauthenticated requests are rejected,
+and that is proven *server-side*, which is the half that actually enforces anything:
+
+- Matrix rows 1 and 2 return `401` with a correct `resource_metadata=` pointer against the deployed,
+  cut-over service.
+- All four credential-free probes — including an RS256 token with correct `iss`, correct `aud`, the
+  tenant's real `kid` and a valid `exp`, differing only in its signature — were rejected with
+  byte-identical bodies.
+
+The connector-disabled check is a **client-side UX confirmation** that Claude does not surface a tool
+it has not been granted. It is not a server control, and no server behaviour depends on it. The gap
+is therefore narrow and non-blocking, and it is cheap to close: toggle the connector off in Claude
+Desktop and confirm `fitness_ping` is no longer offered.
