@@ -150,6 +150,25 @@ def test_environment_value_is_a_valid_literal(env_file: dict[str, str]) -> None:
     )
 
 
+def test_auth_mode_is_a_valid_literal(env_file: dict[str, str]) -> None:
+    """Same failure shape as ENVIRONMENT, on the one variable that gates all auth.
+
+    ``MCP_AUTH_MODE`` is the plan 02-07 cutover switch and the documented
+    rollback lever, so it is the value most likely to be hand-edited under
+    pressure -- and a typo like ``"authkit "`` or ``"workos"`` does not fail the
+    deploy, it kills the process at boot on Cloud Run with a pydantic
+    ``ValidationError`` nobody is watching for.
+    """
+    value = env_file["MCP_AUTH_MODE"]
+    allowed = get_args(Settings.model_fields["mcp_auth_mode"].annotation)
+
+    assert value in allowed, (
+        f"MCP-04 violated: deploy/cloud-run.env.yaml sets MCP_AUTH_MODE={value!r}, which is "
+        f"not one of Settings.mcp_auth_mode's allowed values {allowed} -- the process would "
+        f"die at boot, on Cloud Run, remotely"
+    )
+
+
 def test_no_credential_shaped_key_is_present(env_file: dict[str, str]) -> None:
     """T-02-10: on Cloud Run the rule is 'not present at all', not 'no literal value'.
 
