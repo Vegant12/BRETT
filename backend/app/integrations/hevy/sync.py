@@ -72,6 +72,54 @@ class SyncReport:
     body: BodyMeasurementSyncResult | None = None
 
 
+async def resource_status(
+    sessionmaker: async_sessionmaker[AsyncSession], *, user_id: uuid.UUID
+) -> list[ResourceStatus]:
+    """HEVY-09, in one call and WITHOUT a transport.
+
+    A free function rather than only a method because reading `last_synced_at` out of the
+    local database must not require a Hevy API key: `HevySyncService` takes a `HevyClient`,
+    and `build_hevy_client` refuses to construct one without `HEVY_API_KEY`. Asking an
+    operator for a credential in order to answer "when did this last sync?" would make the
+    freshness report unavailable exactly when the key is what is broken.
+
+    Returns one entry for every member of `SYNC_RESOURCES`, including resources that have
+    never run -- "never synced" is the answer to "when was this last synced", and omitting
+    the row would make it indistinguishable from "the resource does not exist".
+
+    Sorted by resource so the report is deterministic and diffable between runs.
+    """
+    entries: list[ResourceStatus] = []
+    async with sessionmaker() as session:
+        for resource in sorted(SYNC_RESOURCES):
+            state = await get_sync_state(
+                session, user_id=user_id, provider=PROVIDER_HEVY, resource=resource
+            )
+            if state is None:
+                entries.append(
+                    ResourceStatus(
+                        resource=resource,
+                        last_synced_at=None,
+                        status=STATUS_NEVER,
+                        last_error=None,
+                        cursor_page=None,
+                        cursor_timestamp=None,
+                    )
+                )
+                continue
+            entries.append(
+                ResourceStatus(
+                    resource=resource,
+                    last_synced_at=state.last_synced_at,
+                    status=state.status,
+                    last_error=state.last_error,
+                    cursor_page=state.cursor_page,
+                    cursor_timestamp=state.cursor_timestamp,
+                )
+            )
+    return entries
+
+
 class HevySyncService:
     """The four Hevy drivers behind one call, plus the freshness report HEVY-09 asks for."""
 
@@ -179,41 +227,7 @@ class HevySyncService:
     async def status(self) -> list[ResourceStatus]:
         """HEVY-09, in one call.
 
-        Returns one entry for every member of `SYNC_RESOURCES`, including resources that have
-        never run -- "never synced" is the answer to "when was this last synced", and omitting
-        the row would make it indistinguishable from "the resource does not exist".
-
-        Sorted by resource so the report is deterministic and diffable between runs.
+        Delegates to `resource_status` so the never-synced rule has exactly one
+        implementation; a second copy here is how the two would eventually disagree.
         """
-        entries: list[ResourceStatus] = []
-        async with self._sessionmaker() as session:
-            for resource in sorted(SYNC_RESOURCES):
-                state = await get_sync_state(
-                    session,
-                    user_id=self._user_id,
-                    provider=PROVIDER_HEVY,
-                    resource=resource,
-                )
-                if state is None:
-                    entries.append(
-                        ResourceStatus(
-                            resource=resource,
-                            last_synced_at=None,
-                            status=STATUS_NEVER,
-                            last_error=None,
-                            cursor_page=None,
-                            cursor_timestamp=None,
-                        )
-                    )
-                    continue
-                entries.append(
-                    ResourceStatus(
-                        resource=resource,
-                        last_synced_at=state.last_synced_at,
-                        status=state.status,
-                        last_error=state.last_error,
-                        cursor_page=state.cursor_page,
-                        cursor_timestamp=state.cursor_timestamp,
-                    )
-                )
-        return entries
+        return await resource_status(self._sessionmaker, user_id=self._user_id)

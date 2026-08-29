@@ -45,6 +45,28 @@ keep it in `.env`) first.
 `database` field is a live `SELECT 1` probe, and an unreachable database yields
 `503 {"status":"degraded","database":"error"}` with no connection detail.
 
+## Syncing Hevy data
+
+    PYTHONPATH=backend uv run python -m app.cli sync-hevy
+    PYTHONPATH=backend uv run python -m app.cli sync-status
+
+`sync-hevy` syncs exercise templates, workouts and body measurements, in that order. It picks
+its own workout strategy: the full `/v1/workouts` import the first time, and the
+`/v1/workouts/events` delta on every run after that. Force one with `--full` or
+`--incremental` (they are mutually exclusive), or narrow the run with
+`--only {workouts,templates,body}`, which is repeatable.
+
+`sync-status` prints one line per resource — `resource: last_synced_at (status)`, or `never`
+for a resource that has not run yet. It reads only the local database, so it works without a
+Hevy key.
+
+`HEVY_API_KEY` must be set for `sync-hevy`; without it the command exits 1 and names the
+variable. `PYTHONPATH=backend` is required because `backend/` is the import root (the same
+reason the `Procfile` passes `--app-dir backend`).
+
+This CLI is the verification and operations trigger. **Production scheduling is Phase 7** —
+nothing here runs the sync on a timer.
+
 ## Tests
 
     uv run pytest backend/tests -x -q -m "not integration"   # fast, no container
