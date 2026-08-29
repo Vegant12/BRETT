@@ -13,6 +13,7 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 ### Validated
 
 - [x] Backend foundation: FastAPI app, PostgreSQL, Alembic migrations, users table (single-user now, schema not hard-coded to preclude multi-user), config, health endpoint — Validated in Phase 1: Backend Foundation (2026-08-23)
+- [x] Deployed to Google Cloud Run over HTTPS, connected as a Claude custom remote MCP connector (Desktop/Web/Mobile) — Validated in Phase 2: Deploy & Connector Auth Spike (2026-08-29); verified end-to-end via Claude Desktop against the live `/mcp` endpoint
 
 ### Active
 
@@ -26,7 +27,6 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 - [ ] Remote MCP server exposing purpose-built, read-only tools (fitness_get_recent_workouts, fitness_get_training_summary, fitness_get_weekly_volume, fitness_get_muscle_group_volume, fitness_get_exercise_progression, fitness_get_personal_records, fitness_get_plateaus, fitness_get_training_frequency, fitness_get_body_weight_trend, fitness_compare_periods, etc.) returning compact structured JSON
 - [ ] MCP authentication via strong bearer token (env secret) + HTTPS + rate limiting; no secrets ever returned in tool responses
 - [ ] Data freshness surfaced per source (last_synced_at) so Claude knows when data may be stale
-- [ ] Deployed to Google Cloud Run over HTTPS, connected as a Claude custom remote MCP connector (Desktop/Web/Mobile)
 - [ ] Claude fitness-coach system prompt/instructions document (separate doc) defining the body-recomposition coaching behavior and decision framework
 - [ ] Test coverage: Hevy sync (auth, pagination, incremental events, duplicates, deletions, failures), analytics calculations against known workouts, MCP tool schemas/auth/structured output, end-to-end mock-Hevy-to-MCP integration test
 
@@ -86,4 +86,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-23 — Phase 1: Backend Foundation complete*
+*Last updated: 2026-08-29 — Phase 2: Deploy & Connector Auth Spike complete*
