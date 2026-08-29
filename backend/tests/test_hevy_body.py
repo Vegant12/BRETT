@@ -136,7 +136,7 @@ async def test_all_seventeen_metrics_persist(engine: AsyncEngine, httpx2_mock: R
     by a blanket non-null check.
     """
     maker = _maker(engine)
-    httpx2_mock.get(MEASUREMENTS).mock(side_effect=[_ok(), httpx.Response(404)])
+    httpx2_mock.get(MEASUREMENTS).mock(side_effect=[_ok()])
     try:
         async with _client() as client:
             await sync_body_measurements(client, maker, user_id=DEFAULT_USER_ID)
@@ -164,7 +164,7 @@ async def test_nulls_are_preserved_not_defaulted(
     circumference trend Phase 4 draws.
     """
     maker = _maker(engine)
-    httpx2_mock.get(MEASUREMENTS).mock(side_effect=[_ok(), httpx.Response(404)])
+    httpx2_mock.get(MEASUREMENTS).mock(side_effect=[_ok()])
     try:
         async with _client() as client:
             await sync_body_measurements(client, maker, user_id=DEFAULT_USER_ID)
@@ -192,7 +192,7 @@ async def test_measured_on_is_a_date_object(engine: AsyncEngine, httpx2_mock: Ro
     check is the only one that states the claim.
     """
     maker = _maker(engine)
-    httpx2_mock.get(MEASUREMENTS).mock(side_effect=[_ok(), httpx.Response(404)])
+    httpx2_mock.get(MEASUREMENTS).mock(side_effect=[_ok()])
     try:
         async with _client() as client:
             await sync_body_measurements(client, maker, user_id=DEFAULT_USER_ID)
@@ -208,12 +208,11 @@ async def test_measured_on_is_a_date_object(engine: AsyncEngine, httpx2_mock: Ro
 async def test_resync_upserts_on_the_date(engine: AsyncEngine, httpx2_mock: Router) -> None:
     """HEVY-03 for this resource: the DATE is the identity, so a re-sync updates in place.
 
-    Two runs of the same page, four HTTP responses (each run pages until the 404), two rows.
+    Two full runs over the same single page. Four rows would mean the constraint is not the
+    one the upsert names, or that `id` (a fresh uuid4 on every call) had become the key.
     """
     maker = _maker(engine)
-    httpx2_mock.get(MEASUREMENTS).mock(
-        side_effect=[_ok(), httpx.Response(404), _ok(), httpx.Response(404)]
-    )
+    httpx2_mock.get(MEASUREMENTS).mock(side_effect=[_ok(), _ok()])
     try:
         async with _client() as client:
             await sync_body_measurements(client, maker, user_id=DEFAULT_USER_ID)
@@ -234,12 +233,7 @@ async def test_metric_cleared_upstream_is_cleared_locally(
     cleared = hevy_fixture("body_measurements_page1")["body_measurements"][0]
     cleared["fat_percent"] = None
     httpx2_mock.get(MEASUREMENTS).mock(
-        side_effect=[
-            _ok(),
-            httpx.Response(404),
-            httpx.Response(200, json=_page(rows=[cleared])),
-            httpx.Response(404),
-        ]
+        side_effect=[_ok(), httpx.Response(200, json=_page(rows=[cleared]))]
     )
     try:
         async with _client() as client:
