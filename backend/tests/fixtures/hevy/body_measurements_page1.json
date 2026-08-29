@@ -1,0 +1,46 @@
+{
+  "page": 1,
+  "page_count": 1,
+  "body_measurements": [
+    {
+      "date": "2026-08-01",
+      "weight_kg": 80.5,
+      "lean_mass_kg": 65,
+      "fat_percent": 18.5,
+      "neck_cm": 38,
+      "shoulder_cm": 115,
+      "chest_cm": 95,
+      "left_bicep_cm": 35,
+      "right_bicep_cm": 35.5,
+      "left_forearm_cm": 28,
+      "right_forearm_cm": 28.5,
+      "abdomen": 85,
+      "waist": 80,
+      "hips": 95,
+      "left_thigh": 55,
+      "right_thigh": 55.5,
+      "left_calf": 37,
+      "right_calf": 37.5
+    },
+    {
+      "date": "2026-08-08",
+      "weight_kg": 80.1,
+      "lean_mass_kg": null,
+      "fat_percent": null,
+      "neck_cm": null,
+      "shoulder_cm": null,
+      "chest_cm": null,
+      "left_bicep_cm": null,
+      "right_bicep_cm": null,
+      "left_forearm_cm": null,
+      "right_forearm_cm": null,
+      "abdomen": null,
+      "waist": null,
+      "hips": null,
+      "left_thigh": null,
+      "right_thigh": null,
+      "left_calf": null,
+      "right_calf": null
+    }
+  ]
+}

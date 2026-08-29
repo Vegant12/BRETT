@@ -11,12 +11,14 @@ dominate the runtime. Anything that touches the container must be marked
 ``@pytest.mark.integration`` so ``-m "not integration"`` stays fast.
 """
 
+import json
 import os
 import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -75,6 +77,37 @@ _TEST_MCP_ENV = {
 _PREEXISTING_MCP_ENV = {key: os.environ.get(key) for key in _TEST_MCP_ENV}
 for _key, _value in _TEST_MCP_ENV.items():
     os.environ.setdefault(_key, _value)
+
+
+HEVY_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "hevy"
+
+
+def hevy_fixture(name: str) -> dict[str, Any]:
+    """Load a canned Hevy response.
+
+    These files are transcribed from Hevy's LIVE OpenAPI document, not from
+    `BRETT blueprint.md` -- the blueprint is wrong about `rir`, `weight_unit`, and
+    about exercises/sets having ids. Regenerating them by hand from the blueprint
+    would reintroduce exactly the schema drift this phase exists to eliminate.
+    """
+    payload: dict[str, Any] = json.loads(
+        (HEVY_FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8")
+    )
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Mocking Hevy: `pytest-httpx2` is a thin adapter over `respx`, and respx asserts
+# internally that a mocked response is an `httpx` (0.x) `Response`. The client under
+# test is `httpx2`. The rule, verified the hard way:
+#
+#     RESPONSES use httpx.Response   (the 0.x package, dev-only, pulled in by respx)
+#     EXCEPTIONS use httpx2 types    (httpx2.ConnectError, httpx2.ReadTimeout, ...)
+#
+# Passing `httpx2.Response(429)` into `side_effect` fails with a bare
+# `AssertionError: assert isinstance(resolved.response, httpx.Response)` from inside
+# respx/router.py, with nothing pointing at the type as the cause.
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="session", autouse=True)
