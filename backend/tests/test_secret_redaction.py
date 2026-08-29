@@ -26,6 +26,12 @@ SEEDED = "brett-test-secret-DO-NOT-LEAK-9f3a"
 DB_URL = f"postgresql://u:{SEEDED}@localhost:5432/db"
 REQUEST_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 
+# Deliberately NOT seeded into the environment and therefore NOT in
+# `Settings.secret_values()`, so Layer 3 cannot see it. That is the whole point:
+# it isolates the Layer-2 deny-list in
+# `test_hevy_header_key_name_is_redacted_by_layer_2_alone`.
+UNSEEDED_KEY = "hevy-key-9f3a-only-layer-2-can-catch-this"
+
 # `app.main` calls get_settings() and configure_logging() at import time, so the
 # seeded environment has to exist before the import happens. Nothing ever connects
 # to this DATABASE_URL -- these are unit tests, no container required.
@@ -101,6 +107,41 @@ def test_denied_key_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
 
     out = buf.getvalue()
     assert SEEDED not in out
+    assert "***REDACTED***" in out
+
+
+def test_hevy_header_key_name_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Layer 2 covers Hevy's literal header spelling, not just `api_key`.
+
+    Layer 3 (the value scrubber) would catch this anyway because HEVY_API_KEY is in
+    `_SECRET_FIELDS` -- but the deny-list exists precisely so that no single layer is
+    load-bearing.
+    """
+    buf = _configure(monkeypatch)
+    structlog.get_logger().info("probe", **{"api-key": SEEDED})
+
+    out = buf.getvalue()
+    assert SEEDED not in out
+    assert "***REDACTED***" in out
+
+
+def test_hevy_header_key_name_is_redacted_by_layer_2_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same header name, with Layer 3 taken out of the picture.
+
+    The test above logs ``SEEDED``, which Layer 3 scrubs BY VALUE whatever the key is
+    called -- so it stays green even with `"api-key"` deleted from ``DENY_KEYS`` again,
+    which is the failure mode this module's docstring warns about: green while proving
+    nothing. ``UNSEEDED_KEY`` is not in ``Settings.secret_values()``, so Layer 3 has
+    never heard of it and only the key-name deny-list can redact it. Delete `"api-key"`
+    from ``DENY_KEYS`` and this test -- and only this test -- goes red.
+    """
+    buf = _configure(monkeypatch)
+    structlog.get_logger().info("probe", **{"api-key": UNSEEDED_KEY})
+
+    out = buf.getvalue()
+    assert UNSEEDED_KEY not in out, "T-03-01 violated: Layer 2 does not cover `api-key`"
     assert "***REDACTED***" in out
 
 
