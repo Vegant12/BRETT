@@ -69,7 +69,9 @@ def _client() -> HevyClient:
     return HevyClient(SecretStr("test-key"), max_attempts=2, sleep=_no_sleep)
 
 
-def _mock_pages(mock: Router, payloads: Mapping[int, dict[str, Any]], *, remote_count: int) -> Route:
+def _mock_pages(
+    mock: Router, payloads: Mapping[int, dict[str, Any]], *, remote_count: int
+) -> Route:
     """Serve `/v1/workouts` by requested page, plus `/v1/workouts/count`.
 
     A CALLABLE side_effect rather than a list of responses: the idempotency test walks the same

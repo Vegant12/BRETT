@@ -23,18 +23,37 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import structlog
-from sqlalchemy import delete, insert
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.time import utc_now
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
-from app.db.repositories.sync_state import PROVIDER_HEVY
+from app.db.repositories.sync_state import (
+    PROVIDER_HEVY,
+    RESOURCE_WORKOUTS,
+    advance_cursor_page,
+    complete_sync,
+    ensure_sync_state,
+    mark_running,
+    record_sync_error,
+)
+from app.integrations.hevy.client import HevyClient
 from app.integrations.hevy.schemas import HevyWorkout
 
 log = structlog.get_logger()
 
 PROVIDER = PROVIDER_HEVY
+
+# Every failure mode is recorded, not only the ones this module can name. A run that dies on
+# an unanticipated error and leaves `status='running'` behind is worse than a run that failed:
+# HEVY-09 reports that state to Claude as "a sync is in progress" forever, and nothing can then
+# distinguish a stuck run from a live one.
+#
+# `BaseException` is deliberately NOT in this tuple. A cancelled task must unwind immediately;
+# issuing further database work on the way out would hang the shutdown it is trying to perform.
+_RECORDED_FAILURES: tuple[type[Exception], ...] = (Exception,)
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,3 +219,138 @@ async def persist_workout_page(
         else:
             upserted += 1
     return PagePersistResult(upserted=upserted, skipped=tuple(skipped))
+
+
+async def sync_workouts(
+    client: HevyClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    user_id: uuid.UUID,
+) -> WorkoutSyncResult:
+    """Full historical sync of `/v1/workouts` (HEVY-01, D-08).
+
+    Commits PER PAGE, with the resume checkpoint written in the SAME transaction as that
+    page's rows. Two separate transactions could interleave into a checkpoint that claims
+    work which was then rolled back -- the checkpoint would say "resume at page 12" over a
+    database that only holds eleven pages.
+
+    Per-page commit is not an optimisation, it is HEVY-08: Hevy caps pageSize at 10, so a full
+    history is dozens to hundreds of sequential requests, and one transaction for the whole
+    run would discard every page of work on a transient failure at page 40.
+
+    Takes an `async_sessionmaker`, never an engine and never `Settings`: the caller owns the
+    engine's lifetime, for the reasons `app/db/session.py` documents.
+    """
+    async with sessionmaker() as session:
+        state = await ensure_sync_state(
+            session, user_id=user_id, provider=PROVIDER, resource=RESOURCE_WORKOUTS
+        )
+        # `or 1` and not `if state.cursor_page is not None`: page 0 does not exist in Hevy's
+        # 1-based pagination, so a zero here is corruption and starting over is the safe read.
+        start_page = state.cursor_page or 1
+        await mark_running(
+            session, user_id=user_id, provider=PROVIDER, resource=RESOURCE_WORKOUTS
+        )
+        await session.commit()
+    log.info("hevy_workout_sync_started", start_page=start_page)
+
+    try:
+        # One request. Turns "did the sync get everything?" from a hope into an
+        # assertion, and is the cheapest available detector for the deletion drift D-09 accepts.
+        remote_count: int | None = await client.get_workout_count()
+
+        page = start_page
+        pages_fetched = 0
+        upserted = 0
+        skipped: list[str] = []
+        while True:
+            payload = await client.get_workouts(page=page)
+            pages_fetched += 1
+            async with sessionmaker() as session:
+                result = await persist_workout_page(
+                    session, user_id=user_id, workouts=payload.workouts
+                )
+                await advance_cursor_page(
+                    session,
+                    user_id=user_id,
+                    provider=PROVIDER,
+                    resource=RESOURCE_WORKOUTS,
+                    cursor_page=page + 1,
+                )
+                await session.commit()  # page rows + checkpoint, atomically
+            upserted += result.upserted
+            skipped.extend(result.skipped)
+            log.info(
+                "hevy_workout_page_committed",
+                page=page,
+                page_count=payload.page_count,
+                upserted=result.upserted,
+                skipped=len(result.skipped),
+            )
+            # Offset pagination over mutating data: if Hevy orders newest-first, a workout
+            # logged mid-sync shifts items toward later pages and one can be seen twice. That
+            # is harmless -- the upsert is idempotent. Additions cannot cause a SKIP in either
+            # ordering; only a mid-sync deletion can, and deletions are the events feed's job
+            # (D-09). The empty-list arm is the second terminator: a server that returns a
+            # nonsense `page_count` still stops when it runs out of data (T-03-25).
+            if not payload.workouts or page >= payload.page_count:
+                break
+            page += 1
+
+        async with sessionmaker() as session:
+            local_count = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Workout)
+                    .where(Workout.user_id == user_id, Workout.provider == PROVIDER)
+                )
+                or 0
+            )
+            # `cursor_page=None`: a completed full sync has no page to resume from, and
+            # leaving one behind would make the next run skip everything before it.
+            await complete_sync(
+                session,
+                user_id=user_id,
+                provider=PROVIDER,
+                resource=RESOURCE_WORKOUTS,
+                last_synced_at=utc_now(),
+                cursor_page=None,
+            )
+            await session.commit()
+
+        if remote_count is not None and local_count != remote_count:
+            # Deliberately not an exception. A mismatch is information; failing the run over
+            # it would mark a perfectly good sync as an error and leave a cursor behind for a
+            # "resume" with nothing to resume (T-03-26).
+            log.warning("hevy_workout_count_mismatch", local=local_count, remote=remote_count)
+
+        log.info(
+            "hevy_workout_sync_completed",
+            pages=pages_fetched,
+            upserted=upserted,
+            skipped=len(skipped),
+            local_count=local_count,
+        )
+        return WorkoutSyncResult(
+            pages_fetched=pages_fetched,
+            workouts_upserted=upserted,
+            skipped=tuple(skipped),
+            remote_count=remote_count,
+            local_count=local_count,
+        )
+    except _RECORDED_FAILURES as exc:
+        # A FRESH session: the one that failed may hold an aborted transaction, in which case
+        # every statement on it -- including the one recording the failure -- would be refused.
+        async with sessionmaker() as session:
+            await record_sync_error(
+                session,
+                user_id=user_id,
+                provider=PROVIDER,
+                resource=RESOURCE_WORKOUTS,
+                exc=exc,
+            )
+            await session.commit()
+        # The cursors are deliberately NOT reset here: leaving cursor_page in place is
+        # what makes the next run resume instead of restarting from page 1 (D-08).
+        log.warning("hevy_workout_sync_failed", reason=type(exc).__name__)
+        raise
