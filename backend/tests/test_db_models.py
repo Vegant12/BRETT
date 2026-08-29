@@ -76,6 +76,19 @@ def test_workout_children_cascade_on_delete() -> None:
     assert set_fk.ondelete == "CASCADE"
 
 
+def test_workout_children_have_no_timestamps() -> None:
+    """Children are replaced wholesale on re-sync, so per-row timestamps would lie."""
+    for table in ("workout_exercises", "workout_sets"):
+        assert "created_at" not in Base.metadata.tables[table].c
+
+
+def test_workout_weight_is_exact_decimal() -> None:
+    """Float would make Phase 4 tonnage sums non-deterministic."""
+    column = Base.metadata.tables["workout_sets"].c.weight_kg
+    assert type(column.type).__name__ == "Numeric"
+    assert (column.type.precision, column.type.scale) == (7, 3)
+
+
 def test_timestamps_are_timezone_aware() -> None:
     """FOUND-04: UTC is enforced by the type system, not by convention."""
     columns = Base.metadata.tables["users"].c
