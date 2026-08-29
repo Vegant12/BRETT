@@ -81,3 +81,48 @@ def test_default_user_id_is_the_seeded_uuid() -> None:
 
     for command in ("sync-hevy", "sync-status"):
         assert build_parser().parse_args([command]).user_id == SEEDED_USER_ID
+
+
+def test_configure_logging_precedes_every_log_call() -> None:
+    """T-03-44, asserted against the SOURCE because the runtime cannot show it.
+
+    Anything emitted before `configure_logging` bypasses all three FOUND-05 redaction layers,
+    and the very first thing this command has to record is a Hevy request. A runtime test
+    would have to prove the absence of an event on a stream that does not exist yet; a
+    source-order read fails the moment somebody adds a `log.info` above the bootstrap.
+
+    `make_engine` is included for the same reason: an engine built above that line brings
+    SQLAlchemy's own loggers with it.
+    """
+    source = CLI_SOURCE.read_text(encoding="utf-8")
+    boundary = source.index("configure_logging(settings)")
+
+    assert "log." not in source[:boundary], (
+        "T-03-44 violated: backend/app/cli.py reaches for a logger above "
+        "`configure_logging(settings)`, so that line is written with every redaction layer "
+        "switched off"
+    )
+    assert "make_engine" not in source[:boundary], (
+        "T-03-44 violated: backend/app/cli.py builds an engine above "
+        "`configure_logging(settings)`; SQLAlchemy's loggers would then be live before the "
+        "value scrubber has the secrets"
+    )
+
+
+def test_cli_never_formats_an_arbitrary_exception() -> None:
+    """T-03-45. stderr is outside the redaction pipeline, so what reaches it is curated.
+
+    `str(exc)` on an arbitrary exception is the leak: a pydantic `ValidationError` renders
+    `input_value=`, i.e. this person's workout titles and body-composition numbers, straight
+    onto the operator's terminal and into whatever captured it.
+    """
+    source = CLI_SOURCE.read_text(encoding="utf-8")
+
+    assert "str(exc)" not in source, (
+        "T-03-45 violated: backend/app/cli.py renders an exception directly. Print "
+        "`exc.safe_message` or `type(exc).__name__` instead"
+    )
+    assert "safe_message" in source, (
+        "T-03-45 violated: backend/app/cli.py no longer uses the curated `safe_message` "
+        "channel, so a Hevy failure now reaches the operator as a bare class name at best"
+    )
