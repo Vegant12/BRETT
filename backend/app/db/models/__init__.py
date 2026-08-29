@@ -8,7 +8,20 @@ migration with no error.
 Every new model must be imported here.
 """
 
+from app.db.models.body import BodyMeasurement
+from app.db.models.exercise import ExerciseMuscle, ExerciseMuscleOverride, ExerciseTemplate
+from app.db.models.sync_state import SyncState
 from app.db.models.user import User
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
 
-__all__ = ["User", "Workout", "WorkoutExercise", "WorkoutSet"]
+__all__ = [
+    "BodyMeasurement",
+    "ExerciseMuscle",
+    "ExerciseMuscleOverride",
+    "ExerciseTemplate",
+    "SyncState",
+    "User",
+    "Workout",
+    "WorkoutExercise",
+    "WorkoutSet",
+]

@@ -27,8 +27,10 @@ class User(Base, TimestampMixin):
     # bucketing reads it from the row it is already loading.
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, server_default="Asia/Jakarta")
 
-    # NOTE (D-07): the provider-credentials table and the `connections` link to
-    # it are deliberately absent. They ship in Phase 3 alongside real
-    # encryption; a link to a non-existent table raises at mapper
-    # configuration time, and an unencrypted credential column invites a
-    # plaintext key (FOUND-05).
+    # NOTE (D-07, RESOLVED in Phase 3 / plan 03-04): the provider-credentials
+    # table and the `connections` link to it are deliberately absent, and they
+    # are NOT coming. Phase 3 ships `sync_state` instead -- bookkeeping only,
+    # no credential column, named so the name cannot invite one later (T-03-11).
+    # `Settings.hevy_api_key` stays the env-var `SecretStr` it already is; a
+    # decryptable credential in the database would sit one SQL query away from
+    # the MCP server for zero v1 benefit (FOUND-05).
