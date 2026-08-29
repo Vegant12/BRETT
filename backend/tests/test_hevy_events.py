@@ -616,3 +616,74 @@ async def test_event_sync_skips_without_a_baseline(
         assert len(httpx2_mock.calls) == 0, "the skip path still hit the network"
     finally:
         await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_since_includes_the_overlap_margin(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """The drain deliberately re-reads the five minutes before the checkpoint.
+
+    Asserted numerically, not as `cursor - EVENT_CURSOR_OVERLAP`: recomputing the expected
+    value from the constant under test would pass even if the subtraction were dropped.
+    Hevy's `since` filter and our clock are not the same clock, and an event landing in the
+    same second as the previous cursor could otherwise fall outside the next window.
+    """
+    route = _mock_events(httpx2_mock, {1: _events_page(1, 1, [])})
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        await _seed_baseline(sessionmaker, cursor_timestamp=FIXTURE_MAX_TIMESTAMP)
+
+        async with _client() as client:
+            await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        assert route.call_count == 1
+        assert route.calls[0].request.url.params["since"] == "2026-08-05T09:55:00Z"
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_full_then_incremental_round_trip(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """ROADMAP success criteria 1 and 2, in one assertion.
+
+    A full history import followed by an incremental drain leaves exactly the state Hevy is
+    in: the edited workout holding its NEW payload, and the deleted workout gone along with
+    every row that hung off it.
+    """
+    _mock_workout_pages(httpx2_mock, _both_workout_pages(), remote_count=2)
+    _mock_events(httpx2_mock, {1: hevy_fixture("workout_events_page1")})
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        async with _client() as client:
+            await sync_workouts(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        async with _client() as client:
+            result = await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        assert result.events_applied == 2
+        assert result.workouts_updated == 1
+        assert result.workouts_deleted == 1
+
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(Workout.external_id, Workout.title).where(*_SCOPED)
+                )
+            ).all()
+            bench = (await conn.scalars(_sets_of(WORKOUT_A, exercise_index=0))).all()
+
+        assert [(row.external_id, row.title) for row in rows] == [
+            (WORKOUT_A, "Push Day (edited)")
+        ]
+        assert list(bench) == [Decimal("105.000")]
+
+        state = await _state(sessionmaker)
+        assert state.cursor_timestamp == FIXTURE_MAX_TIMESTAMP
+        assert state.last_synced_at is not None
+        assert state.status == "idle"
+        assert state.last_error is None
+    finally:
+        await _cleanup(engine)
