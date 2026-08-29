@@ -14,6 +14,12 @@ dependencies = [
     "structlog==26.1.0",
     "asgi-correlation-id==5.0.1",
     "mcp==2.0.0",
+    # RUNTIME, not dev: `HevyClient` imports httpx2. `[tool.uv] default-groups = []` means a
+    # bare `uv sync` (what the Cloud Run buildpack runs) installs dependencies only, so leaving
+    # httpx2 in the dev group ships a production image that ImportErrors on the first sync --
+    # and is invisible locally, where `uv sync --group dev` installs it anyway.
+    "httpx2==2.12.0",
+    "tenacity==9.1.4",
     "tzdata",
 ]
 
@@ -22,12 +28,12 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-cov==7.1.0",
+    "pytest-httpx2==1.0.0",
     "testcontainers[postgres]==4.15.0",
     "time-machine==3.4.0",
     "ruff==0.16.4",
     "mypy==2.3.1",
     "pre-commit",
-    "httpx2==2.12.0",
     "pyyaml==6.0.3",
 ]
 
@@ -77,5 +83,5 @@ disallow_untyped_defs = true
 mypy_path = "backend"
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*", "asgi_correlation_id.*"]
+module = ["testcontainers.*", "asgi_correlation_id.*", "pytest_httpx2.*", "respx.*"]
 ignore_missing_imports = true
