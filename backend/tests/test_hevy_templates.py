@@ -20,9 +20,16 @@ from app.db.models import (
     ExerciseTemplate,
     SyncState,
 )
-from app.db.repositories.sync_state import PROVIDER_HEVY
+from app.db.repositories.sync_state import (
+    PROVIDER_HEVY,
+    RESOURCE_EXERCISE_TEMPLATES,
+    RESOURCE_WORKOUTS,
+    ensure_sync_state,
+)
 from app.integrations.hevy.client import HevyClient
 from app.integrations.hevy.templates import sync_exercise_templates
+from app.normalization.muscles import CanonicalMuscleGroup, MuscleRole
+from app.normalization.resolver import effective_muscles, set_override
 from tests.conftest import DEFAULT_USER_ID, hevy_fixture
 
 TEMPLATES_URL = "https://api.hevyapp.com/v1/exercise_templates"
@@ -126,6 +133,30 @@ async def _counts(factory: async_sessionmaker[AsyncSession]) -> tuple[int, int]:
 
 
 @pytest.mark.integration
+async def test_template_request_uses_page_size_100(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """Pitfall 6: this is the ONE endpoint that does not cap at 10.
+
+    Asserted on the RECORDED REQUEST, not on the constant: a page size that is defined
+    correctly but never reaches the query string would pass an introspection test and still
+    issue ~40 requests per sync against an undocumented rate limit.
+    """
+    factory = _factory(engine)
+    route = httpx2_mock.get(TEMPLATES_URL).mock(side_effect=_page())
+    try:
+        async with _client() as client:
+            await sync_exercise_templates(client, factory, user_id=DEFAULT_USER_ID)
+
+        assert dict(route.calls.last.request.url.params) == {"page": "1", "pageSize": "100"}
+        # One page in the fixture means exactly one request; a second would mean the
+        # `page >= page_count` terminator is not firing.
+        assert len(route.calls) == 1
+    finally:
+        await _cleanup(factory)
+
+
+@pytest.mark.integration
 async def test_all_four_templates_persist(engine: AsyncEngine, httpx2_mock: Router) -> None:
     """HEVY-06: one page in, four rows out, with `is_custom` carried through."""
     factory = _factory(engine)
@@ -178,6 +209,26 @@ async def test_raw_hevy_muscle_groups_are_preserved(
 
 
 @pytest.mark.integration
+async def test_exercise_type_is_persisted(engine: AsyncEngine, httpx2_mock: Router) -> None:
+    """Hevy's `type` is the modality signal PROG-01 (Phase 5) needs.
+
+    Estimated 1RM is meaningless for a `distance_duration` exercise, and the only way to
+    know which is which is to have kept this column from the first sync. Dropping it now
+    costs a full re-sync later.
+    """
+    factory = _factory(engine)
+    httpx2_mock.get(TEMPLATES_URL).mock(side_effect=_page())
+    try:
+        async with _client() as client:
+            await sync_exercise_templates(client, factory, user_id=DEFAULT_USER_ID)
+
+        assert (await _template(factory, BENCH_PRESS)).exercise_type == "weight_reps"
+        assert (await _template(factory, SLED_PUSH)).exercise_type == "distance_duration"
+    finally:
+        await _cleanup(factory)
+
+
+@pytest.mark.integration
 async def test_lateral_raise_maps_to_side_delts_only(
     engine: AsyncEngine, httpx2_mock: Router
 ) -> None:
@@ -223,6 +274,30 @@ async def test_bench_press_secondary_shoulders_becomes_front_delts(
 
 
 @pytest.mark.integration
+async def test_lat_pulldown_maps_lats_upper_back_biceps(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """The unambiguous majority case: 17 of Hevy's 20 values are a mechanical rename.
+
+    Every row here is `source='hevy'`, which is the point -- curation is reserved for the
+    two values that actually need a person, and this test pins that boundary.
+    """
+    factory = _factory(engine)
+    httpx2_mock.get(TEMPLATES_URL).mock(side_effect=_page())
+    try:
+        async with _client() as client:
+            await sync_exercise_templates(client, factory, user_id=DEFAULT_USER_ID)
+
+        assert await _muscles(factory, LAT_PULLDOWN) == {
+            ("lats", "direct", "hevy"),
+            ("biceps", "indirect", "hevy"),
+            ("upper_back", "indirect", "hevy"),
+        }
+    finally:
+        await _cleanup(factory)
+
+
+@pytest.mark.integration
 async def test_custom_full_body_template_yields_no_mapping_rows(
     engine: AsyncEngine, httpx2_mock: Router
 ) -> None:
@@ -245,11 +320,33 @@ async def test_custom_full_body_template_yields_no_mapping_rows(
             state = await session.scalar(
                 sa.select(SyncState).where(
                     SyncState.user_id == DEFAULT_USER_ID,
-                    SyncState.resource == "exercise_templates",
+                    SyncState.resource == RESOURCE_EXERCISE_TEMPLATES,
                 )
             )
         assert state is not None
         assert state.status == "idle"
+    finally:
+        await _cleanup(factory)
+
+
+@pytest.mark.integration
+async def test_unmapped_template_is_reported_in_the_result(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """A curation gap has to be VISIBLE, or it is indistinguishable from an exercise that
+    is genuinely untrained.
+
+    The result names the exact template so the gap can be closed, rather than reporting a
+    bare count that tells nobody which entry to curate.
+    """
+    factory = _factory(engine)
+    httpx2_mock.get(TEMPLATES_URL).mock(side_effect=_page())
+    try:
+        async with _client() as client:
+            result = await sync_exercise_templates(client, factory, user_id=DEFAULT_USER_ID)
+
+        assert result.unmapped == (SLED_PUSH,)
+        assert result.mappings_written == 7
     finally:
         await _cleanup(factory)
 
@@ -272,5 +369,102 @@ async def test_template_sync_is_idempotent(engine: AsyncEngine, httpx2_mock: Rou
 
         assert first == second
         assert first == (4, 7)
+    finally:
+        await _cleanup(factory)
+
+
+@pytest.mark.integration
+async def test_resync_does_not_clear_an_override(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """NORM-02: an override that a routine sync could erase is not an override.
+
+    `replace_exercise_muscles` deletes and reinserts the DERIVED rows, which is exactly
+    the operation that would take the correction with it if the two layers shared a table.
+    """
+    factory = _factory(engine)
+    httpx2_mock.get(TEMPLATES_URL).mock(side_effect=_page(times=2))
+    try:
+        async with _client() as client:
+            await sync_exercise_templates(client, factory, user_id=DEFAULT_USER_ID)
+
+            async with factory() as session:
+                await set_override(
+                    session,
+                    user_id=DEFAULT_USER_ID,
+                    template_external_id=LATERAL_RAISE,
+                    assignments=[(CanonicalMuscleGroup.REAR_DELTS, MuscleRole.DIRECT)],
+                    note="i cheat these into a rear-delt raise",
+                )
+                await session.commit()
+
+            await sync_exercise_templates(client, factory, user_id=DEFAULT_USER_ID)
+
+        async with factory() as session:
+            surviving = await session.scalar(
+                sa.select(sa.func.count())
+                .select_from(ExerciseMuscleOverride)
+                .where(
+                    ExerciseMuscleOverride.user_id == DEFAULT_USER_ID,
+                    ExerciseMuscleOverride.exercise_template_external_id == LATERAL_RAISE,
+                )
+            )
+            resolved = await effective_muscles(
+                session, user_id=DEFAULT_USER_ID, template_external_id=LATERAL_RAISE
+            )
+
+        assert surviving == 1
+        assert [(m.muscle_group.value, m.source.value) for m in resolved] == [
+            ("rear_delts", "override")
+        ]
+        # And the derived row the override masks was still recomputed underneath it.
+        assert await _muscles(factory, LATERAL_RAISE) == {("side_delts", "direct", "curated")}
+    finally:
+        await _cleanup(factory)
+
+
+@pytest.mark.integration
+async def test_last_synced_at_for_exercise_templates_is_independent(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """HEVY-09: three resources, three answers.
+
+    A single freshness timestamp would report the newest of the three for all of them,
+    which is precisely the staleness Claude must be able to see. Syncing templates alone
+    must therefore leave the workouts row untouched.
+    """
+    factory = _factory(engine)
+    httpx2_mock.get(TEMPLATES_URL).mock(side_effect=_page())
+    try:
+        async with factory() as session:
+            await ensure_sync_state(
+                session,
+                user_id=DEFAULT_USER_ID,
+                provider=PROVIDER_HEVY,
+                resource=RESOURCE_WORKOUTS,
+            )
+            await session.commit()
+
+        async with _client() as client:
+            await sync_exercise_templates(client, factory, user_id=DEFAULT_USER_ID)
+
+        async with factory() as session:
+            rows = {
+                row.resource: row
+                for row in (
+                    await session.scalars(
+                        sa.select(SyncState).where(
+                            SyncState.user_id == DEFAULT_USER_ID,
+                            SyncState.provider == PROVIDER_HEVY,
+                        )
+                    )
+                ).all()
+            }
+
+        assert rows[RESOURCE_EXERCISE_TEMPLATES].last_synced_at is not None
+        assert rows[RESOURCE_WORKOUTS].last_synced_at is None
+        # A completed run has no page to resume from; leaving one would make the next run
+        # skip the pages it already has.
+        assert rows[RESOURCE_EXERCISE_TEMPLATES].cursor_page is None
     finally:
         await _cleanup(factory)
