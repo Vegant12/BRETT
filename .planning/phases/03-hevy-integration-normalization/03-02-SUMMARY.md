@@ -1,0 +1,203 @@
+---
+phase: 03-hevy-integration-normalization
+plan: 02
+subsystem: database
+tags: [postgres, sqlalchemy, alembic, hevy, numeric, timestamptz, cascade, upsert]
+
+# Dependency graph
+requires:
+  - phase: 01-backend-foundation
+    provides: "Base/TimestampMixin with the naming convention, the users table, migration chain 0001-0002, and the testcontainers-backed integration fixtures"
+provides:
+  - "workouts / workout_exercises / workout_sets tables modelled on the LIVE Hevy schema"
+  - "UNIQUE(user_id, provider, external_id) on workouts — the index ON CONFLICT binds to, making HEVY-03 idempotency structural"
+  - "ON DELETE CASCADE down both child FKs, making HEVY-04 deletion atomic to the grandchild sets"
+  - "Migration 0003, round-tripping cleanly with zero alembic check drift"
+  - "backend/tests/test_hevy_schema.py — live-DDL assertions on TIMESTAMPTZ, NUMERIC(7,3), unique constraints and cascade isolation"
+affects: [03-03-hevy-client, 03-05-sync-service, 03-06-incremental-events, 04-analytics, 05-mcp-tools]
+
+# Tech tracking
+tech-stack:
+  added: []
+  patterns:
+    - "Provider-scoped external identity: (user_id, provider, external_id) rather than a bare external id"
+    - "Parent-upsert + child-replace, enabled by cascade FKs and no child TimestampMixin"
+    - "Soft reference by external id string where a hard FK would reject valid data"
+
+key-files:
+  created:
+    - backend/app/db/models/workout.py
+    - backend/migrations/versions/0003_workout_tables.py
+    - backend/tests/test_hevy_schema.py
+  modified:
+    - backend/app/db/models/__init__.py
+    - backend/tests/test_db_models.py
+
+key-decisions:
+  - "Child rows carry no TimestampMixin: they are delete-and-reinserted wholesale on every re-sync, so a per-row created_at would record the last sync rather than the last edit"
+  - "exercise_template_external_id is a plain String(64), deliberately not a ForeignKey to exercise_templates — a workout may legitimately reference a template absent locally (D-03)"
+  - "external_id is String(64), not UUID: Hevy mixes full UUIDs and 8-char uppercase hex ids across its own resources"
+  - "set_type is stored verbatim ('normal'|'warmup'|'dropset'|'failure') rather than coerced to an is_warmup boolean, preserving the dropset/failure distinction Phase 5 PR detection needs"
+  - "All measurement columns are Numeric, never Float, so Phase 4 tonnage sums are order-independent and exactly reproducible"
+
+patterns-established:
+  - "Structural idempotency: the unique constraint is what makes HEVY-03 enforceable, not sync-code discipline"
+  - "Structural deletion: ON DELETE CASCADE proven to reach grandchildren, not just direct children"
+  - "Live-DDL test module per feature area, asserting against information_schema/pg_constraint rather than against the models that produced them"
+
+requirements-completed: [HEVY-03, HEVY-04]
+
+# Metrics
+duration: 24min
+completed: 2026-08-29
+---
+
+# Phase 3 Plan 02: Hevy Workout Data Model Summary
+
+**Three workout tables modelled on Hevy's live OpenAPI schema, with the unique constraint that makes idempotent upsert expressible and the cascade FKs that make deletion atomic — both proven against real PostgreSQL.**
+
+## Performance
+
+- **Duration:** 24 min
+- **Started:** 2026-08-29T13:19:00Z
+- **Completed:** 2026-08-29T13:43:00Z
+- **Tasks:** 3
+- **Files modified:** 5 (3 created, 2 modified)
+
+## Accomplishments
+
+- `workouts`, `workout_exercises` and `workout_sets` exist with enough fidelity to reconstruct a session: title, description, routine id, notes, superset grouping, set type, and all six of Hevy's per-set metrics.
+- `UNIQUE(user_id, provider, external_id)` is in the database, so `ON CONFLICT (user_id, provider, external_id)` — the Pattern 3 upsert every later plan in this phase depends on — is now expressible at all. Proven by a duplicate insert raising `IntegrityError`.
+- `ON DELETE CASCADE` on both child FKs, proven to reach the *grandchild* sets: deleting one of two sibling workouts left the sibling's exercise and both its sets intact and left zero orphaned sets behind.
+- Migration `0003` round-trips: `upgrade head` builds all three tables, `alembic check` reports no drift against the models, `downgrade base` leaves only `alembic_version`.
+- Full suite green: **110 passed**, up from 101.
+
+## Task Commits
+
+1. **Task 1: Declare Workout, WorkoutExercise and WorkoutSet** (TDD)
+   - `1bf2aa4` (test) — RED: 4 failing metadata guards
+   - `316b043` (feat) — GREEN: the three models + registry
+2. **Task 2: Migration 0003 — workout tables** — `edf33e7` (feat)
+3. **Task 3: Metadata guard + live-schema assertions** — `cdce751` (test)
+
+## Files Created/Modified
+
+- `backend/app/db/models/workout.py` (created, 178 lines) — the three declarative models. No `relationship()` anywhere, deliberately: the sync path uses explicit Core statements, and a lazy load touched outside an awaited context raises `MissingGreenlet` under asyncpg.
+- `backend/migrations/versions/0003_workout_tables.py` (created, 145 lines) — autogenerated then hand-reviewed into the repo's conventions.
+- `backend/tests/test_hevy_schema.py` (created, 199 lines) — five `@pytest.mark.integration` tests asserting the live DDL.
+- `backend/app/db/models/__init__.py` (modified) — registers all three models. Without this, `alembic revision --autogenerate` emits an *empty* migration and reports no error (RESEARCH Pitfall 8).
+- `backend/tests/test_db_models.py` (modified) — metadata guard widened to the new table set; six new fast-suite assertions.
+
+## Decisions Made
+
+Followed the plan as specified. The plan's own decisions, restated because later plans depend on them:
+
+- **Children carry no `TimestampMixin`.** They are replaced wholesale on re-sync, so a per-row `created_at` would record the last sync rather than the last edit.
+- **`exercise_template_external_id` is a plain string, not an FK.** A hard FK would make the workout sync fail on exactly the data D-03 says must still persist (a template not yet synced, or deleted upstream).
+- **`Numeric`, never `Float`.** `Numeric(7,3)` for weight, `(10,3)` for distance, `(3,1)` for RPE, `(12,3)` for the custom metric.
+
+## Deviations from Plan
+
+### Auto-fixed Issues
+
+**1. [Rule 3 - Blocking] Moved the metadata-guard update from Task 3 into Task 1**
+
+- **Found during:** Task 1 (RED gate)
+- **Issue:** The plan assigns the `test_metadata_contains_only_users_table` → `test_metadata_contains_expected_tables` edit to Task 3, but the moment Task 1's models attach to `Base.metadata` the old equality assertion fails. Deferring the edit would have left the fast suite red across two commits (`316b043` and `edf33e7`).
+- **Fix:** Performed the exact replacement the plan specifies for Task 3, but in Task 1's RED commit, where it doubles as one of Task 1's own `<behavior>` assertions. Task 3's remaining additions landed as planned.
+- **Files modified:** `backend/tests/test_db_models.py`
+- **Verification:** Every Task 3 acceptance criterion still holds — `test_metadata_contains_expected_tables` present, `test_metadata_contains_only_users_table` absent, `test_user_has_no_relationships` untouched and passing.
+- **Committed in:** `1bf2aa4`
+
+**2. [Rule 3 - Blocking] Reformatted one over-length line in `workout.py`**
+
+- **Found during:** Task 1 (GREEN gate)
+- **Issue:** The `Index("ix_workout_exercises_exercise_template_external_id", ...)` call the plan supplies verbatim is 101 characters; Ruff's `line-length = 100` rejected it with `E501`.
+- **Fix:** `ruff format` split the call across lines. Semantics unchanged.
+- **Files modified:** `backend/app/db/models/workout.py`
+- **Verification:** `ruff check backend/app` and `ruff format --check backend/app` both clean.
+- **Committed in:** `316b043`
+
+---
+
+**Total deviations:** 2 auto-fixed (both Rule 3 — blocking)
+**Impact on plan:** Both were mechanical. No scope change, no requirement affected.
+
+## Issues Encountered
+
+**Two acceptance-criteria greps contradict the docstrings the same plan mandates.**
+Task 1 requires `grep -q 'Float' … exits 1` and `grep -q 'relationship' … exits 1`, but the plan's own prescribed module docstring contains the sentence "No `relationship()` is declared anywhere in this module, deliberately", and its own prescribed comment reads "Numeric, never Float." Both literal greps therefore exit 0 on a correct implementation.
+
+Resolved by honouring the mandated prose (it is load-bearing documentation for later plans) and verifying the *intent* at the code level instead: an AST walk over `workout.py` confirms `relationship` appears in no `Name`, `Attribute` or `Call` node, and `Float` appears in no `Name` or `Attribute` node. Both occurrences are comment/docstring text only. Every other Task 1 grep passes literally — `ondelete="CASCADE"` count is 3, and the unique-constraint name and `Numeric(7, 3)` are both present.
+
+**Alembic could not be invoked with `-c backend/alembic.ini` from the repo root.**
+`script_location = migrations` resolves relative to the working directory, not the ini file, so the documented command fails with `Path doesn't exist: migrations`. Used `uv run --directory backend alembic …`, which matches how `conftest.py` already invokes it (`cwd=BACKEND_DIR`). No file change required; noting it so the next plan does not rediscover it.
+
+**Autogenerate needed a database at revision 0002.** Ran a throwaway `postgres:18-alpine` container on port 55432 for the generate/verify cycle and removed it afterwards, rather than touching the developer's `docker compose` volume or colliding with a parallel agent's default-port database.
+
+## Deferred Issues
+
+- `uv run ruff format --check .` reports 27 files needing reformatting. **All 27 are pre-existing `.planning/**/*.md` files** — Ruff is reformatting Python code blocks embedded in planning markdown from phases 1, 2 and 3. No file under `backend/` is affected, and nothing this plan touched is in the list. Out of scope per the executor scope boundary; recorded here rather than fixed. `uv run ruff check .` (lint) exits 0.
+
+## TDD Gate Compliance
+
+- **Task 1** ran a genuine RED → GREEN cycle. RED (`1bf2aa4`) failed 4 tests with `KeyError: 'workouts'` before any model existed; GREEN (`316b043`) turned them green. No REFACTOR commit — none was needed.
+- **Task 3** is marked `tdd="true"` but the plan sequences it *after* Tasks 1 and 2, so the schema it asserts against already existed and its tests passed on first run. This is the plan's own ordering, not an unexpected pass, so the fail-fast rule was not triggered. The behaviours themselves were genuinely red earlier: the two new unit assertions would have failed before Task 1, and all five integration tests would have failed before Task 2. The tests are non-vacuous — `test_delete_cascades_and_leaves_siblings` asserts positive counts (1 workout, 1 exercise, 2 sets) that can only hold if its fixture rows were really written, and `test_duplicate_external_id_is_rejected` fails if the first insert silently no-ops.
+
+## Verification
+
+| Check | Result |
+|---|---|
+| `uv run pytest backend/tests -q` | 110 passed |
+| `uv run pytest backend/tests/test_migrations.py -q` | 3 passed (round trip + no drift) |
+| `uv run pytest backend/tests/test_hevy_schema.py -q` | 5 passed |
+| `alembic upgrade head` → `check` → `downgrade base` | Clean; only `alembic_version` remains |
+| `uv run mypy backend/app` | Success, no issues in 21 source files |
+| `uv run ruff check .` | All checks passed |
+
+Success criteria, each independently confirmed:
+
+- `Base.metadata.tables` is exactly `{users, workouts, workout_exercises, workout_sets}` — asserted in the fast suite.
+- Migration `0003` upgrades and downgrades cleanly; `alembic check` reports "No new upgrade operations detected."
+- A second insert of the same `(user_id, provider, external_id)` raises `IntegrityError`.
+- Deleting one workout removes its exercises and sets and leaves a sibling workout complete, with zero orphaned grandchild sets.
+
+## Threat Model Coverage
+
+| Threat ID | Disposition | Status |
+|---|---|---|
+| T-03-03 | mitigate | Every insert in `test_hevy_schema.py` uses Core `insert()` parameter binding; no Hevy-shaped value is interpolated into `sa.text()`. The only `sa.text()` calls are constant `information_schema` / `pg_constraint` queries with no bound user data. |
+| T-03-04 | mitigate | `workouts.user_id` is `NOT NULL` and participates in the unique constraint from day one, so a cross-user `external_id` collision is structurally impossible and every future query has a scoping column. |
+| T-03-05 | mitigate | `UNIQUE(workout_exercise_id, set_index)` plus `ON DELETE CASCADE`; `test_delete_cascades_and_leaves_siblings` proves siblings survive and orphans do not. |
+| T-03-06 | accept | Unchanged — only `provider_updated_at` and the row's own `updated_at` are kept. |
+
+No new security-relevant surface was introduced beyond the threat model. No network endpoints, no auth paths, no file access.
+
+## Known Stubs
+
+None. Every column declared is written by migration `0003` and exercised by a test.
+
+## User Setup Required
+
+None — no external service configuration required.
+
+## Next Phase Readiness
+
+Ready. Specifically unblocked:
+
+- **Plan 03-03 / 03-05 (Hevy client and sync service):** `Workout`, `WorkoutExercise` and `WorkoutSet` are importable from `app.db.models`, and Pattern 3's `pg_insert(...).on_conflict_do_update(index_elements=[Workout.user_id, Workout.provider, Workout.external_id])` will now resolve against a real unique index.
+- **Plan 03-06 (incremental events):** `provider_updated_at` is the ordering key HEVY-02 needs, and a delete event only has to `DELETE FROM workouts` — the cascade handles the rest.
+- **Plan 03-04 (reference tables):** must extend `test_metadata_contains_expected_tables` when it adds tables; the equality assertion is deliberate and will fail loudly otherwise.
+
+Two carried notes, neither blocking:
+
+- `set_type` values are stored verbatim and are **not** constrained by a `CHECK` or enum. Hevy documents four values but explicitly reserves the right to change its schema; a value outside `{normal, warmup, dropset, failure}` would be stored silently and would slip past VOL-01's `!= 'warmup'` filter. Validation belongs in the Pydantic layer at the `integrations/hevy/` boundary (HEVY-05), which is plan 03-03's job.
+- `weight_kg` is `Numeric(7, 3)` — max 9999.999 kg. Ample for a barbell, but the same column carries `custom_metric`-adjacent semantics for distance-weight modalities; nothing in this phase can exceed it.
+
+## Self-Check: PASSED
+
+All 6 claimed files exist on disk; all 4 claimed commit hashes resolve in `git log`.
+
+---
+*Phase: 03-hevy-integration-normalization*
+*Completed: 2026-08-29*
