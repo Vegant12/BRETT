@@ -1,31 +1,115 @@
-"""HEVY-03 persistence primitives against a real Postgres container.
+"""HEVY-01 / HEVY-03 / HEVY-09 against a real Postgres container.
 
 SQLite would prove nothing here: ON CONFLICT, ON DELETE CASCADE and TIMESTAMPTZ are exactly
 what these assertions are about.
+
+Only the HTTP transport is mocked. The pagination loop, the upsert, the child replacement and
+the checkpoint writes are all real.
 
 The sync path commits by design, so every test cleans up in a `finally`. The container is
 session-scoped and shared, and `test_migrations` asserts `count(*) == 1` on `users` -- a leaked
 row breaks a later test for a reason that has nothing to do with that test.
 """
 
+import io
+import logging
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any
 
+import httpx  # 0.x -- respx asserts on this type for RESPONSES (conftest, Pitfall 3)
 import pytest
 import sqlalchemy as sa
+import structlog
+from pydantic import SecretStr
+from respx import Route, Router
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.config import Settings
 from app.db.models import SyncState, Workout, WorkoutExercise, WorkoutSet
+from app.db.repositories.sync_state import (
+    PROVIDER_HEVY,
+    RESOURCE_WORKOUTS,
+    get_sync_state,
+)
 from app.db.session import make_sessionmaker
+from app.integrations.hevy.client import HevyClient
 from app.integrations.hevy.schemas import HevyWorkout, PaginatedWorkouts
-from app.integrations.hevy.workouts import delete_workout, persist_workout_page, upsert_workout
+from app.integrations.hevy.workouts import (
+    delete_workout,
+    persist_workout_page,
+    sync_workouts,
+    upsert_workout,
+)
+from app.logging import configure_logging
 from tests.conftest import DEFAULT_USER_ID, hevy_fixture
 
 PROVIDER = "hevy"
 
+BASE = "https://api.hevyapp.com"
+WORKOUTS = f"{BASE}/v1/workouts"
+WORKOUT_COUNT = f"{BASE}/v1/workouts/count"
+
 # Overflows `Numeric(7, 3)` (precision 7, scale 3 -- four integer digits at most), so the
 # INSERT fails inside PostgreSQL rather than inside a mock somebody wrote.
 OVERFLOW_WEIGHT = 99999999
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """Collapse tenacity's backoff to nothing.
+
+    The retry PREDICATE and the attempt count stay entirely real; only the 1-3 real seconds
+    each failure test would otherwise spend waiting are removed.
+    """
+
+
+def _client() -> HevyClient:
+    """The real client with the real retry policy, over a mocked socket."""
+    return HevyClient(SecretStr("test-key"), max_attempts=2, sleep=_no_sleep)
+
+
+def _mock_pages(mock: Router, payloads: Mapping[int, dict[str, Any]], *, remote_count: int) -> Route:
+    """Serve `/v1/workouts` by requested page, plus `/v1/workouts/count`.
+
+    A CALLABLE side_effect rather than a list of responses: the idempotency test walks the same
+    pages three times, and a pre-built `httpx.Response` is a one-shot object whose stream is
+    consumed on first use.
+    """
+
+    def _count(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"workout_count": remote_count})
+
+    def _serve(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        assert page in payloads, f"the sync requested page {page}, which was not mocked"
+        return httpx.Response(200, json=payloads[page])
+
+    mock.get(WORKOUT_COUNT).mock(side_effect=_count)
+    return mock.get(WORKOUTS).mock(side_effect=_serve)
+
+
+@contextmanager
+def _rendered_logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[io.StringIO]:
+    """Capture what the REAL logging pipeline writes, redaction layers included.
+
+    Not `structlog.testing.capture_logs`: that helper replaces the configured processor chain
+    for its duration, so both redaction layers would be absent and a leak could not be observed
+    (test_secret_redaction.py, Pitfall 6). Mirrors `test_hevy_client.py`.
+    """
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    try:
+        configure_logging(Settings(_env_file=None))
+        buffer = io.StringIO()
+        handler = root.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        handler.setStream(buffer)
+        yield buffer
+    finally:
+        root.handlers, root.level = saved_handlers, saved_level
+        structlog.reset_defaults()
 
 
 def _workouts(name: str) -> list[HevyWorkout]:
@@ -223,5 +307,104 @@ async def test_malformed_workout_is_skipped_and_the_page_commits(engine: AsyncEn
         # The good workout that came AFTER the failure is what proves the savepoint: without
         # one, its INSERT dies with "current transaction is aborted".
         assert await _counts(engine) == (1, 1, 1)
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_full_sync_paginates_across_two_pages(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """HEVY-01: the driver walks every page, not just the first.
+
+    Hevy caps `pageSize` at 10, so "did it follow `page_count`?" is the difference between a
+    full history and the ten most recent sessions.
+    """
+    _mock_pages(
+        httpx2_mock,
+        {1: hevy_fixture("workouts_page1"), 2: hevy_fixture("workouts_page2")},
+        remote_count=2,
+    )
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        async with _client() as client:
+            result = await sync_workouts(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        assert result.pages_fetched == 2
+        assert result.workouts_upserted == 2
+        assert await _counts(engine) == (2, 3, 4)
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_last_synced_at_is_set_and_status_is_idle(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """HEVY-09: freshness is what tells Claude the data may be stale.
+
+    `cursor_page is None` is the other half: a completed full sync has no page to resume from,
+    and leaving one behind would make the NEXT run skip everything before it.
+    """
+    _mock_pages(
+        httpx2_mock,
+        {1: hevy_fixture("workouts_page1"), 2: hevy_fixture("workouts_page2")},
+        remote_count=2,
+    )
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        async with _client() as client:
+            await sync_workouts(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        async with sessionmaker() as session:
+            state = await get_sync_state(
+                session,
+                user_id=DEFAULT_USER_ID,
+                provider=PROVIDER_HEVY,
+                resource=RESOURCE_WORKOUTS,
+            )
+        assert state is not None
+        assert state.status == "idle"
+        assert state.last_synced_at is not None
+        assert state.cursor_page is None
+        assert state.last_error is None
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_count_mismatch_logs_but_does_not_raise(
+    engine: AsyncEngine, httpx2_mock: Router, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-09: a reconciliation gap is information, not a failure.
+
+    Raising here would mark a perfectly good sync as an error and, worse, leave the cursor
+    behind for a "resume" that has nothing to resume. The log line is the deliverable.
+    """
+    _mock_pages(
+        httpx2_mock,
+        {1: hevy_fixture("workouts_page1"), 2: hevy_fixture("workouts_page2")},
+        remote_count=99,
+    )
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        with _rendered_logs(monkeypatch) as buffer:
+            async with _client() as client:
+                result = await sync_workouts(client, sessionmaker, user_id=DEFAULT_USER_ID)
+            rendered = buffer.getvalue()
+
+        assert result.local_count == 2
+        assert result.remote_count == 99
+        assert "hevy_workout_count_mismatch" in rendered
+
+        async with sessionmaker() as session:
+            state = await get_sync_state(
+                session,
+                user_id=DEFAULT_USER_ID,
+                provider=PROVIDER_HEVY,
+                resource=RESOURCE_WORKOUTS,
+            )
+        assert state is not None
+        assert state.status == "idle"
     finally:
         await _cleanup(engine)
