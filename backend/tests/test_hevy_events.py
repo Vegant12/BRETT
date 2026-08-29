@@ -9,26 +9,44 @@ if anyone reintroduces it.
 import datetime as dt
 from collections.abc import Mapping
 from copy import deepcopy
+from decimal import Decimal
 from typing import Any
 
 import httpx  # 0.x -- respx asserts on this type for RESPONSES (conftest, Pitfall 3)
 import pytest
+import sqlalchemy as sa
 from pydantic import SecretStr
 from respx import Route, Router
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.core.time import utc_now
+from app.db.models import SyncState, Workout, WorkoutExercise, WorkoutSet
+from app.db.repositories.sync_state import (
+    PROVIDER_HEVY,
+    RESOURCE_WORKOUTS,
+    complete_sync,
+    ensure_sync_state,
+    get_sync_state,
+)
+from app.db.session import make_sessionmaker
 from app.integrations.hevy.client import HevyClient
-from app.integrations.hevy.errors import HevyResponseError
-from app.integrations.hevy.events import drain_events
+from app.integrations.hevy.errors import HevyResponseError, HevyServerError
+from app.integrations.hevy.events import drain_events, sync_workout_events
 from app.integrations.hevy.schemas import (
     HevyDeletedWorkoutEvent,
     HevyUpdatedWorkoutEvent,
     PaginatedWorkoutEvents,
     event_timestamp,
 )
-from tests.conftest import hevy_fixture
+from app.integrations.hevy.workouts import sync_workouts
+from tests.conftest import DEFAULT_USER_ID, hevy_fixture
+
+PROVIDER = "hevy"
 
 BASE = "https://api.hevyapp.com"
 EVENTS = f"{BASE}/v1/workouts/events"
+WORKOUTS = f"{BASE}/v1/workouts"
+WORKOUT_COUNT = f"{BASE}/v1/workouts/count"
 
 # The two ids the shipped fixtures use, so a drain test and a full-sync test talk about the
 # same workouts.
@@ -43,6 +61,10 @@ SINCE_WIRE = "2026-08-01T00:00:00Z"
 # The newest event in `workout_events_page1.json` is the DELETE, not the last item in feed
 # order -- which is exactly why the cursor is a max() and not `events[-1]`.
 FIXTURE_MAX_TIMESTAMP = dt.datetime(2026, 8, 5, 10, 0, tzinfo=dt.UTC)
+
+# A pre-existing checkpoint, older than every event in the fixtures, so "the cursor moved" and
+# "the cursor stayed" are distinguishable outcomes.
+BASELINE_CURSOR = dt.datetime(2026, 8, 2, tzinfo=dt.UTC)
 
 
 # --- fixtures and mocks ----------------------------------------------------
@@ -121,6 +143,138 @@ def _mock_events(mock: Router, payloads: Mapping[int, dict[str, Any]]) -> Route:
         return httpx.Response(200, json=payloads[page])
 
     return mock.get(EVENTS).mock(side_effect=_serve)
+
+
+def _mock_workout_pages(
+    mock: Router, payloads: Mapping[int, dict[str, Any]], *, remote_count: int
+) -> Route:
+    """Serve the FULL-sync endpoints, so an incremental test can start from real rows.
+
+    An incremental sync that has never had a full sync in front of it is not a scenario worth
+    asserting on -- `sync_workout_events` refuses it outright (T-03-41).
+    """
+
+    def _count(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"workout_count": remote_count})
+
+    def _serve(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        assert page in payloads, f"the sync requested page {page}, which was not mocked"
+        return httpx.Response(200, json=payloads[page])
+
+    mock.get(WORKOUT_COUNT).mock(side_effect=_count)
+    return mock.get(WORKOUTS).mock(side_effect=_serve)
+
+
+def _one_workout_page(index: int = 0) -> dict[str, Any]:
+    """`page_count: 1` around a single fixture workout, so the full sync stops after it."""
+    workout: dict[str, Any] = deepcopy(hevy_fixture("workouts_page1")["workouts"][index])
+    return {"page": 1, "page_count": 1, "workouts": [workout]}
+
+
+def _both_workout_pages() -> Mapping[int, dict[str, Any]]:
+    return {1: hevy_fixture("workouts_page1"), 2: hevy_fixture("workouts_page2")}
+
+
+# --- database helpers ------------------------------------------------------
+
+_SCOPED = (Workout.user_id == DEFAULT_USER_ID, Workout.provider == PROVIDER)
+
+
+async def _counts(engine: AsyncEngine) -> tuple[int, int, int]:
+    """`(workouts, workout_exercises, workout_sets)` reachable from this user's Hevy rows."""
+    async with engine.connect() as conn:
+        workouts = await conn.scalar(
+            sa.select(sa.func.count()).select_from(Workout).where(*_SCOPED)
+        )
+        exercises = await conn.scalar(
+            sa.select(sa.func.count())
+            .select_from(WorkoutExercise)
+            .join(Workout, Workout.id == WorkoutExercise.workout_id)
+            .where(*_SCOPED)
+        )
+        sets = await conn.scalar(
+            sa.select(sa.func.count())
+            .select_from(WorkoutSet)
+            .join(WorkoutExercise, WorkoutExercise.id == WorkoutSet.workout_exercise_id)
+            .join(Workout, Workout.id == WorkoutExercise.workout_id)
+            .where(*_SCOPED)
+        )
+    return (workouts or 0, exercises or 0, sets or 0)
+
+
+def _sets_of(external_id: str, *, exercise_index: int) -> sa.Select[Any]:
+    """Every set row belonging to ONE exercise of one Hevy workout."""
+    return (
+        sa.select(WorkoutSet.weight_kg)
+        .join(WorkoutExercise, WorkoutExercise.id == WorkoutSet.workout_exercise_id)
+        .join(Workout, Workout.id == WorkoutExercise.workout_id)
+        .where(
+            *_SCOPED,
+            Workout.external_id == external_id,
+            WorkoutExercise.exercise_index == exercise_index,
+        )
+        .order_by(WorkoutSet.set_index)
+    )
+
+
+async def _seed_baseline(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    cursor_timestamp: dt.datetime | None = None,
+    last_synced_at: dt.datetime | None = None,
+) -> None:
+    """Stand in for a completed full sync.
+
+    `sync_workout_events` refuses to drain without a baseline, so every incremental test needs
+    one -- either from a real `sync_workouts` run or, where the full sync is not what is under
+    test, from here.
+    """
+    async with sessionmaker() as session:
+        await ensure_sync_state(
+            session,
+            user_id=DEFAULT_USER_ID,
+            provider=PROVIDER_HEVY,
+            resource=RESOURCE_WORKOUTS,
+        )
+        await complete_sync(
+            session,
+            user_id=DEFAULT_USER_ID,
+            provider=PROVIDER_HEVY,
+            resource=RESOURCE_WORKOUTS,
+            last_synced_at=last_synced_at or utc_now(),
+            cursor_timestamp=cursor_timestamp,
+        )
+        await session.commit()
+
+
+async def _state(sessionmaker: async_sessionmaker[AsyncSession]) -> SyncState:
+    async with sessionmaker() as session:
+        state = await get_sync_state(
+            session,
+            user_id=DEFAULT_USER_ID,
+            provider=PROVIDER_HEVY,
+            resource=RESOURCE_WORKOUTS,
+        )
+    assert state is not None, "the sync never created its bookkeeping row"
+    return state
+
+
+async def _cleanup(engine: AsyncEngine) -> None:
+    """Remove everything this module's tests can have committed.
+
+    The container is session-scoped and shared, and `test_migrations` asserts `count(*) == 1`
+    on `users` -- a leaked row breaks a later test for a reason that has nothing to do with
+    that test. A `finally` is strictly stronger than a compensating delete because it also
+    survives a mid-test assertion failure.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(sa.delete(Workout).where(*_SCOPED))
+        await conn.execute(
+            sa.delete(SyncState).where(
+                SyncState.user_id == DEFAULT_USER_ID, SyncState.provider == PROVIDER
+            )
+        )
 
 
 # --- the drain -------------------------------------------------------------
@@ -234,3 +388,231 @@ async def test_unknown_event_type_fails_validation(httpx2_mock: Router) -> None:
     async with _client() as client:
         with pytest.raises(HevyResponseError):
             await drain_events(client, since=SINCE)
+
+
+# --- applying the drain ----------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_updated_event_replaces_the_workout(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """An `updated` event carries a FULL snapshot, so it REPLACES rather than merges.
+
+    The set count shrinking from three to two is the assertion that matters: a merge would
+    leave the old 100 kg working set behind and inflate every tonnage figure Phase 4 computes.
+    """
+    _mock_workout_pages(httpx2_mock, {1: _one_workout_page()}, remote_count=1)
+    _mock_events(httpx2_mock, {1: hevy_fixture("workout_events_page1")})
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        async with _client() as client:
+            await sync_workouts(client, sessionmaker, user_id=DEFAULT_USER_ID)
+        assert await _counts(engine) == (1, 2, 3)
+
+        async with _client() as client:
+            result = await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        assert result.workouts_updated == 1
+        # Workout B was never synced in this test, so its delete is a counted no-op.
+        assert result.deletes_not_found == 1
+
+        async with engine.connect() as conn:
+            title = await conn.scalar(
+                sa.select(Workout.title).where(*_SCOPED, Workout.external_id == WORKOUT_A)
+            )
+            bench = (await conn.scalars(_sets_of(WORKOUT_A, exercise_index=0))).all()
+
+        assert title == "Push Day (edited)"
+        assert list(bench) == [Decimal("105.000")]
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_deleted_event_removes_workout_and_children_leaving_siblings(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """HEVY-04. The delete takes its own children by cascade and nothing else.
+
+    `delete_workout` filters on user_id AND provider AND external_id, so an upstream event can
+    only remove the one workout it names for the one user being synced (T-03-38).
+    """
+    _mock_workout_pages(httpx2_mock, _both_workout_pages(), remote_count=2)
+    _mock_events(httpx2_mock, {1: hevy_fixture("workout_events_page1")})
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        async with _client() as client:
+            await sync_workouts(client, sessionmaker, user_id=DEFAULT_USER_ID)
+        assert await _counts(engine) == (2, 3, 4)
+
+        async with _client() as client:
+            result = await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        assert result.workouts_deleted == 1
+        assert result.deletes_not_found == 0
+
+        # Workout A survives, rewritten to the event's two-exercise/one-set-each snapshot.
+        # Workout B, its exercise and its set are all gone.
+        assert await _counts(engine) == (1, 2, 2)
+        async with engine.connect() as conn:
+            survivors = (await conn.scalars(sa.select(Workout.external_id).where(*_SCOPED))).all()
+        assert list(survivors) == [WORKOUT_A]
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_delete_event_for_unknown_workout_is_a_noop(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """The feed can report a deletion for a workout created and deleted between two syncs.
+
+    Raising here would fail an entire drain over a workout that never existed locally, and
+    would leave `status='error'` behind on a run that did nothing wrong.
+    """
+    _mock_events(
+        httpx2_mock,
+        {1: _events_page(1, 1, [_deleted("never-synced", "2026-08-07T00:00:00Z")])},
+    )
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        await _seed_baseline(sessionmaker)
+
+        async with _client() as client:
+            result = await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        assert result.deletes_not_found == 1
+        assert result.workouts_deleted == 0
+        assert (await _state(sessionmaker)).status == "idle"
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_multiply_updated_workout_keeps_the_newest_payload(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """Each updated event carries a FULL snapshot. Applied in arrival
+    order the OLDER snapshot lands last and wins."""
+    _mock_events(
+        httpx2_mock,
+        {
+            1: _events_page(
+                1,
+                1,
+                [
+                    # Hevy's order: newest at index 0.
+                    _updated(WORKOUT_A, "2026-08-06T12:00:00Z", title="final"),
+                    _updated(WORKOUT_A, "2026-08-05T12:00:00Z", title="stale"),
+                ],
+            )
+        },
+    )
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        await _seed_baseline(sessionmaker)
+
+        async with _client() as client:
+            result = await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        assert result.workouts_updated == 2
+        async with engine.connect() as conn:
+            title = await conn.scalar(
+                sa.select(Workout.title).where(*_SCOPED, Workout.external_id == WORKOUT_A)
+            )
+        assert title == "final", "events were applied newest-first and the stale snapshot won"
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_cursor_advances_once_after_the_drain(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """The checkpoint is the maximum event timestamp across the WHOLE drain, written once.
+
+    A cursor advanced per page would checkpoint page 1's newest event over pages 2..N that had
+    not been applied yet.
+    """
+    _mock_events(httpx2_mock, {1: hevy_fixture("workout_events_page1")})
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        await _seed_baseline(sessionmaker, cursor_timestamp=BASELINE_CURSOR)
+
+        async with _client() as client:
+            await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        state = await _state(sessionmaker)
+        assert state.cursor_timestamp == FIXTURE_MAX_TIMESTAMP
+        assert state.status == "idle"
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_cursor_does_not_advance_when_the_drain_fails(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """T-03-39. A failed drain must leave the checkpoint exactly where it was.
+
+    Re-reading the same window next run is free -- every apply is idempotent. Skipping it is
+    unrecoverable, because Hevy will never mention those events again.
+    """
+
+    def _serve(request: httpx.Request) -> httpx.Response:
+        if int(request.url.params["page"]) == 1:
+            return httpx.Response(
+                200,
+                json=_events_page(1, 2, [_updated(WORKOUT_A, "2026-08-06T12:00:00Z")]),
+            )
+        return httpx.Response(500)
+
+    httpx2_mock.get(EVENTS).mock(side_effect=_serve)
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        await _seed_baseline(sessionmaker, cursor_timestamp=BASELINE_CURSOR)
+
+        async with _client() as client:
+            with pytest.raises(HevyServerError):
+                await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        state = await _state(sessionmaker)
+        assert state.cursor_timestamp == BASELINE_CURSOR, "a failed drain moved the cursor"
+        assert state.status == "error"
+        # Page 1's event must not have been applied either -- nothing is written until the
+        # whole drain is in hand.
+        assert await _counts(engine) == (0, 0, 0)
+    finally:
+        await _cleanup(engine)
+
+
+@pytest.mark.integration
+async def test_event_sync_skips_without_a_baseline(
+    engine: AsyncEngine, httpx2_mock: Router
+) -> None:
+    """T-03-41. With no baseline there is no window to be incremental FROM.
+
+    Draining from the epoch would be a full history import through an endpoint that pages at
+    10 and is designed for deltas. No routes are registered here on purpose: any request at
+    all would fail as unmocked, on top of the recorded-call assertion.
+    """
+    sessionmaker = make_sessionmaker(engine)
+    try:
+        async with sessionmaker() as session:
+            await ensure_sync_state(
+                session,
+                user_id=DEFAULT_USER_ID,
+                provider=PROVIDER_HEVY,
+                resource=RESOURCE_WORKOUTS,
+            )
+            await session.commit()
+
+        async with _client() as client:
+            result = await sync_workout_events(client, sessionmaker, user_id=DEFAULT_USER_ID)
+
+        assert result.skipped_reason
+        assert result.pages_fetched == 0
+        assert len(httpx2_mock.calls) == 0, "the skip path still hit the network"
+    finally:
+        await _cleanup(engine)
