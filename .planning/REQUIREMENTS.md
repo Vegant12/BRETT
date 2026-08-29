@@ -19,8 +19,8 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 - [ ] **HEVY-01**: System performs an initial full sync of the user's historical Hevy workouts via paginated API calls (Hevy's real pageSize cap is 10, not 50-100)
 - [ ] **HEVY-02**: System performs incremental sync using Hevy's workout-events endpoint, correctly draining newest-to-oldest pages before applying changes oldest-first (naive cursor advancement silently loses events)
-- [ ] **HEVY-03**: Hevy sync is idempotent — running it repeatedly never creates duplicate workouts, exercises, or sets (Hevy's child objects have no stable IDs, so exercises/sets are keyed by workout + reinserted transactionally, not upserted individually)
-- [ ] **HEVY-04**: Deleted Hevy workouts are detected and reflected in the local database without corrupting other data
+- [x] **HEVY-03**: Hevy sync is idempotent — running it repeatedly never creates duplicate workouts, exercises, or sets (Hevy's child objects have no stable IDs, so exercises/sets are keyed by workout + reinserted transactionally, not upserted individually)
+- [x] **HEVY-04**: Deleted Hevy workouts are detected and reflected in the local database without corrupting other data
 - [ ] **HEVY-05**: Hevy-specific request/response logic is isolated inside `backend/app/integrations/hevy/`
 - [ ] **HEVY-06**: System syncs Hevy exercise templates, capturing each exercise's primary and secondary muscle groups
 - [ ] **HEVY-07**: System syncs Hevy body measurements (weight, body fat %, waist, and other available fields) as an automatic data source, in addition to manual entry

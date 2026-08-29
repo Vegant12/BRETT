@@ -7,6 +7,7 @@ assertions live in ``test_migrations.py``.
 
 import uuid
 
+from sqlalchemy import UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
@@ -15,9 +16,77 @@ from app.db.models import User
 from app.db.session import make_engine, make_sessionmaker
 
 
-def test_metadata_contains_only_users_table() -> None:
-    """D-07: `external_connections` is deferred to Phase 3."""
-    assert set(Base.metadata.tables) == {"users"}
+def test_metadata_contains_expected_tables() -> None:
+    """Every table is declared on purpose.
+
+    Kept as an equality assertion, not a subset check: the value of this test is that a
+    stray model or a typo'd `__tablename__` fails the FAST suite on the commit that
+    introduces it. Plan 03-04 extends this set with the reference tables.
+    """
+    assert set(Base.metadata.tables) == {
+        "users",
+        "workouts",
+        "workout_exercises",
+        "workout_sets",
+    }
+
+
+def test_workout_timestamps_are_timezone_aware() -> None:
+    """FOUND-04 extends to the workout tables: no bare ``DateTime()`` anywhere."""
+    columns = Base.metadata.tables["workouts"].c
+    for name in (
+        "start_time",
+        "end_time",
+        "provider_created_at",
+        "provider_updated_at",
+        "created_at",
+        "updated_at",
+    ):
+        assert columns[name].type.timezone is True, name
+    # The session boundaries are the analytics anchor; they must not be optional.
+    assert columns["start_time"].nullable is False
+    assert columns["end_time"].nullable is False
+
+
+def test_workout_unique_constraint_enables_upsert() -> None:
+    """HEVY-03 is structural: ``ON CONFLICT`` needs this exact unique index.
+
+    Without a matching unique constraint PostgreSQL raises "there is no unique or
+    exclusion constraint matching the ON CONFLICT specification" and the idempotent
+    upsert of Pattern 3 cannot be expressed at all.
+    """
+    table = Base.metadata.tables["workouts"]
+    unique = {
+        constraint.name: [column.name for column in constraint.columns]
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert unique["uq_workouts_user_provider_external_id"] == [
+        "user_id",
+        "provider",
+        "external_id",
+    ]
+
+
+def test_workout_children_cascade_on_delete() -> None:
+    """HEVY-04: deletion is atomic in the database, not ordered in Python."""
+    exercise_fk = next(iter(Base.metadata.tables["workout_exercises"].c.workout_id.foreign_keys))
+    assert exercise_fk.ondelete == "CASCADE"
+    set_fk = next(iter(Base.metadata.tables["workout_sets"].c.workout_exercise_id.foreign_keys))
+    assert set_fk.ondelete == "CASCADE"
+
+
+def test_workout_children_have_no_timestamps() -> None:
+    """Children are replaced wholesale on re-sync, so per-row timestamps would lie."""
+    for table in ("workout_exercises", "workout_sets"):
+        assert "created_at" not in Base.metadata.tables[table].c
+
+
+def test_workout_weight_is_exact_decimal() -> None:
+    """Float would make Phase 4 tonnage sums non-deterministic."""
+    column = Base.metadata.tables["workout_sets"].c.weight_kg
+    assert type(column.type).__name__ == "Numeric"
+    assert (column.type.precision, column.type.scale) == (7, 3)
 
 
 def test_timestamps_are_timezone_aware() -> None:
