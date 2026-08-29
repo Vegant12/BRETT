@@ -6,6 +6,7 @@ cannot accidentally remove them without failing here.
 """
 
 import datetime as dt
+import re
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -15,7 +16,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.db.models import Workout, WorkoutExercise, WorkoutSet
+from app.db.models import BodyMeasurement, Workout, WorkoutExercise, WorkoutSet
 from tests.conftest import DEFAULT_USER_ID
 
 # Fixed and timezone-aware. A naive literal would be rejected by Ruff DTZ and would
@@ -29,6 +30,19 @@ _TITLE = "Push Day 💪"
 # 8-char uppercase hex, the built-in-template id shape Hevy actually sends. The
 # column is a plain String precisely so this and a full UUID both fit.
 _TEMPLATE_ID = "05293BCA"
+
+# A calendar date, not a timestamp: `datetime.fromisoformat("2026-08-01")` returns a
+# NAIVE datetime, which is exactly the value `measured_on` being a DATE avoids storing.
+_MEASURED_ON = dt.date(2026, 8, 1)
+
+# The identity and audit columns of `body_measurements`. Everything else is a metric.
+_BODY_IDENTITY_COLUMNS = frozenset(
+    {"id", "user_id", "source", "external_id", "measured_on", "created_at", "updated_at"}
+)
+
+# T-03-11. Broader than the columns this phase creates, on purpose: the test has to fail
+# for a credential column added by any FUTURE migration, not only by this one.
+_CREDENTIAL_SHAPED = re.compile(r"credential|password|passwd|secret|api_key|apikey|token")
 
 
 def _workout_values(external_id: str, **overrides: Any) -> dict[str, Any]:
@@ -197,3 +211,107 @@ async def test_delete_cascades_and_leaves_siblings(engine: AsyncEngine) -> None:
     finally:
         async with engine.begin() as conn:
             await conn.execute(sa.delete(Workout).where(Workout.external_id.like("cascade-%")))
+
+
+@pytest.mark.integration
+async def test_body_measurement_date_is_a_date_not_a_timestamp(engine: AsyncEngine) -> None:
+    """HEVY-07 against live DDL: `measured_on` is a DATE column.
+
+    A TIMESTAMPTZ here would silently force every sync to invent a time of day, and
+    two syncs of the same Hevy entry could then disagree about which row they mean.
+    """
+    async with engine.connect() as conn:
+        data_type = await conn.scalar(
+            sa.text(
+                "select data_type from information_schema.columns "
+                "where table_schema = 'public' and table_name = 'body_measurements' "
+                "and column_name = 'measured_on'"
+            )
+        )
+    assert data_type == "date"
+
+
+@pytest.mark.integration
+async def test_body_measurement_has_all_seventeen_metric_columns(engine: AsyncEngine) -> None:
+    """One row per date carries every metric Hevy sends -- not one row per metric."""
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            sa.text(
+                "select column_name from information_schema.columns "
+                "where table_schema = 'public' and table_name = 'body_measurements'"
+            )
+        )
+    metrics = {row[0] for row in rows} - _BODY_IDENTITY_COLUMNS
+    assert len(metrics) == 17, sorted(metrics)
+
+
+@pytest.mark.integration
+async def test_duplicate_body_measurement_date_is_rejected(engine: AsyncEngine) -> None:
+    """Re-syncing the same Hevy date cannot create a second row.
+
+    The two inserts carry different primary keys, so this proves the
+    ``(user_id, source, measured_on)`` constraint and not merely the PK.
+    """
+    values: dict[str, Any] = {
+        "user_id": DEFAULT_USER_ID,
+        "source": "hevy",
+        "measured_on": _MEASURED_ON,
+        "weight_kg": Decimal("81.40"),
+    }
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.insert(BodyMeasurement).values(id=uuid.uuid4(), **values))
+
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(sa.insert(BodyMeasurement).values(id=uuid.uuid4(), **values))
+    finally:
+        # The container is session-scoped and shared.
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.delete(BodyMeasurement).where(BodyMeasurement.measured_on == _MEASURED_ON)
+            )
+
+
+@pytest.mark.integration
+async def test_no_table_stores_a_credential(engine: AsyncEngine) -> None:
+    """The Hevy key lives in the environment, not the database (T-03-12).
+
+    This test is what keeps it that way.
+    """
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            sa.text(
+                "select table_name, column_name from information_schema.columns "
+                "where table_schema = 'public'"
+            )
+        )
+    offenders = [
+        f"{table_name}.{column_name}"
+        for table_name, column_name in rows
+        if _CREDENTIAL_SHAPED.search(column_name.lower())
+    ]
+    assert offenders == []
+
+
+@pytest.mark.integration
+async def test_secondary_muscle_groups_is_a_text_array(engine: AsyncEngine) -> None:
+    """Hevy's secondary muscles survive as an ARRAY, not a comma-joined string.
+
+    A delimited string would have to be split on every read, and any muscle name
+    containing the delimiter would corrupt silently.
+    """
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                sa.text(
+                    "select data_type, is_nullable from information_schema.columns "
+                    "where table_schema = 'public' and table_name = 'exercise_templates' "
+                    "and column_name = 'secondary_muscle_groups'"
+                )
+            )
+        ).one()
+    assert row[0] == "ARRAY"
+    # NOT NULL with a `'{}'` default: "no secondary muscles" is an empty array, never
+    # NULL, so Phase 4 never has to distinguish the two.
+    assert row[1] == "NO"
