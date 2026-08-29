@@ -29,9 +29,9 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 ### Exercise Normalization
 
-- [ ] **NORM-01**: Every synced exercise is mapped to one or more canonical muscle groups, including a front/side/rear deltoid split that Hevy's own taxonomy does not provide
+- [x] **NORM-01**: Every synced exercise is mapped to one or more canonical muscle groups, including a front/side/rear deltoid split that Hevy's own taxonomy does not provide
 - [ ] **NORM-02**: Muscle-group mappings can be manually overridden, with the override auditable against the original source mapping
-- [ ] **NORM-03**: Each mapped exercise distinguishes direct (primary) vs indirect (secondary) muscle involvement, with a configurable weighting (default 1.0 direct / 0.5 indirect) applied at query time
+- [x] **NORM-03**: Each mapped exercise distinguishes direct (primary) vs indirect (secondary) muscle involvement, with a configurable weighting (default 1.0 direct / 0.5 indirect) applied at query time
 
 ### Analytics — Volume & Frequency
 
