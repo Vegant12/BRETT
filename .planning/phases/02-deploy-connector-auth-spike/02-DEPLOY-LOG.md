@@ -438,53 +438,127 @@ project's Cloud Run, Cloud Build, Artifact Registry and Secret Manager usage.
 
 ---
 
-## WorkOS AuthKit — BLOCKED at the plan 02-06 Task 1 checkpoint
+## WorkOS AuthKit (verified)
 
-> **This is deliberately NOT the heading plan 02-06 Task 3 asks for** — that one ends in the word
-> *verified*, and Task 3's automated check greps for it literally. Writing it over invented values
-> would turn a tripwire into a rubber stamp, so the phrase is kept out of this file entirely (a
-> `grep` for it must still return zero) until a real WorkOS discovery document has been read. What
-> follows is only the half that could be established without a WorkOS account.
+**Tenant created by the developer on 2026-08-29; every value below was READ from the live discovery
+document, never assumed.** This heading was deliberately withheld at the plan 02-06 Task 1
+checkpoint — Task 3's automated check greps for it literally, so writing it over placeholder values
+would have converted a tripwire into a rubber stamp. It is written now because real values exist.
 
-### Established (2026-08-28, plan 02-06 execution)
+### The tenant
+
+| Item | Value |
+|---|---|
+| AuthKit domain | `https://quiet-fireplace-16-staging.authkit.app` |
+| Discovery document | `https://quiet-fireplace-16-staging.authkit.app/.well-known/oauth-authorization-server` |
+| HTTP status / latency | `200` in `0.946 s`, valid JSON |
+
+The domain satisfies plan 02-06's acceptance regex `^https://[a-z0-9-]+\.authkit\.app$` (checked, not
+eyeballed). See "The `-staging` suffix" below before plan 02-07 uses it.
+
+### The four fields plan 02-06 Task 1 asks for, verbatim
+
+| Field | Value read from the discovery document | Resolves |
+|---|---|---|
+| `issuer` | `https://quiet-fireplace-16-staging.authkit.app` | **A1** — becomes `MCP_ISSUER_URL`. No trailing slash |
+| `jwks_uri` | `https://quiet-fireplace-16-staging.authkit.app/oauth2/jwks` | **A1** — becomes `MCP_JWKS_URI` |
+| `client_id_metadata_document_supported` | `true` | **A2** (first precondition) |
+| `token_endpoint_auth_methods_supported` | `["none", "client_secret_post", "client_secret_basic"]` — contains `"none"` | **A2** (second precondition) |
+
+**A2 resolved: Claude will select CIMD.** Both preconditions hold simultaneously —
+`client_id_metadata_document_supported: true` **and** `"none"` present in
+`token_endpoint_auth_methods_supported`. DCR remains configured as the automatic fallback, which is
+exactly what D-03 asked for. Nothing in our server code differs between the two paths.
+
+**A1 resolved — and the documentation claim happened to be right.** `jwks_uri` does land on
+`/oauth2/jwks`. That is a *coincidence to be recorded, not a licence to derive*: the verifier still
+takes the URI from configuration, because the value was only ever knowable by reading it. Had this
+been derived and WorkOS changed the path, the failure mode is a total auth outage.
+
+**A7 resolved: nothing was paid-gated.** The developer confirmed CIMD, DCR and Resource Indicators
+were all available without an upgrade. Nothing was upgraded and no cost was incurred.
+
+### Connect configuration confirmed by the developer
+
+| Setting | State |
+|---|---|
+| CIMD (Client ID Metadata Document) | **enabled** — corroborated independently by `client_id_metadata_document_supported: true` in the discovery document |
+| DCR (Dynamic Client Registration) | **enabled** — corroborated independently by the presence of `registration_endpoint` (`https://quiet-fireplace-16-staging.authkit.app/oauth2/register`), which AuthKit omits when DCR is off |
+| Resource Indicator | `https://brett-792870654598.us-central1.run.app/mcp` — registered character for character |
+| Redirect URIs | `https://claude.ai/api/mcp/auth_callback` plus the RFC 8252 loopback pair `http://localhost/callback` and `http://127.0.0.1/callback` |
+
+Two of the three toggles are therefore not taken on trust: the discovery document itself is the
+witness. The Resource Indicator is the one that cannot be observed from outside — it is not published
+in AS metadata — and remains a developer-reported value until a real token's `aud` claim is inspected
+in plan 02-07.
+
+### The Resource Indicator was read, not retyped
 
 | Item | Value | How known |
 |---|---|---|
-| Resource Indicator to register in WorkOS | `https://brett-792870654598.us-central1.run.app/mcp` | Read back from the **live** RFC 9728 document, not retyped — see below |
+| Resource Indicator registered in WorkOS | `https://brett-792870654598.us-central1.run.app/mcp` | Read back from the **live** RFC 9728 document, not composed by hand |
 | Protected-resource metadata document | `https://brett-792870654598.us-central1.run.app/.well-known/oauth-protected-resource/mcp` | `200` in `0.37 s`, valid JSON |
-| `resource` field it currently serves | `https://brett-792870654598.us-central1.run.app/mcp` | byte-identical to the Resource Indicator above |
-| `authorization_servers` it currently serves | `["https://example.authkit.app"]` | the Stage-A placeholder; plan 02-07 replaces it |
+| `resource` field it currently serves | `https://brett-792870654598.us-central1.run.app/mcp` | byte-identical to the row above |
+| `authorization_servers` it currently serves | `["https://example.authkit.app"]` | still the Stage-A placeholder; **plan 02-07 replaces it** |
 
-The Resource Indicator was obtained by **reading the deployed document** rather than by composing
-the string by hand. RESEARCH Pitfall 8 is a character-for-character match across three separate
-places — the WorkOS Connect setting, `MCP_RESOURCE_URL`, and the URL typed into Claude's connector
-dialog — and a hand-composed string is exactly how a trailing slash or a wrong hostname variant gets
-in. A mismatch produces a *completed* OAuth flow followed by a `401` on every request, which is one
-of the hardest failures in this phase to diagnose.
+RESEARCH Pitfall 8 is a character-for-character match across three separate places — the WorkOS
+Connect setting, `MCP_RESOURCE_URL`, and the URL typed into Claude's connector dialog. A
+hand-composed string is exactly how a trailing slash or a wrong hostname variant gets in, and a
+mismatch produces a *completed* OAuth flow followed by a `401` on every request.
 
-### Outstanding — requires a WorkOS dashboard session
+### The live JWKS, probed with the real verifier
 
-Four values, all to be read verbatim from the tenant's discovery document, none to be assumed:
+The recorded `jwks_uri` was not merely read out of a JSON field — the actual `AuthKitJWTVerifier`
+from `backend/app/mcp/auth.py` was constructed with these exact values and pointed at the live
+endpoint. This is a public document and no credential is involved; nothing was mutated.
 
-| Field | Why it matters |
+| Check | Observed |
 |---|---|
-| `issuer` | becomes `MCP_ISSUER_URL`; resolves RESEARCH assumption A1 |
-| `jwks_uri` | becomes `MCP_JWKS_URI`. **`/oauth2/jwks` is a documentation claim, not a contract** — the verifier takes this from configuration precisely so it is never derived |
-| `client_id_metadata_document_supported` | with the next row, decides CIMD vs DCR (assumption A2) |
-| `"none"` in `token_endpoint_auth_methods_supported` | Claude selects CIMD only when **both** this and the row above hold; otherwise it falls back to DCR |
+| `GET /oauth2/jwks` | `200` in `0.396 s` |
+| Keys published | exactly `1` — `kty=RSA`, `alg=RS256`, `use=sig`, `kid=sso_oidc_key_pair_01M15MHSC4XYE9K0CWTN45K61V` |
+| Algorithm vs. our allowlist | WorkOS signs **RS256**; the verifier's `algorithms=["RS256"]` matches exactly, so the allowlist will not reject genuine tokens |
+| `build_token_verifier` wiring | returns `AuthKitJWTVerifier` (**not** `StaticTokenVerifier`); `_issuer`, `_audience` and `_jwks.uri` each equal the setting they came from — no Pitfall-8 argument swap |
+| `PyJWKClient` cold fetch | `0.504 s` for 1 signing key |
+| `PyJWKClient` cached fetch | `0.0004 s` — `cache_jwk_set=True` confirmed working, so T-02-08's "cold-start cost, not per-request cost" claim is now measured rather than asserted |
+| Fail-closed against the live endpoint | a garbage token and a well-formed token signed by an unknown key both returned `None` and **did not raise** (T-02-07) |
 
-Probe command, prepared with the domain left as a placeholder:
+This closes assumption A1 at the transport layer rather than at the documentation layer: the URI is
+not just present in a JSON document, it is reachable and serves a key our verifier can use.
 
-```bash
-curl -s https://<your-authkit-domain>/.well-known/oauth-authorization-server | jq '{issuer, jwks_uri, client_id_metadata_document_supported, token_endpoint_auth_methods_supported}'
+### The `-staging` suffix — read before plan 02-07
+
+The AuthKit domain carries a `-staging` component. This is **WorkOS's own naming for the default
+environment a new project gets**, not a deliberate staging-versus-production choice by the developer.
+It is fully functional — the discovery document, DCR registration endpoint and JWKS are all live —
+and it satisfies every acceptance criterion in plan 02-06, so it is the working domain for this
+phase.
+
+The forward-looking caveat, recorded so it cannot surprise plan 02-07 or a later milestone: in
+WorkOS, each environment has its **own** AuthKit domain, its own signing keys and its own JWKS. If
+this project is ever promoted to a production environment, `MCP_ISSUER_URL` and `MCP_JWKS_URI` both
+change, and tokens minted by the staging tenant stop validating. That is a configuration change, not
+a code change — which is precisely why both values are constructor arguments rather than derived
+constants.
+
+### No secret exists in this flow
+
+**No WorkOS client secret was requested, obtained, or stored.** The Stage-B design is a pure resource
+server that validates signatures against the public JWKS. `MCP_ISSUER_URL` and `MCP_JWKS_URI` are
+public URLs and correctly stay out of `_SECRET_FIELDS` in `backend/app/config.py` (T-02-10).
+
+### Handoff to plan 02-07
+
+The two values 02-07 must write into `deploy/cloud-run.env.yaml`, quotable verbatim:
+
+```yaml
+MCP_ISSUER_URL: "https://quiet-fireplace-16-staging.authkit.app"
+MCP_JWKS_URI: "https://quiet-fireplace-16-staging.authkit.app/oauth2/jwks"
 ```
 
-Also outstanding: confirmation that CIMD, DCR and the Resource Indicator are all enabled, and
-whether any of the three is paid-gated (assumption A7 — report the cost, do not silently upgrade).
-
-**No WorkOS client secret is needed by any of this.** The Stage-B design is a pure resource server
-that validates signatures against the public JWKS; there is no client secret to obtain, and none
-should be pasted anywhere.
+Plan 02-06 deliberately does **not** write them. Its frontmatter `files_modified` excludes
+`deploy/cloud-run.env.yaml`, its verification step 6 requires the deployed service to be unchanged,
+and plan 02-07 Task 1 owns the flip. The same strings are recorded in `02-06-SUMMARY.md`, which is
+where 02-07's acceptance criteria compare them from.
 
 ### Stage A re-verified after the Stage-B code landed
 
