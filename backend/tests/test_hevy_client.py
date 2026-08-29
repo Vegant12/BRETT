@@ -279,6 +279,31 @@ async def test_workout_count_returns_an_int(httpx2_mock: Router) -> None:
         assert await client.get_workout_count() == 42
 
 
+async def test_single_workout_is_fetched_by_a_percent_encoded_id(httpx2_mock: Router) -> None:
+    """The sixth endpoint, and the one place an upstream value reaches the request PATH.
+
+    `/v1/workouts/{workoutId}` returns a bare `Workout` with no envelope. The id comes from
+    a Hevy payload, not from this codebase, so it is percent-encoded: an id containing `/`
+    or `..` would otherwise rewrite the path this client asks for. Both properties are
+    asserted in one test because the encoding only matters on this method.
+    """
+    workout = hevy_fixture("workouts_page1")["workouts"][0]
+    route = httpx2_mock.get(url__regex=rf"{WORKOUTS}/.+").mock(
+        side_effect=[httpx.Response(200, json=workout), httpx.Response(200, json=workout)]
+    )
+
+    async with _client() as client:
+        fetched = await client.get_workout("11111111-1111-1111-1111-111111111111")
+        await client.get_workout("../../evil id")
+
+    assert fetched.id == "11111111-1111-1111-1111-111111111111"
+    assert fetched.exercises[0].sets[1].rpe == Decimal("9.5")
+    assert str(route.calls[0].request.url) == f"{WORKOUTS}/11111111-1111-1111-1111-111111111111"
+    assert str(route.calls[1].request.url) == f"{WORKOUTS}/..%2F..%2Fevil%20id", (
+        "an id from an upstream payload escaped into the request path unencoded"
+    )
+
+
 async def test_malformed_response_raises_hevy_response_error_without_the_payload(
     httpx2_mock: Router,
 ) -> None:

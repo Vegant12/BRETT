@@ -21,6 +21,7 @@ import datetime as dt
 from collections.abc import Awaitable, Callable
 from types import TracebackType
 from typing import Any
+from urllib.parse import quote
 
 import anyio
 import httpx2
@@ -44,6 +45,7 @@ from app.integrations.hevy.errors import (
     HevyServerError,
 )
 from app.integrations.hevy.schemas import (
+    HevyWorkout,
     PaginatedBodyMeasurements,
     PaginatedExerciseTemplates,
     PaginatedWorkoutEvents,
@@ -181,6 +183,23 @@ class HevyClient:
             # i.e. the user's workout titles -- cannot ride along in a traceback that
             # reaches a log line (T-03-18).
             raise HevyResponseError("/v1/workouts") from None
+
+    async def get_workout(self, workout_id: str) -> HevyWorkout:
+        """`GET /v1/workouts/{workoutId}` -- one workout, no envelope and no pagination.
+
+        Neither sync path needs this: the full sync reads pages and an `UpdatedWorkout`
+        event already carries a complete snapshot. It exists so a caller can re-read a
+        SINGLE workout after a partial failure without re-walking the pages it sits behind.
+
+        `workout_id` is percent-encoded because it arrives from an upstream payload, not
+        from this codebase. An id containing `/` or `..` would otherwise rewrite the request
+        path -- the same class of bug as an unparameterised SQL string, one layer up.
+        """
+        payload = await self._get(f"/v1/workouts/{quote(workout_id, safe='')}")
+        try:
+            return HevyWorkout.model_validate(payload)
+        except ValidationError:
+            raise HevyResponseError("/v1/workouts/{workoutId}") from None
 
     async def get_workout_count(self) -> int:
         """`GET /v1/workouts/count` -- unwrapped at the boundary, so callers get a number."""
