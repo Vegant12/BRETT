@@ -22,6 +22,13 @@ asserts ``count(*) == 1`` on ``users`` plus the seeded ``Asia/Jakarta`` value.
 The two tests here that mutate state therefore never commit -- they roll back
 in a ``finally``, which is strictly stronger than a compensating UPDATE
 because it also survives an assertion failure mid-test.
+
+D-03 makes a Phase 4 analytics window an arbitrary inclusive start/end local
+date pair, not a single day, so ``local_range_bounds`` is the shape the
+aggregates filter on. U-01: weekly volume snaps that window outward to whole
+Monday-start weeks. Without the snap the first and last buckets are partial
+weeks whose totals invite a false "volume dropped" reading. Frequency keeps the
+raw range because it divides by the true window length.
 """
 
 import datetime as dt
@@ -35,7 +42,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.time import (
     local_day,
     local_day_bounds,
+    local_range_bounds,
+    local_week_spine,
     local_week_start,
+    snap_local_week_range,
     to_local,
     utc_now,
     validate_timezone,
@@ -256,3 +266,91 @@ def test_validate_timezone() -> None:
     assert validate_timezone("Asia/Jakarta") == "Asia/Jakarta"
     with pytest.raises(ValueError, match="unknown IANA timezone"):
         validate_timezone("Not/AZone")
+
+
+# --------------------------------------------------------------------------
+# D-03 / U-01: arbitrary analytics windows and Monday-start week snapping
+# --------------------------------------------------------------------------
+
+
+def test_local_range_bounds_is_half_open_utc() -> None:
+    """Index-friendly filter bounds over an arbitrary range: UTC and half-open (D-03)."""
+    start, end = local_range_bounds(dt.date(2026, 8, 24), dt.date(2026, 8, 30), "Asia/Jakarta")
+    assert start == dt.datetime(2026, 8, 23, 17, 0, tzinfo=dt.UTC)
+    assert end == dt.datetime(2026, 8, 30, 17, 0, tzinfo=dt.UTC)
+    assert start.utcoffset() == dt.timedelta(0)
+    assert end.utcoffset() == dt.timedelta(0)
+    # Half-open: the end bound is the *next* local day's start, never inclusive.
+    assert local_day(start, "Asia/Jakarta") == dt.date(2026, 8, 24)
+    assert local_day(end, "Asia/Jakarta") == dt.date(2026, 8, 31)
+
+
+def test_local_range_bounds_of_one_day_equals_local_day_bounds() -> None:
+    """A one-day range is the day. Proves the generalization did not drift from its base."""
+    day = dt.date(2026, 8, 24)
+    assert local_range_bounds(day, day, "Asia/Jakarta") == local_day_bounds(day, "Asia/Jakarta")
+
+
+def test_local_range_bounds_rejects_an_inverted_range() -> None:
+    """An inverted window would silently return an empty result set instead of failing."""
+    with pytest.raises(ValueError, match="end_day precedes start_day"):
+        local_range_bounds(dt.date(2026, 8, 30), dt.date(2026, 8, 24), "Asia/Jakarta")
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        # Wednesday start snaps back to Monday; Sunday end is already a week end.
+        (dt.date(2026, 7, 1), dt.date(2026, 8, 30), (dt.date(2026, 6, 29), dt.date(2026, 8, 30))),
+        # A single Monday expands to that whole week.
+        (dt.date(2026, 8, 24), dt.date(2026, 8, 24), (dt.date(2026, 8, 24), dt.date(2026, 8, 30))),
+        # Already whole: unchanged, so snapping is idempotent.
+        (dt.date(2026, 6, 29), dt.date(2026, 8, 30), (dt.date(2026, 6, 29), dt.date(2026, 8, 30))),
+        # Saturday end pushes forward to Sunday.
+        (dt.date(2026, 8, 24), dt.date(2026, 8, 29), (dt.date(2026, 8, 24), dt.date(2026, 8, 30))),
+    ],
+)
+def test_snap_local_week_range_widens_outward_to_whole_weeks(
+    start: dt.date, end: dt.date, expected: tuple[dt.date, dt.date]
+) -> None:
+    """U-01: weekly volume must never report a partial week as if it were a whole one."""
+    snapped = snap_local_week_range(start, end)
+    assert snapped == expected
+    assert snapped[0].weekday() == 0
+    assert snapped[1].weekday() == 6
+    # Outward, never inward: the snapped range always CONTAINS the requested one.
+    assert snapped[0] <= start
+    assert snapped[1] >= end
+
+
+def test_snap_local_week_range_rejects_an_inverted_range() -> None:
+    with pytest.raises(ValueError, match="end_day precedes start_day"):
+        snap_local_week_range(dt.date(2026, 8, 30), dt.date(2026, 8, 24))
+
+
+def test_local_week_spine_is_gap_free_and_ascending() -> None:
+    """Zero-training weeks must appear as buckets, not vanish from the result."""
+    spine = local_week_spine(dt.date(2026, 6, 29), dt.date(2026, 8, 30))
+    assert spine == [
+        dt.date(2026, 6, 29),
+        dt.date(2026, 7, 6),
+        dt.date(2026, 7, 13),
+        dt.date(2026, 7, 20),
+        dt.date(2026, 7, 27),
+        dt.date(2026, 8, 3),
+        dt.date(2026, 8, 10),
+        dt.date(2026, 8, 17),
+        dt.date(2026, 8, 24),
+    ]
+    assert all(day.weekday() == 0 for day in spine)
+    assert spine == sorted(spine)
+
+
+def test_local_week_spine_snaps_its_first_entry_to_monday() -> None:
+    """A mid-week start still yields the Monday that owns it -- one bucket, not zero."""
+    assert local_week_spine(dt.date(2026, 7, 1), dt.date(2026, 7, 1)) == [dt.date(2026, 6, 29)]
+
+
+def test_local_week_spine_rejects_an_inverted_range() -> None:
+    with pytest.raises(ValueError, match="end_day precedes start_day"):
+        local_week_spine(dt.date(2026, 8, 30), dt.date(2026, 8, 24))
