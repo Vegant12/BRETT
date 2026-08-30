@@ -35,8 +35,8 @@ unit-testable" rule expressed as a file layout.
 
 import datetime as dt
 import uuid
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -50,7 +50,8 @@ from app.core.time import (
 )
 from app.db.models.user import User
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
-from app.normalization.resolver import EffectiveMuscle, effective_muscles_bulk
+from app.normalization.muscles import CanonicalMuscleGroup, MuscleRole
+from app.normalization.resolver import EffectiveMuscle, apply_weights, effective_muscles_bulk
 
 # VOL-01 excludes exactly this set type and no other. Written as the value being EXCLUDED, never
 # as an allow-list of included types: `dropset` is 823 live sets (12% of hard sets) and `failure`
@@ -281,3 +282,104 @@ async def resolve_row_muscles(
     return await effective_muscles_bulk(
         session, user_id=user_id, template_external_ids=template_ids
     )
+
+
+@dataclass(slots=True)
+class MuscleBucket:
+    """Accumulator for one (week, muscle) or one (window, muscle) cell.
+
+    Mutable on purpose -- it is an intermediate, never a return value. The public Pydantic
+    models in ``schemas.py`` are the frozen ones.
+
+    ``session_ids`` is a SET, not a counter, and that is the single most important line in this
+    module. One workout containing three hamstring exercises is ONE hamstring session;
+    incrementing here instead inflated hamstrings from 2 to 8 (4.0x) in a real week, and
+    inflated 14 of 16 muscle groups. The numbers still look plausible, which is why this has to
+    be structural rather than reviewed.
+    """
+
+    direct_sets: int = 0
+    indirect_sets: int = 0
+    weighted_sets: Decimal = field(default_factory=lambda: Decimal(0))
+    session_ids: set[uuid.UUID] = field(default_factory=set)
+
+
+# Warning sign that this went wrong: any `sum(r.sessions for r in rows)` anywhere downstream.
+def _fold_by_muscle(
+    rows: Sequence[SetRollupRow],
+    resolved: Mapping[str, Sequence[EffectiveMuscle]],
+    weights: Mapping[MuscleRole, Decimal] | None,
+    keyed_by_week: bool,
+) -> dict[Any, MuscleBucket]:
+    """The one fan-out implementation. Both public folds delegate here.
+
+    A second copy specialised per key shape is how the weekly and whole-window answers would
+    eventually disagree -- the ``resolver.py::effective_muscles`` delegation pattern.
+    """
+    buckets: dict[Any, MuscleBucket] = {}
+    for row in rows:
+        muscles = resolved.get(row.template_external_id, ())
+        if not muscles:
+            # D-03 (Phase 3): an unmapped template must not block anything. It contributes to
+            # no muscle bucket and raises nothing -- silently, because "we have no mapping for
+            # this exercise" is a curation gap surfaced by `mapping-gaps`, not a query failure.
+            continue
+        # NORM-03 / D-04: the weight is applied at QUERY time by the resolver's own pure
+        # function. Never a CASE WHEN in SQL, and never a weight literal spelled out here --
+        # the defaults live in the taxonomy module and the caller overrides them per query.
+        weight_by_muscle = apply_weights(muscles, weights)
+        for muscle in muscles:
+            key = (row.week_start, muscle.muscle_group) if keyed_by_week else muscle.muscle_group
+            bucket = buckets.setdefault(key, MuscleBucket())
+            if muscle.role is MuscleRole.DIRECT:
+                bucket.direct_sets += row.hard_sets
+            else:
+                bucket.indirect_sets += row.hard_sets
+            # Decimal * int stays exact. Binary floating point here would make two
+            # arithmetically identical weekly totals compare unequal.
+            bucket.weighted_sets += weight_by_muscle[muscle.muscle_group] * row.hard_sets
+            bucket.session_ids.add(row.workout_id)
+    return buckets
+
+
+def fold_weeks_by_muscle(
+    rows: Sequence[SetRollupRow],
+    resolved: Mapping[str, Sequence[EffectiveMuscle]],
+    weights: Mapping[MuscleRole, Decimal] | None = None,
+) -> dict[tuple[dt.date, CanonicalMuscleGroup], MuscleBucket]:
+    """VOL-02: per-week, per-muscle buckets.
+
+    Pure and synchronous -- no session, no I/O -- so every rule above is unit-testable with no
+    container. Weeks with no training produce no key here on purpose; the caller projects onto
+    ``local_week_spine`` so a zero week is a zero and not an absence.
+    """
+    return _fold_by_muscle(rows, resolved, weights, keyed_by_week=True)
+
+
+def fold_window_by_muscle(
+    rows: Sequence[SetRollupRow],
+    resolved: Mapping[str, Sequence[EffectiveMuscle]],
+    weights: Mapping[MuscleRole, Decimal] | None = None,
+) -> dict[CanonicalMuscleGroup, MuscleBucket]:
+    """VOL-03: whole-window, per-muscle buckets. Delegates to the same fold as the weekly one.
+
+    Not derivable by summing the weekly buckets: adding their ``session_ids`` COUNTS would
+    double-count nothing but adding their sizes would, and re-folding from the same rows keeps
+    one workout spanning two definitions of "the week" impossible to double-count.
+    """
+    return _fold_by_muscle(rows, resolved, weights, keyed_by_week=False)
+
+
+def fold_window_by_template(
+    rows: Sequence[SetRollupRow],
+) -> dict[str, set[uuid.UUID]]:
+    """VOL-03 per exercise: distinct workouts per template over the whole window.
+
+    A set for the same reason as ``MuscleBucket``'s session accumulator: an exercise performed
+    twice in one workout -- a real possibility, even though this account has never done it --
+    is one session.
+    """
+    sessions: dict[str, set[uuid.UUID]] = {}
+    for row in rows:
+        sessions.setdefault(row.template_external_id, set()).add(row.workout_id)
+    return sessions
