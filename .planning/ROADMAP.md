@@ -103,7 +103,7 @@ Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
 - [x] 03-08-PLAN.md — Wave 3: body-measurement sync keyed on the calendar date, with the 404 page terminator (HEVY-07, HEVY-09)
 - [x] 03-09-PLAN.md — Wave 4: incremental event sync — frozen-cursor drain, oldest-first apply, deletion propagation (HEVY-02, HEVY-04, HEVY-09)
 - [x] 03-10-PLAN.md — Wave 5: HevySyncService facade, `python -m app.cli sync-hevy`, end-to-end mock-Hevy test (HEVY-01, HEVY-02, HEVY-05, HEVY-09)
-- [ ] 03-11-PLAN.md — Wave 6 (checkpoints): live Hevy Pro sync; record real rate limits, page ordering, dumbbell semantics and measurement units (HEVY-01, HEVY-02, HEVY-07, HEVY-09)
+- [x] 03-11-PLAN.md — Wave 6 (checkpoints): live Hevy Pro sync; record real rate limits, page ordering, dumbbell semantics and measurement units (HEVY-01, HEVY-02, HEVY-07, HEVY-09)
 - [ ] 03-12-PLAN.md — Wave 7: close the curation gap against the real exercise inventory + `mapping-gaps` command (HEVY-06, NORM-01, NORM-02, NORM-03)
 
 *Plan 03-01 is this phase's Wave 0: it moves* `httpx2` *from the dev group into runtime dependencies (a bare* `uv sync` *in Cloud Run would otherwise ship an image that ImportErrors on first sync), adds* `api-key` *to* `DENY_KEYS`*, and commits the canned Hevy fixtures every later plan mocks against.*
