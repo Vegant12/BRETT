@@ -34,6 +34,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics.rollup import SetRollupRow
@@ -321,3 +322,299 @@ def test_fold_week_totals_keeps_total_reps_none_when_no_row_reports_reps() -> No
     assert totals.total_reps is None, "a fold over rows that reported no reps invented a zero"
     assert totals.tonnage_sets == 0
     assert len(totals.session_ids) == 1, "two rows from one workout are one session"
+
+
+# ---------------------------------------------------------------------------
+# D-02 / U-01: local week bucketing, outward snapping, and the gap-free spine
+# ---------------------------------------------------------------------------
+
+# The boundary table, transcribed from `test_time.py`. Jakarta is UTC+7, so 17:00Z is exactly
+# local midnight -- and every morning workout falls in the 17:00Z-24:00Z band that naive-UTC
+# bucketing puts on the WRONG local day.
+_BEFORE_MIDNIGHT = dt.datetime(2026, 8, 23, 16, 30, tzinfo=dt.UTC)  # -> week 2026-08-17
+_AT_MIDNIGHT = dt.datetime(2026, 8, 23, 17, 0, tzinfo=dt.UTC)  # -> week 2026-08-24
+_NEAR_MIDNIGHT_UTC = dt.datetime(2026, 8, 23, 23, 30, tzinfo=dt.UTC)  # -> week 2026-08-24
+
+# Both candidate weeks, so the one the workout did NOT land in is asserted to be a zero row
+# rather than merely absent from the result.
+_EARLIER_WEEK = dt.date(2026, 8, 17)
+_BOUNDARY_WEEKS = (_EARLIER_WEEK, _WEEK_START)
+
+_THREE_WEEK_START = dt.date(2026, 8, 10)
+_THREE_WEEK_END = dt.date(2026, 8, 30)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("started_at", "expected_week"),
+    [
+        (_BEFORE_MIDNIGHT, _EARLIER_WEEK),
+        (_AT_MIDNIGHT, _WEEK_START),
+        (_NEAR_MIDNIGHT_UTC, _WEEK_START),
+    ],
+)
+async def test_week_boundary_uses_the_users_local_timezone(
+    session: AsyncSession,
+    golden_workout: GoldenBuilder,
+    started_at: dt.datetime,
+    expected_week: dt.date,
+) -> None:
+    """The verified boundary table, transcribed from `test_time.py`.
+
+    | UTC instant               | Jakarta local    | local week |
+    |---------------------------|------------------|------------|
+    | 2026-08-23T16:30:00+00:00 | Sun 2026-08-23 23:30 | 2026-08-17 |
+    | 2026-08-23T17:00:00+00:00 | Mon 2026-08-24 00:00 | 2026-08-24 |
+    | 2026-08-23T23:30:00+00:00 | Mon 2026-08-24 06:30 | 2026-08-24 |
+
+    The last two are the ones naive-UTC bucketing gets wrong, and at UTC+7 that band holds
+    every morning workout -- so the failure would not be an edge case, it would be most of
+    the data.
+    """
+    await golden_workout.template(external_id=_BENCH, exercise_type="weight_reps")
+    await golden_workout.workout(
+        start_time=started_at,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)],
+            )
+        ],
+    )
+
+    result = await get_weekly_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_EARLIER_WEEK, end_day=_WEEK_END
+    )
+
+    actual = {week.week_start: (week.hard_sets, week.sessions) for week in result.weeks}
+    assert actual == {
+        week: ((1, 1) if week == expected_week else (0, 0)) for week in _BOUNDARY_WEEKS
+    }, f"the workout at {started_at.isoformat()} did not land in the {expected_week} local week"
+
+
+@pytest.mark.integration
+async def test_week_boundary_changes_when_the_timezone_changes(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Flipping `users.timezone` moves the same instant into a different week.
+
+    This is the test that distinguishes "reads user configuration" from "hardcodes Asia/Jakarta
+    somewhere". Hardcoding the timezone argument would make every other bucketing test in this
+    module pass even if the column were ignored entirely.
+
+    17:00Z is Monday 00:00 in Jakarta and Sunday 13:00 in New York, so the same workout belongs
+    to two different local weeks depending on nothing but that one column.
+    """
+    await golden_workout.template(external_id=_BENCH, exercise_type="weight_reps")
+    await golden_workout.workout(
+        start_time=_AT_MIDNIGHT,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)],
+            )
+        ],
+    )
+
+    def _trained_week(result_weeks: list[WeeklyVolumeWeek]) -> dt.date:
+        trained = [week.week_start for week in result_weeks if week.hard_sets == 1]
+        assert len(trained) == 1, f"expected exactly one trained week, got {trained}"
+        return trained[0]
+
+    jakarta = await get_weekly_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_EARLIER_WEEK, end_day=_WEEK_END
+    )
+    assert _trained_week(jakarta.weeks) == _WEEK_START
+
+    try:
+        await session.execute(
+            sa.text("update users set timezone = :tz where id = :uid"),
+            {"tz": "America/New_York", "uid": DEFAULT_USER_ID},
+        )
+        flipped = await get_weekly_volume(
+            session, user_id=DEFAULT_USER_ID, start_day=_EARLIER_WEEK, end_day=_WEEK_END
+        )
+        assert _trained_week(flipped.weeks) == _EARLIER_WEEK, (
+            "the week bucket did not follow users.timezone -- the zone is being taken from "
+            "somewhere other than the column FOUND-03 makes the source of truth"
+        )
+    finally:
+        # Belt: undo the value. Braces: the golden_workout fixture discards the whole
+        # transaction, so the shared container is untouched even if an assertion above failed.
+        await session.execute(
+            sa.text("update users set timezone = :tz where id = :uid"),
+            {"tz": "Asia/Jakarta", "uid": DEFAULT_USER_ID},
+        )
+
+
+@pytest.mark.integration
+async def test_window_snaps_outward_to_whole_weeks(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """A Wednesday-to-Thursday request returns the whole Monday-start week it sits inside.
+
+    Without the outward snap this window would report a partial week whose total is not
+    comparable to a full one -- which reads as "volume dropped" -- and the Monday workout,
+    which is inside the very training week the user asked about, would be invisible.
+    """
+    await golden_workout.template(external_id=_BENCH, exercise_type="weight_reps")
+    await golden_workout.workout(
+        start_time=_MONDAY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 3,
+            )
+        ],
+    )
+
+    result = await get_weekly_volume(
+        session,
+        user_id=DEFAULT_USER_ID,
+        start_day=dt.date(2026, 8, 26),
+        end_day=dt.date(2026, 8, 27),
+    )
+
+    assert len(result.weeks) == 1, "a two-day request must snap to exactly one whole week"
+    assert result.weeks[0].week_start == _WEEK_START
+    assert result.weeks[0].hard_sets > 0, (
+        "the Monday workout fell outside the bucket. It is inside the same training week the "
+        "user asked about, which is the entire reason the window snaps outward"
+    )
+
+
+@pytest.mark.integration
+async def test_weeks_are_gap_free_including_zero_training_weeks(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Three requested weeks, one trained: the answer is three rows, not one."""
+    await golden_workout.template(external_id=_BENCH, exercise_type="weight_reps")
+    await golden_workout.workout(
+        start_time=_MONDAY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 3,
+            )
+        ],
+    )
+
+    result = await get_weekly_volume(
+        session,
+        user_id=DEFAULT_USER_ID,
+        start_day=_THREE_WEEK_START,
+        end_day=_THREE_WEEK_END,
+    )
+
+    assert [week.week_start for week in result.weeks] == [
+        dt.date(2026, 8, 10),
+        _EARLIER_WEEK,
+        _WEEK_START,
+    ], (
+        "a zero-training week vanished from the result -- that is the most "
+        "diagnostically interesting week Claude could have seen"
+    )
+    for empty in result.weeks[:2]:
+        assert empty.sessions == 0
+        assert empty.hard_sets == 0
+        assert empty.total_reps is None
+        assert empty.tonnage_sets == 0
+        assert empty.tonnage_kg is None
+    assert result.weeks[2].hard_sets == 3
+
+
+@pytest.mark.integration
+async def test_response_carries_freshness_and_coverage(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """DQ-01 and DQ-02 ride on every response, and D-05's boundary is crossed here.
+
+    `freshness` reports `workouts` and only `workouts`: VOL-01 never resolves a muscle map, so
+    `exercise_templates` staleness cannot change a number in this answer. A per-muscle result
+    that reported the same single key would be claiming a freshness it does not have.
+    """
+    await golden_workout.template(external_id=_BENCH, exercise_type="weight_reps")
+    await golden_workout.workout(
+        start_time=_MONDAY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 3,
+            )
+        ],
+    )
+
+    first = await get_weekly_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    assert set(first.freshness.resources) == {"workouts"}
+    assert first.coverage.sessions_in_window == 1
+    assert first.coverage.insufficient_data is True, "one session cannot support a weekly rate"
+    assert first.coverage.earliest_data_at == _MONDAY
+
+    await golden_workout.workout(
+        start_time=_MONDAY + dt.timedelta(days=2),
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 3,
+            )
+        ],
+    )
+
+    second = await get_weekly_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    assert second.coverage.sessions_in_window == 2
+    assert second.coverage.insufficient_data is False, (
+        "two sessions is the D-05 threshold, not one more than it -- an off-by-one in the "
+        "comparison would flag a perfectly reportable window as too sparse"
+    )
+    assert second.weeks[0].sessions == 2
+
+
+@pytest.mark.integration
+async def test_weekly_volume_is_scoped_to_one_user(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Three workouts for a second user and one for the default user, in the same local week."""
+    await golden_workout.template(external_id=_BENCH, exercise_type="weight_reps")
+    await golden_workout.workout(
+        start_time=_MONDAY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 3,
+            )
+        ],
+    )
+
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(
+        external_id=_BENCH, exercise_type="weight_reps", user_id=ANALYTICS_SECOND_USER_ID
+    )
+    for offset in range(3):
+        await golden_workout.workout(
+            start_time=_MONDAY + dt.timedelta(days=offset),
+            user_id=ANALYTICS_SECOND_USER_ID,
+            exercises=[
+                GoldenExercise(
+                    template_external_id=_BENCH,
+                    sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 3,
+                )
+            ],
+        )
+
+    mine = await _one_week(session)
+    theirs = await _one_week(session, user_id=ANALYTICS_SECOND_USER_ID)
+
+    # Non-vacuous guard: if the second user's rows were missing entirely, the scoping assertion
+    # below would pass while proving nothing.
+    assert theirs.sessions == 3
+    assert theirs.hard_sets == 9
+
+    assert (mine.sessions, mine.hard_sets) == (1, 3), (
+        "ASVS V4 violated: weekly volume included another user's workouts"
+    )
