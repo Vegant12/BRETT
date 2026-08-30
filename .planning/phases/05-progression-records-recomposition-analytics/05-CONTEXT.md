@@ -5,6 +5,11 @@
 (new D-13–D-17), and the recomposition rate-of-change basis (D-11/D-12) critically re-reviewed
 before planning and replaced/tightened; see the "Revision note" at the end of each affected
 subsection.
+**Revised again:** 2026-08-30 — after /gsd-phase-researcher and /gsd-pattern-mapper both
+independently flagged the same unresolved items, three research-recommended defaults confirmed
+with the user before planning: PROG-03's max lookback bound (D-19, 12 weeks), PROG-02's trend
+stable dead-band (D-18, ±0.5%/week), and BODY-02's recomposition aggregation rule (D-20,
+net-progression score + `progression_signal` field).
 **Status:** Ready for planning
 
 <domain>
@@ -55,6 +60,12 @@ signals in recomposition status — out of v1 scope per REQUIREMENTS.md (`RECOMP
   to `improving` / `stable` / `declining`. Below that threshold, the verdict is `unclear` —
   matches blueprint §20's "do not classify progression based on a single workout," scaled to a
   concrete minimum.
+- **D-18 (new 2026-08-30, confirmed after research):** PROG-02's `stable` dead-band around zero
+  slope is **±0.5%/week**, derived as D-07's 2% plateau tolerance ÷ D-05's 4-week minimum window —
+  the same "noise floor" concept reused across the phase rather than an independent constant.
+  Validated against live data: 9 improving / 9 stable / 10 declining across 28 exercises, a clean
+  three-way split with no boundary crowding. Confirmed by the user at plan time
+  (`TREND_STABLE_BAND_PERCENT_PER_WEEK = Decimal("0.005")`).
 - **D-06 (revised 2026-08-30):** PROG-03's plateau window is **adaptive session count, bounded by
   a calendar floor**: **4 qualifying sessions of that exercise AND at least 3 weeks elapsed**
   since the streak began — whichever requires more evidence. Pure session-count adaptivity (the
@@ -85,6 +96,12 @@ signals in recomposition status — out of v1 scope per REQUIREMENTS.md (`RECOMP
   `low`/`medium`/`high`) — matching blueprint §21's return shape
   (`plateau_duration`/`recent_performance`/`historical_best`/`confidence`) instead of a bare
   boolean, which the original D-06/D-07 pair implied but didn't make explicit.
+- **D-19 (new 2026-08-30, confirmed after research):** D-06 specifies minimum evidence only, with
+  no maximum lookback — run over unbounded history this flags 44 of 97 exercises as plateaued with
+  durations up to 402 days, including exercises abandoned months ago, which is not usable coaching
+  output. PROG-03 takes a caller-supplied **`lookback_weeks` parameter, defaulting to 12 weeks**,
+  echoed back in the result's window fields. A 12-week bound gives 18/29 exercises flagged at
+  27–75 days on live data — a coach-readable result. Confirmed by the user at plan time.
 
 ### Personal Records (PROG-04)
 - **D-08:** `'dropset'` and `'failure'` set types are **eligible for all PR types** (max weight,
@@ -158,14 +175,24 @@ Claude's discretion with only a pointer to Phase 4's coverage pattern; these for
 - ~~BODY-01 rolling-average mechanics with data gaps~~ — **resolved 2026-08-30** by D-13–D-17
   (no interpolation, source tie-break, per-window coverage floors, smoothed 4-week trend rate plus
   a surfaced raw single-week delta).
-- **How PROG-02's trend feeds BODY-02's label alongside the weight trend.** The user explicitly
-  deferred this and it remains open. Lean toward: weight trend (now D-16's smoothed rate) sets the
-  primary direction/threshold check (D-10–D-12), and training-progression trend (D-05's
-  `improving`/`stable`/`declining`/`unclear`, aggregated across tracked exercises) refines the
-  label within that — e.g. weight roughly stable + aggregate progression `improving` →
-  `likely_recomp_progressing`; weight stable + `declining`/`unclear` → plain `weight_stable`.
-  Confirm the exact aggregation rule (how many/which exercises' trends count) at plan/research
-  time; it is not locked.
+- ~~How PROG-02's trend feeds BODY-02's label alongside the weight trend~~ — **resolved
+  2026-08-30, confirmed after research, see D-20** below.
+
+### D-20 (new 2026-08-30, confirmed after research): Recomposition status aggregation rule (BODY-02)
+Weight trend (D-16's smoothed rate) sets the primary direction/threshold check (D-10–D-12).
+Training-progression trend refines the label via a **net-progression score**:
+`(count(improving) − count(declining)) / count(classified exercises)`, excluding `unclear`
+exercises from both numerator and denominator, requiring a **minimum of 3 classified exercises**
+before the score is trusted (below that, aggregate progression reads as `unclear` and the status
+label falls back to a weight-only read). The score is bucketed with a **±0.25 band** (net > 0.25 →
+net-positive; net < −0.25 → net-negative; between → neutral) and crossed with the weight-rate
+ladder (D-10–D-12, D-16) into blueprint §26's seven-value enum. The on-target-gain-with-flat-or-
+declining-lifts case maps to `likely_muscle_gain` — never overstating, since the label only claims
+"gaining at a rate consistent with muscle gain" — with the nuance carried by a **required
+`progression_signal` field** (the net-progression score's own classification: positive/neutral/
+negative/insufficient) so Claude can qualify the label rather than the enum silently hiding
+disagreement between weight and strength trends. `disclaimer` remains populated on every response
+per the existing framing requirement (decision support, not a medical claim).
 - **CMP-01 period comparison scope** — which specific metrics get compared (volume, frequency,
   tonnage, per-muscle, progression?) beyond "normalized per week so unequal-length windows don't
   mislead." Not discussed as its own gray area; Phase 4's D-03 (arbitrary start/end date range,
