@@ -9,12 +9,13 @@ No container and no marker: every failure here is a plain source or argparse fac
 go red on the commit that introduces it rather than in a slower job later.
 """
 
+import inspect
 import uuid
 from pathlib import Path
 
 import pytest
 
-from app.cli import DEFAULT_USER_ID, build_parser
+from app.cli import DEFAULT_USER_ID, _run_mapping_gaps, build_parser
 
 # `backend/tests/` -> `backend/` -> `backend/app/cli.py`.
 CLI_SOURCE = Path(__file__).resolve().parents[1] / "app" / "cli.py"
@@ -30,6 +31,35 @@ def test_parser_exposes_both_commands() -> None:
 
     assert parser.parse_args(["sync-hevy"]).command == "sync-hevy"
     assert parser.parse_args(["sync-status"]).command == "sync-status"
+
+
+def test_parser_exposes_mapping_gaps() -> None:
+    """The curation report is a first-class verb, not an ad-hoc SQL query in a summary."""
+    assert build_parser().parse_args(["mapping-gaps"]).command == "mapping-gaps"
+
+    other_user = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
+    parsed = build_parser().parse_args(["mapping-gaps", "--user-id", str(other_user)])
+    assert parsed.user_id == other_user
+    assert build_parser().parse_args(["mapping-gaps"]).user_id == SEEDED_USER_ID
+
+
+def test_mapping_gaps_is_not_a_gate() -> None:
+    """D-03: an unmapped exercise is a supported state, not a build failure.
+
+    Asserted against the source rather than by calling it, because reproducing "there are
+    gaps" at runtime needs a container and a seeded database, and the property worth
+    protecting is simply that no branch of this function can ever hand back a non-zero code.
+    """
+    returns = [
+        line.strip()
+        for line in inspect.getsource(_run_mapping_gaps).splitlines()
+        if line.strip().startswith("return")
+    ]
+
+    assert returns == ["return 0"], (
+        "D-03 violated: `_run_mapping_gaps` can exit non-zero, which turns a curation "
+        f"backlog into a broken pipeline the moment it is wired into CI. Found: {returns}"
+    )
 
 
 def test_full_and_incremental_are_mutually_exclusive() -> None:
