@@ -40,7 +40,28 @@ nothing here contradicts keeping it.
 Candidate exercise for comparison: **Romanian Deadlift (Dumbbell)**, session "Lower 2",
 2026-08-29, three working sets with `weight_kg = 26.000` (reps 15, 12, 12).
 
-Verdict: **PENDING — see task 3.**
+**Verdict: `weight_kg` is the load of ONE dumbbell, not the combined pair.**
+
+Compared directly against the Hevy app (2026-08-30): the API returned `weight_kg = 26.0` for
+the sets above, and the app displays those same sets as **26 kg** — i.e. 26 kg *per dumbbell*,
+not 13 kg per hand and not a 26 kg total across both. A combined reading would have shown
+13 kg in the app. Confirmed with the user reading their own logged session, so this is an
+observation and not an inference from the docs (Hevy's OpenAPI document says nothing about it).
+
+The practical consequence for Phase 4: a dumbbell set's true tonnage is
+`weight_kg × reps × 2` for two-handed dumbbell work, while `weight_kg` alone is the correct
+input to an estimated-1RM formula (which models one limb's load). Those two facts pull in
+opposite directions, which is exactly why this is written down rather than assumed.
+
+```
+No correction factor is applied anywhere in the codebase. Hevy's raw `weight_kg` is stored
+unmodified; this section is the documentation Phase 4 and Phase 5 consult when computing
+tonnage and estimated 1RM. `exercise_templates.equipment_category = 'dumbbell'` is the
+discriminator if a factor is ever needed.
+```
+
+That discriminator is only usable because of the `equipment` wire-field fix recorded below —
+before it, `equipment_category` was `null` for all 463 templates.
 
 ## Body-measurement units and field coverage
 
@@ -53,7 +74,22 @@ them, not a sync defect.
 
 Most recent `waist_cm` value: `80.00` on `2026-08-25`.
 
-Verdict (are the unsuffixed fields really centimetres): **PENDING — see task 3.**
+**Verdict: the seven unsuffixed fields are CENTIMETRES. RESEARCH assumption A2 is CONFIRMED.**
+
+Hevy's wire payload names these seven fields without a unit suffix — `abdomen`, `waist`,
+`hips`, `left_thigh`, `right_thigh`, `left_calf`, `right_calf` — while the codebase stores
+them in `*_cm` columns. That mismatch was the risk: an inch-valued field landing in a
+column named `_cm` would produce a silently wrong body-composition trend forever.
+
+Compared directly against the Hevy app (2026-08-30): the most recent `waist` value the API
+returned was `80.00`, and the app displays that same 2026-08-25 entry as **80 cm**. 80 inches
+would be an implausible waist for this person, so the reading is unambiguous. Only `waist` had
+enough data on this account to compare (15 non-null rows of 123; the other six unsuffixed
+fields are null for every row), but Hevy renders all seven through the same unit setting, so
+one confirmation covers the group.
+
+**No `ACTION REQUIRED`.** `backend/app/db/models/body.py`'s `*_cm` column names are correct as
+written and need no rename. No unit conversion is applied on write, and none should be added.
 
 ## Exercise template inventory
 
@@ -86,22 +122,53 @@ ever have caught it.
 
 ## Unmapped templates
 
-77 of 463 templates (16.6%) have no mapped canonical muscle group. All fall into three expected
-buckets:
+**77 templates unmapped before curation, 44 deliberately excluded after** (plan 03-12).
+The remaining 44 are exactly the id set in `DELIBERATELY_UNMAPPED`, verified by comparing
+`unmapped_template_ids` against that constant after a re-sync — no id is unmapped by accident.
 
-- **24 `cardio`** templates (Running, Cycling, Rowing Machine, Swimming, etc.) — no discrete
-  muscle group applies.
-- **45 `full_body`** templates (compound Olympic lifts — Clean, Snatch, Thruster — plus
-  calisthenics like Burpee, Mountain Climber, Farmers Walk) — legitimately full-body, not a
-  gap in the taxonomy.
-- **4 `neck`** templates (Lying Neck Curls/Extension, weighted and unweighted) — `neck` is a
-  Hevy primary-muscle-group value with no canonical mapping, per plan 03-03's finding that
-  D-01's amended 19-group canonical list excludes `neck`.
-- **2 `shoulders`** templates with no override yet (`Press Up`, `Single Arm Lateral Raise
-  (Dumbbell)`) and **1 `other`** (`Stretching`).
+Inspect the current state at any time with:
 
-This list — all 77 external IDs, titles, and muscle/equipment attributes — is what plan 03-12
-curates against the user's real exercise inventory.
+    PYTHONPATH=backend uv run python -m app.cli mapping-gaps
+
+### Before (the plan 03-11 observation)
+
+| Hevy primary group | Templates | Examples |
+|---|---:|---|
+| `cardio` | 24 | Running, Cycling, Rowing Machine, Swimming |
+| `full_body` | 45 | Clean, Snatch, Thruster, Kettlebell Swing, Burpee, Farmers Walk |
+| `neck` | 4 | Lying Neck Curls / Extension, weighted and unweighted |
+| `shoulders` | 3 | Press Up, Single Arm Lateral Raise (Cable / Dumbbell) |
+| `other` | 1 | Stretching |
+| **total** | **77** | of 463 templates (16.6%) |
+
+### After (curated in plan 03-12)
+
+33 of the 77 were curated; 44 remain excluded on purpose. Re-syncing templates raised the
+materialised mapping count to **1147 rows across 463 templates**.
+
+| Outcome | Templates | How |
+|---|---:|---|
+| Reached by the title split table | 3 | Two new `DELTOID_SPLIT_BY_TITLE` keys — `single arm lateral raise` and `press up` |
+| Given an explicit template-id entry | 30 | `CURATED_BY_TEMPLATE_ID`: the loaded `full_body` compounds (Olympic pulls, jerks, thrusters, kettlebell hinges, loaded carries, bodyweight strength holds) |
+| Deliberately excluded | 44 | `DELIBERATELY_UNMAPPED`: 24 cardio, 15 `full_body` conditioning/mobility, 4 `neck`, 1 `other` |
+
+**The line drawn between the last two rows** is whether the movement is loaded resistance work
+with an eccentric. A thruster lowers the bar under control and is curated; a sled push and a
+ball slam are concentric-only and are not. `neck` is unmappable by design — D-01's amended
+19-group canonical list excludes it, so there is nothing to map it to.
+
+**`full_body` is never fanned out to all 19 groups.** Doing so would inflate every Phase 4
+per-muscle figure with work that trained no specific muscle. Each `full_body` template is
+either given a real prime-mover set by hand or excluded outright.
+
+### The finding that mattered
+
+Of the 77 unmapped templates, only **two** appeared in this account's 327 synced workouts:
+`Single Arm Lateral Raise (Cable)` (34 logged instances) and `Single Arm Lateral Raise
+(Dumbbell)` (1). Both now resolve to `side_delts`. **Zero templates that appear in real
+workout history are unmapped.** The other 75 were library entries this person has never
+performed — which is why the curation split so cleanly between "close the real gap" (one
+title key) and "decide the end state for everything else".
 
 ## Errors and skipped records
 
