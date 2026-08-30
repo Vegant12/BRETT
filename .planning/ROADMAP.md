@@ -120,9 +120,23 @@ Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
 3. Training frequency per muscle group and per exercise reports sessions per week over a requested window
 4. Every analytics response carries freshness metadata (when the underlying data was last synced) and coverage/uncertainty metadata (sessions in window, insufficient-data flag)
 5. All calculations are verified against golden fixture workouts covering warm-ups, dropsets, supersets, and bodyweight exercises
-**Plans**: TBD
+**Plans**: 9 plans
 
+Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
 
+- [ ] 04-01-PLAN.md — Wave 1: `local_range_bounds` / `snap_local_week_range` / `local_week_spine` in `core/time.py`, plus the stale `exercise_type` comment fix (VOL-01, VOL-02, VOL-03)
+- [ ] 04-02-PLAN.md — Wave 1: `app/analytics/` package, all ten Pydantic return types, and the static boundary test (VOL-01..03, DQ-01, DQ-02)
+- [ ] 04-03-PLAN.md — Wave 1: `golden_workout` flush-and-rollback builder fixture and its self-test (VOL-01..03, DQ-01, DQ-02)
+- [ ] 04-04-PLAN.md — Wave 2: `analytics/metadata.py` — per-resource freshness, D-06 coverage block, D-05 threshold (DQ-01, DQ-02)
+- [ ] 04-05-PLAN.md — Wave 2: `analytics/rollup.py` — window resolution, the one SQL aggregate, the pure muscle folds (VOL-01, VOL-02, VOL-03)
+- [ ] 04-06-PLAN.md — Wave 3: `get_weekly_volume` (VOL-01) with golden-fixture tests for warm-ups, dropsets, modality, zero-load, supersets and week bucketing (VOL-01, DQ-01, DQ-02)
+- [ ] 04-07-PLAN.md — Wave 3: `analytics/frequency.py` — `get_training_frequency` with session de-duplication and exact quantized rates (VOL-03, DQ-01, DQ-02)
+- [ ] 04-09-PLAN.md — Wave 3: `test_analytics_rollup.py` — window guards and pure folds in the fast suite, the SQL aggregate against real Postgres (VOL-01, VOL-02, VOL-03)
+- [ ] 04-08-PLAN.md — Wave 4: `get_muscle_group_volume` (VOL-02) with the override test that proves the resolver is used (VOL-02, DQ-01, DQ-02)
+
+*Plan 04-09 is numbered after 04-08 but runs a wave earlier: it was split out of 04-05 to keep that implementation plan inside its context budget, and it touches only `test_analytics_rollup.py`, so it runs in parallel with 04-06 and 04-07. 04-08 is wave 4 solely because it appends to `volume.py` and `test_analytics_volume.py`, which 04-06 creates in wave 3.*
+
+*This phase adds **zero** dependencies to `pyproject.toml` and creates **no** migration. A proposed dependency or schema change is a signal the design drifted from CLAUDE.md's "SQL aggregates + plain Python".*
 
 ### Phase 5: Progression, Records & Recomposition Analytics
 
@@ -182,7 +196,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 1. Backend Foundation                             | 0/5            | Planned     | -         |
 | 2. Deploy & Connector Auth Spike                  | 4/8            | Executing   | -         |
 | 3. Hevy Integration & Normalization               | 0/12           | Planned     | -         |
-| 4. Volume & Frequency Analytics                   | 0/TBD          | Not started | -         |
+| 4. Volume & Frequency Analytics                   | 0/9            | Planned     | -         |
 | 5. Progression, Records & Recomposition Analytics | 0/TBD          | Not started | -         |
 | 6. MCP Tools                                      | 0/TBD          | Not started | -         |
 | 7. Production Hardening & Coaching Layer          | 0/TBD          | Not started | -         |
