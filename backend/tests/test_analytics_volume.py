@@ -25,8 +25,15 @@ relationship between exercises, so it changes rest and changes nothing about set
 It is written as an equality between two fixtures rather than against a magic expected number,
 so it also guards against a future "fix" that collapses superset exercises into one set group.
 
-Plan 04-08 appends the VOL-02 tests to this module; there is one docstring and one import block,
-and they extend rather than duplicate.
+The VOL-02 half of this module has its own load-bearing test, and it is
+`test_override_changes_the_per_muscle_result`. A pure-SQL join to `exercise_muscles` produces
+byte-identical output for all 16 muscle groups today -- `exercise_muscle_overrides` holds zero
+rows -- so every other VOL-02 test written here would pass against an implementation that
+silently discards the user's own mapping corrections. Nothing errors, and no reviewer can see it.
+The static identifier ban in `test_analytics_isolation.py` and this runtime test are two
+INDEPENDENT mechanisms aimed at that single defect, and either one alone can be worked around:
+the static check cannot see a raw-SQL join, and a runtime check alone cannot fail on a commit
+that has not yet grown a fixture with an override in it.
 """
 
 import datetime as dt
@@ -38,8 +45,9 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics.rollup import SetRollupRow
-from app.analytics.schemas import WeeklyVolumeWeek
-from app.analytics.volume import _fold_week_totals, get_weekly_volume
+from app.analytics.schemas import MuscleGroupVolumeResult, WeeklyVolumeWeek
+from app.analytics.volume import _fold_week_totals, get_muscle_group_volume, get_weekly_volume
+from app.normalization.muscles import CanonicalMuscleGroup, MuscleRole
 from tests.conftest import (
     ANALYTICS_SECOND_USER_ID,
     DEFAULT_USER_ID,
@@ -617,4 +625,219 @@ async def test_weekly_volume_is_scoped_to_one_user(
 
     assert (mine.sessions, mine.hard_sets) == (1, 3), (
         "ASVS V4 violated: weekly volume included another user's workouts"
+    )
+
+
+# ---------------------------------------------------------------------------
+# VOL-02 / D-04: per-muscle-group split, query-time weighting, and the override proof
+# ---------------------------------------------------------------------------
+
+# The two mappings the whole VOL-02 half is computed against. BENCH deliberately reaches three
+# groups and ROW two, with a direct/indirect mix on both -- a one-muscle-per-template fixture
+# would make the fan-out, the role split and the sort order all vacuously correct.
+_BENCH_MUSCLES = (
+    (CanonicalMuscleGroup.CHEST, MuscleRole.DIRECT),
+    (CanonicalMuscleGroup.TRICEPS, MuscleRole.INDIRECT),
+    (CanonicalMuscleGroup.FRONT_DELTS, MuscleRole.INDIRECT),
+)
+_ROW_MUSCLES = (
+    (CanonicalMuscleGroup.UPPER_BACK, MuscleRole.DIRECT),
+    (CanonicalMuscleGroup.BICEPS, MuscleRole.INDIRECT),
+)
+
+# A template with NO mapping at all (D-03). Its own id, so it cannot pick up a mapping another
+# test in this session-scoped container wrote.
+_BARE = "VOL-BARE"
+
+_FIFTY = Decimal("50.000")
+
+# NORM-03: the weighting is a query-time parameter. Deliberately not 1.0/0.5, so a test cannot
+# pass against an implementation that ignored the argument.
+_CUSTOM_WEIGHTS = {MuscleRole.DIRECT: Decimal("0.8"), MuscleRole.INDIRECT: Decimal("0.3")}
+
+
+async def _build_split_fixture(builder: GoldenBuilder) -> None:
+    """The hand-computed VOL-02 fixture: BENCH 4x60kg x10 and ROW 3x50kg x12 on Monday.
+
+    Seven hard sets in the week. They fan out to 18 per-muscle set counts across five groups,
+    and that inequality is asserted deliberately by
+    `test_per_muscle_set_totals_may_exceed_the_weeks_hard_sets`.
+    """
+    await builder.template(external_id=_BENCH, muscles=list(_BENCH_MUSCLES))
+    await builder.template(external_id=_ROW, muscles=list(_ROW_MUSCLES))
+    await builder.workout(
+        start_time=_MONDAY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 4,
+            ),
+            GoldenExercise(
+                template_external_id=_ROW,
+                sets=[GoldenSet(weight_kg=_FIFTY, reps=12)] * 3,
+            ),
+        ],
+    )
+
+
+@pytest.mark.integration
+async def test_muscle_split_reports_direct_indirect_and_weighted_sets(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-04 wants all THREE numbers, and dropping either was explicitly rejected.
+
+    The raw split is blueprint 18's honest answer to "what did I actually do" -- counts of sets,
+    unweighted -- and `weighted_sets` is the single "how undertrained is this muscle" figure a
+    coach ranks muscle groups by. Reporting only the blend loses the ability to say "four direct
+    chest sets"; reporting only the split leaves the ranking to whoever reads it.
+
+    Asserted as one whole-list comparison rather than per-row lookups, so a MISSING or an EXTRA
+    muscle group fails here instead of being invisible behind a `next(...)`.
+    """
+    await _build_split_fixture(golden_workout)
+
+    result = await get_muscle_group_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    assert len(result.weeks) == 1, f"expected one snapped week, got {len(result.weeks)}"
+    week = result.weeks[0]
+    assert [
+        (m.muscle_group, m.direct_sets, m.indirect_sets, m.weighted_sets)
+        for m in week.muscle_groups
+    ] == [
+        (CanonicalMuscleGroup.BICEPS, 0, 3, Decimal("1.5")),
+        (CanonicalMuscleGroup.CHEST, 4, 0, Decimal("4.0")),
+        (CanonicalMuscleGroup.FRONT_DELTS, 0, 4, Decimal("2.0")),
+        (CanonicalMuscleGroup.TRICEPS, 0, 4, Decimal("2.0")),
+        (CanonicalMuscleGroup.UPPER_BACK, 3, 0, Decimal("3.0")),
+    ]
+    assert week.sessions == 1
+
+
+@pytest.mark.integration
+async def test_custom_weights_change_weighted_sets_only(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """NORM-03: the blend follows the argument and the raw split does not move at all.
+
+    Two queries over one fixture. The weights are 0.8/0.3 rather than the 1.0/0.5 default, so an
+    implementation that accepted the argument and then ignored it cannot pass -- which a test
+    using the defaults would never notice.
+    """
+    await _build_split_fixture(golden_workout)
+
+    default = await get_muscle_group_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+    custom = await get_muscle_group_volume(
+        session,
+        user_id=DEFAULT_USER_ID,
+        start_day=_WEEK_START,
+        end_day=_WEEK_END,
+        weights=_CUSTOM_WEIGHTS,
+    )
+
+    assert [(m.muscle_group, m.weighted_sets) for m in custom.weeks[0].muscle_groups] == [
+        (CanonicalMuscleGroup.BICEPS, Decimal("0.9")),
+        (CanonicalMuscleGroup.CHEST, Decimal("3.2")),
+        (CanonicalMuscleGroup.FRONT_DELTS, Decimal("1.2")),
+        (CanonicalMuscleGroup.TRICEPS, Decimal("1.2")),
+        (CanonicalMuscleGroup.UPPER_BACK, Decimal("2.4")),
+    ]
+
+    def raw(result: MuscleGroupVolumeResult) -> list[tuple[CanonicalMuscleGroup, int, int]]:
+        return [
+            (m.muscle_group, m.direct_sets, m.indirect_sets) for m in result.weeks[0].muscle_groups
+        ]
+
+    assert raw(custom) == raw(default), (
+        "NORM-03: the weighting is applied at query time and must not move the RAW split. "
+        "`direct_sets` and `indirect_sets` are counts of sets, not weighted quantities"
+    )
+
+
+@pytest.mark.integration
+async def test_override_changes_the_per_muscle_result(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """THE load-bearing test of the VOL-02 half, and the only runtime proof of the resolver.
+
+    Every other test in this file passes against a pure-SQL join to `exercise_muscles`, because
+    that join is byte-identical to the resolver on today's data -- `exercise_muscle_overrides`
+    has zero rows. It starts lying the first time the user corrects a mapping, and it does so
+    with no error anywhere in the stack.
+
+    The correction here is the common one: "this bench press does not actually work my triceps
+    or my front delts". Under REPLACEMENT semantics both groups vanish from the answer. Under
+    the merge a join would express, both survive.
+    """
+    await _build_split_fixture(golden_workout)
+
+    before = await get_muscle_group_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    # Guard against a vacuous pass: both indirect groups have to be present to be lost.
+    before_groups = [m.muscle_group for m in before.weeks[0].muscle_groups]
+    assert CanonicalMuscleGroup.TRICEPS in before_groups
+    assert CanonicalMuscleGroup.FRONT_DELTS in before_groups
+
+    await golden_workout.override(
+        external_id=_BENCH, muscles=[(CanonicalMuscleGroup.CHEST, MuscleRole.DIRECT)]
+    )
+    after = await get_muscle_group_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    groups = [m.muscle_group for m in after.weeks[0].muscle_groups]
+    assert groups == [
+        CanonicalMuscleGroup.BICEPS,
+        CanonicalMuscleGroup.CHEST,
+        CanonicalMuscleGroup.UPPER_BACK,
+    ], (
+        "the override did not change the per-muscle result -- this analytics module is reading "
+        "`exercise_muscles` directly instead of routing through effective_muscles_bulk. The "
+        "override REPLACES the base set entirely; a join expresses merge and would keep triceps "
+        "and front_delts here"
+    )
+    chest = next(
+        m for m in after.weeks[0].muscle_groups if m.muscle_group is CanonicalMuscleGroup.CHEST
+    )
+    assert chest.direct_sets == 4, (
+        "the override kept chest but lost its sets -- the fan-out is being driven by the "
+        "override rows instead of by the aggregate the override merely re-labels"
+    )
+
+
+@pytest.mark.integration
+async def test_unmapped_template_contributes_to_no_muscle_group(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-03: a mapping gap must not block anything, and must not invent a muscle either.
+
+    The exercise still happened and still counts toward VOL-01's hard sets; it simply reaches no
+    muscle group. Silently, because "we have no mapping for this exercise" is a curation gap the
+    `mapping-gaps` command surfaces, not a query failure -- raising here would make one
+    un-curated template take down every per-muscle answer in the window.
+    """
+    await golden_workout.template(external_id=_BARE, muscles=())
+    await golden_workout.workout(
+        start_time=_MONDAY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BARE,
+                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 3,
+            )
+        ],
+    )
+
+    result = await get_muscle_group_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    assert result.weeks[0].sessions == 1, "the workout itself disappeared, not just its mapping"
+    assert result.weeks[0].muscle_groups == [], (
+        "an unmapped template contributed to a muscle group. With no mapping there is no muscle "
+        "to attribute the sets to, and inventing one would be a fabricated number"
     )
