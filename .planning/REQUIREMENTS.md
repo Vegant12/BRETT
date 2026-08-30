@@ -35,9 +35,9 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 ### Analytics — Volume & Frequency
 
-- [ ] **VOL-01**: System calculates weekly training volume (hard sets, reps, and — where the exercise modality supports it — tonnage), excluding warm-up sets from all volume figures
-- [ ] **VOL-02**: System calculates weekly per-muscle-group volume, broken out by direct and indirect sets
-- [ ] **VOL-03**: System calculates training frequency per muscle group and per exercise (sessions/week)
+- [x] **VOL-01**: System calculates weekly training volume (hard sets, reps, and — where the exercise modality supports it — tonnage), excluding warm-up sets from all volume figures
+- [x] **VOL-02**: System calculates weekly per-muscle-group volume, broken out by direct and indirect sets
+- [x] **VOL-03**: System calculates training frequency per muscle group and per exercise (sessions/week)
 
 ### Analytics — Progression & Records
 
@@ -54,8 +54,8 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 ### Data Quality & Trust
 
-- [ ] **DQ-01**: Every analytics response includes freshness metadata (when underlying data was last synced) so Claude can recognize stale data
-- [ ] **DQ-02**: Every analytics response includes coverage/uncertainty metadata (e.g. sessions in window, insufficient-data flags) so Claude does not treat sparse data as a confident result
+- [x] **DQ-01**: Every analytics response includes freshness metadata (when underlying data was last synced) so Claude can recognize stale data
+- [x] **DQ-02**: Every analytics response includes coverage/uncertainty metadata (e.g. sessions in window, insufficient-data flags) so Claude does not treat sparse data as a confident result
 
 ### MCP Server
 
@@ -143,11 +143,11 @@ Every v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for p
 | NORM-01 | Phase 3 | Hevy Integration & Normalization | Pending |
 | NORM-02 | Phase 3 | Hevy Integration & Normalization | Pending |
 | NORM-03 | Phase 3 | Hevy Integration & Normalization | Pending |
-| VOL-01 | Phase 4 | Volume & Frequency Analytics | Pending |
-| VOL-02 | Phase 4 | Volume & Frequency Analytics | Pending |
-| VOL-03 | Phase 4 | Volume & Frequency Analytics | Pending |
-| DQ-01 | Phase 4 | Volume & Frequency Analytics | Pending |
-| DQ-02 | Phase 4 | Volume & Frequency Analytics | Pending |
+| VOL-01 | Phase 4 | Volume & Frequency Analytics | Complete |
+| VOL-02 | Phase 4 | Volume & Frequency Analytics | Complete |
+| VOL-03 | Phase 4 | Volume & Frequency Analytics | Complete |
+| DQ-01 | Phase 4 | Volume & Frequency Analytics | Complete |
+| DQ-02 | Phase 4 | Volume & Frequency Analytics | Complete |
 | PROG-01 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
 | PROG-02 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
 | PROG-03 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
@@ -182,4 +182,4 @@ Every v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for p
 
 ---
 *Requirements defined: 2026-08-23*
-*Last updated: 2026-08-23 after roadmap creation (traceability populated)*
+*Last updated: 2026-08-30 after phase 4 plan 04-08 (VOL-01..03, DQ-01, DQ-02 marked complete)*
