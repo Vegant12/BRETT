@@ -129,9 +129,9 @@ Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
 - [x] 04-03-PLAN.md — Wave 1: `golden_workout` flush-and-rollback builder fixture and its self-test (VOL-01..03, DQ-01, DQ-02)
 - [x] 04-04-PLAN.md — Wave 2: `analytics/metadata.py` — per-resource freshness, D-06 coverage block, D-05 threshold (DQ-01, DQ-02)
 - [x] 04-05-PLAN.md — Wave 2: `analytics/rollup.py` — window resolution, the one SQL aggregate, the pure muscle folds (VOL-01, VOL-02, VOL-03)
-- [ ] 04-06-PLAN.md — Wave 3: `get_weekly_volume` (VOL-01) with golden-fixture tests for warm-ups, dropsets, modality, zero-load, supersets and week bucketing (VOL-01, DQ-01, DQ-02)
-- [ ] 04-07-PLAN.md — Wave 3: `analytics/frequency.py` — `get_training_frequency` with session de-duplication and exact quantized rates (VOL-03, DQ-01, DQ-02)
-- [ ] 04-09-PLAN.md — Wave 3: `test_analytics_rollup.py` — window guards and pure folds in the fast suite, the SQL aggregate against real Postgres (VOL-01, VOL-02, VOL-03)
+- [x] 04-06-PLAN.md — Wave 3: `get_weekly_volume` (VOL-01) with golden-fixture tests for warm-ups, dropsets, modality, zero-load, supersets and week bucketing (VOL-01, DQ-01, DQ-02)
+- [x] 04-07-PLAN.md — Wave 3: `analytics/frequency.py` — `get_training_frequency` with session de-duplication and exact quantized rates (VOL-03, DQ-01, DQ-02)
+- [x] 04-09-PLAN.md — Wave 3: `test_analytics_rollup.py` — window guards and pure folds in the fast suite, the SQL aggregate against real Postgres (VOL-01, VOL-02, VOL-03)
 - [ ] 04-08-PLAN.md — Wave 4: `get_muscle_group_volume` (VOL-02) with the override test that proves the resolver is used (VOL-02, DQ-01, DQ-02)
 
 *Plan 04-09 is numbered after 04-08 but runs a wave earlier: it was split out of 04-05 to keep that implementation plan inside its context budget, and it touches only `test_analytics_rollup.py`, so it runs in parallel with 04-06 and 04-07. 04-08 is wave 4 solely because it appends to `volume.py` and `test_analytics_volume.py`, which 04-06 creates in wave 3.*
