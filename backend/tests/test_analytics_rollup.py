@@ -30,6 +30,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics.rollup import (
     SetRollupRow,
@@ -37,9 +38,18 @@ from app.analytics.rollup import (
     fold_weeks_by_muscle,
     fold_window_by_muscle,
     fold_window_by_template,
+    resolve_window,
+    weekly_set_rows,
 )
 from app.normalization.muscles import CanonicalMuscleGroup, MappingSource, MuscleRole
 from app.normalization.resolver import EffectiveMuscle
+from tests.conftest import (
+    ANALYTICS_SECOND_USER_ID,
+    DEFAULT_USER_ID,
+    GoldenBuilder,
+    GoldenExercise,
+    GoldenSet,
+)
 
 # `ROLLUP-*` so these cannot collide with `test_normalization_mapping.py`'s `RESOLVER-*` ids,
 # `test_analytics_volume.py`'s `VOL-*`, or the sync tests' hevy ids: the Postgres container is
@@ -223,3 +233,200 @@ def test_fold_ignores_an_unmapped_template() -> None:
     assert fold_weeks_by_muscle([row], {}) == {}
     assert fold_window_by_muscle([row], {}) == {}
     assert fold_window_by_template([row]) == {row.template_external_id: {row.workout_id}}
+
+
+# --------------------------------------------------------------------------
+# The SQL aggregate, against real PostgreSQL (date_trunc / AT TIME ZONE /
+# FILTER have no meaning anywhere else)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_rows_use_the_local_week_from_the_users_timezone(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """FOUND-03: the week bucket comes from ``users.timezone``, read at query time.
+
+    Jakarta is UTC+7, so 2026-08-23T17:00Z is EXACTLY local midnight on Monday 2026-08-24. That
+    makes this the tightest available boundary: naive-UTC bucketing puts the workout in the
+    2026-08-17 week -- a full week early, in a figure that looks entirely ordinary.
+
+    The window is resolved through ``resolve_window`` rather than by naming a timezone here, so
+    this cannot pass against an implementation that ignores the user's configured zone.
+    """
+    await golden_workout.template(external_id=_BENCH)
+    await golden_workout.workout(
+        start_time=_JAKARTA_MONDAY_MIDNIGHT,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[GoldenSet(weight_kg=Decimal("60.000"), reps=10)],
+            )
+        ],
+    )
+
+    window = await resolve_window(
+        session,
+        user_id=DEFAULT_USER_ID,
+        start_day=_WEEK_START,
+        end_day=_WEEK_END,
+        snap_to_weeks=False,
+    )
+    rows = await weekly_set_rows(session, user_id=DEFAULT_USER_ID, window=window)
+
+    assert len(rows) == 1
+    assert rows[0].week_start == dt.date(2026, 8, 24)
+
+    # Pitfall 1: `date_trunc` over a timestamp yields a datetime, not a date.
+    assert isinstance(rows[0].week_start, dt.date)
+    assert not isinstance(rows[0].week_start, dt.datetime), (
+        "date_trunc returned a naive datetime instead of a date. The two PRINT the same and "
+        "never compare equal, so the merge with local_week_start() would silently produce two "
+        "entries per week"
+    )
+
+
+@pytest.mark.integration
+async def test_rows_exclude_warmups_and_count_dropsets(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """VOL-01: a hard set is any set that is not a warm-up. Seven sets in, five counted."""
+    await golden_workout.template(external_id=_BENCH)
+    await golden_workout.workout(
+        start_time=_JAKARTA_MONDAY_MIDNIGHT,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[
+                    GoldenSet(set_type=set_type, weight_kg=Decimal("60.000"), reps=10)
+                    for set_type in (
+                        "warmup",
+                        "warmup",
+                        "normal",
+                        "normal",
+                        "normal",
+                        "dropset",
+                        "dropset",
+                    )
+                ],
+            )
+        ],
+    )
+
+    window = await resolve_window(
+        session,
+        user_id=DEFAULT_USER_ID,
+        start_day=_WEEK_START,
+        end_day=_WEEK_END,
+        snap_to_weeks=False,
+    )
+    rows = await weekly_set_rows(session, user_id=DEFAULT_USER_ID, window=window)
+
+    assert len(rows) == 1
+    assert rows[0].hard_sets == 5, (
+        "filtering `set_type == 'normal'` instead of `!= 'warmup'` discards 823 live dropset "
+        "sets -- 12% of all hard sets -- and would start discarding `failure` sets the day Hevy "
+        "first sends one"
+    )
+    assert rows[0].total_reps == 50
+    assert rows[0].tonnage_sets == 5
+    assert rows[0].tonnage_kg == Decimal("3000.000")
+
+
+@pytest.mark.integration
+async def test_tonnage_is_gated_on_operand_presence(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Tonnage exists wherever both operands exist, and nowhere else.
+
+    Three sets, three modalities, one shared answer: all three are hard sets, two carry reps,
+    and exactly one carries both a weight and a rep count.
+    """
+    await golden_workout.template(external_id=_BENCH)
+    await golden_workout.workout(
+        start_time=_JAKARTA_MONDAY_MIDNIGHT,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_BENCH,
+                sets=[
+                    GoldenSet(weight_kg=Decimal("0.000"), reps=10),
+                    GoldenSet(reps=12),
+                    GoldenSet(duration_seconds=60),
+                ],
+            )
+        ],
+    )
+
+    window = await resolve_window(
+        session,
+        user_id=DEFAULT_USER_ID,
+        start_day=_WEEK_START,
+        end_day=_WEEK_END,
+        snap_to_weeks=False,
+    )
+    rows = await weekly_set_rows(session, user_id=DEFAULT_USER_ID, window=window)
+
+    assert len(rows) == 1
+    assert rows[0].hard_sets == 3, (
+        "U-02: a duration-only set counts as a hard set, same as any other non-warmup set. "
+        "Flipping that decision is `COUNT_DURATION_ONLY_SETS`, one constant"
+    )
+    assert rows[0].total_reps == 22
+
+    zero_load_message = (
+        "`0` is not NULL. Filtering `weight_kg > 0` to 'clean' the input would drop 48 real "
+        "live sets, and `tonnage_sets == 1` is what tells the caller this zero is computed "
+        "rather than missing"
+    )
+    assert rows[0].tonnage_sets == 1, zero_load_message
+    assert rows[0].tonnage_kg == Decimal("0.000"), zero_load_message
+
+
+@pytest.mark.integration
+async def test_rows_are_scoped_to_one_user(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """T-04-02 / ASVS V4: two users, the same window, the same instant, disjoint results."""
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+
+    for user_id, template in ((DEFAULT_USER_ID, _BENCH), (ANALYTICS_SECOND_USER_ID, _ROW)):
+        await golden_workout.template(external_id=template, user_id=user_id)
+        await golden_workout.workout(
+            start_time=_JAKARTA_MONDAY_MIDNIGHT,
+            user_id=user_id,
+            exercises=[
+                GoldenExercise(
+                    template_external_id=template,
+                    sets=[GoldenSet(weight_kg=Decimal("60.000"), reps=10)],
+                )
+            ],
+        )
+
+    # Resolved per user, never shared: each window reads that user's OWN `users.timezone`, and
+    # reusing one window would quietly assume the two are in the same zone.
+    my_window = await resolve_window(
+        session,
+        user_id=DEFAULT_USER_ID,
+        start_day=_WEEK_START,
+        end_day=_WEEK_END,
+        snap_to_weeks=False,
+    )
+    their_window = await resolve_window(
+        session,
+        user_id=ANALYTICS_SECOND_USER_ID,
+        start_day=_WEEK_START,
+        end_day=_WEEK_END,
+        snap_to_weeks=False,
+    )
+
+    mine = await weekly_set_rows(session, user_id=DEFAULT_USER_ID, window=my_window)
+    theirs = await weekly_set_rows(session, user_id=ANALYTICS_SECOND_USER_ID, window=their_window)
+
+    # Guard against a vacuous pass: if the fixture wrote nothing, both would be empty and equal.
+    assert theirs, "the second user's fixture produced no rows -- this test proves nothing"
+    assert len(mine) == 1
+    assert {row.workout_id for row in mine}.isdisjoint({row.workout_id for row in theirs}), (
+        "ASVS V4 violated: rows from another user's workouts were returned. The schema is "
+        "multi-user-ready, so a missing user_id predicate is a cross-tenant disclosure that a "
+        "single-user test suite cannot otherwise detect"
+    )
