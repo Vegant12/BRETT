@@ -45,8 +45,19 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics.rollup import SetRollupRow
-from app.analytics.schemas import MuscleGroupVolumeResult, WeeklyVolumeWeek
+from app.analytics.schemas import (
+    MuscleGroupVolume,
+    MuscleGroupVolumeResult,
+    MuscleGroupVolumeWeek,
+    WeeklyVolumeWeek,
+)
 from app.analytics.volume import _fold_week_totals, get_muscle_group_volume, get_weekly_volume
+from app.db.repositories.sync_state import (
+    PROVIDER_HEVY,
+    RESOURCE_EXERCISE_TEMPLATES,
+    RESOURCE_WORKOUTS,
+    complete_sync,
+)
 from app.normalization.muscles import CanonicalMuscleGroup, MuscleRole
 from tests.conftest import (
     ANALYTICS_SECOND_USER_ID,
@@ -656,27 +667,53 @@ _FIFTY = Decimal("50.000")
 _CUSTOM_WEIGHTS = {MuscleRole.DIRECT: Decimal("0.8"), MuscleRole.INDIRECT: Decimal("0.3")}
 
 
-async def _build_split_fixture(builder: GoldenBuilder) -> None:
+# The two live-observed sync timestamps, 25 minutes apart -- the drift that makes a single
+# collapsed last_synced_at lossy for a per-muscle answer.
+_SYNCED_WORKOUTS_AT = dt.datetime(2026, 8, 30, 5, 43, 18, tzinfo=dt.UTC)
+_SYNCED_TEMPLATES_AT = dt.datetime(2026, 8, 30, 6, 8, 4, tzinfo=dt.UTC)
+
+
+def _bench_exercise() -> GoldenExercise:
+    """Four working sets of BENCH. Four, not three, so chest's 4 cannot be confused with ROW's 3."""
+    return GoldenExercise(
+        template_external_id=_BENCH,
+        sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 4,
+    )
+
+
+def _row_exercise() -> GoldenExercise:
+    """Three working sets of ROW."""
+    return GoldenExercise(
+        template_external_id=_ROW,
+        sets=[GoldenSet(weight_kg=_FIFTY, reps=12)] * 3,
+    )
+
+
+def _by_group(week: MuscleGroupVolumeWeek) -> dict[CanonicalMuscleGroup, MuscleGroupVolume]:
+    """Index one week's rows by muscle group, for the assertions that name a single muscle.
+
+    Only used where the interesting fact is about ONE group. The whole-list comparison in
+    `test_muscle_split_reports_direct_indirect_and_weighted_sets` is what catches a missing or
+    an extra group, which a lookup like this cannot.
+    """
+    return {row.muscle_group: row for row in week.muscle_groups}
+
+
+async def _build_split_fixture(
+    builder: GoldenBuilder, *, user_id: uuid.UUID = DEFAULT_USER_ID
+) -> None:
     """The hand-computed VOL-02 fixture: BENCH 4x60kg x10 and ROW 3x50kg x12 on Monday.
 
     Seven hard sets in the week. They fan out to 18 per-muscle set counts across five groups,
     and that inequality is asserted deliberately by
     `test_per_muscle_set_totals_may_exceed_the_weeks_hard_sets`.
     """
-    await builder.template(external_id=_BENCH, muscles=list(_BENCH_MUSCLES))
-    await builder.template(external_id=_ROW, muscles=list(_ROW_MUSCLES))
+    await builder.template(external_id=_BENCH, muscles=list(_BENCH_MUSCLES), user_id=user_id)
+    await builder.template(external_id=_ROW, muscles=list(_ROW_MUSCLES), user_id=user_id)
     await builder.workout(
         start_time=_MONDAY,
-        exercises=[
-            GoldenExercise(
-                template_external_id=_BENCH,
-                sets=[GoldenSet(weight_kg=_SIXTY, reps=10)] * 4,
-            ),
-            GoldenExercise(
-                template_external_id=_ROW,
-                sets=[GoldenSet(weight_kg=_FIFTY, reps=12)] * 3,
-            ),
-        ],
+        user_id=user_id,
+        exercises=[_bench_exercise(), _row_exercise()],
     )
 
 
@@ -840,4 +877,175 @@ async def test_unmapped_template_contributes_to_no_muscle_group(
     assert result.weeks[0].muscle_groups == [], (
         "an unmapped template contributed to a muscle group. With no mapping there is no muscle "
         "to attribute the sets to, and inventing one would be a fabricated number"
+    )
+
+
+@pytest.mark.integration
+async def test_per_muscle_rows_carry_their_own_sessions_and_insufficient_data(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """U-03: the case D-06's three response-level fields cannot express on their own.
+
+    Two sessions happened in the window, so the RESPONSE is not insufficient. Chest was trained
+    in exactly one of them, so chest IS. Both facts are true at the same time, and a single
+    response-level flag can only carry one of them -- which is why U-03 ADDS a per-row count
+    rather than replacing the block.
+    """
+    await golden_workout.template(external_id=_BENCH, muscles=list(_BENCH_MUSCLES))
+    await golden_workout.template(external_id=_ROW, muscles=list(_ROW_MUSCLES))
+    await golden_workout.workout(start_time=_MONDAY, exercises=[_bench_exercise(), _row_exercise()])
+    await golden_workout.workout(
+        start_time=_MONDAY + dt.timedelta(days=2), exercises=[_row_exercise()]
+    )
+
+    result = await get_muscle_group_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    week = result.weeks[0]
+    by_group = _by_group(week)
+    upper_back = by_group[CanonicalMuscleGroup.UPPER_BACK]
+    chest = by_group[CanonicalMuscleGroup.CHEST]
+    assert (upper_back.sessions, upper_back.insufficient_data) == (2, False)
+    assert (chest.sessions, chest.insufficient_data) == (1, True)
+    assert week.sessions == 2
+    assert result.coverage.insufficient_data is False, (
+        "U-03: the response-level D-06 flag describes the WINDOW, not any one muscle. Two "
+        "sessions happened, so the response is not insufficient -- but chest still is, and a "
+        "single response-level flag cannot express that"
+    )
+
+
+@pytest.mark.integration
+async def test_per_muscle_set_totals_may_exceed_the_weeks_hard_sets(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Pitfall 11, asserted deliberately so the property is recorded as INTENDED.
+
+    Per-muscle set counts are per-MUSCLE. A single bench set reaches chest, triceps and front
+    delts, so it is counted three times across three rows -- and on live data one template maps
+    to as many as 9 groups. The cross-muscle sum is therefore several times the week's hard-set
+    total and still correct.
+
+    The assertion exists to document the grain. Never present a cross-muscle total to a user;
+    the field names and this test are what stop a future reviewer reading 18-versus-7 as a bug
+    and "fixing" it into a wrong number.
+    """
+    await _build_split_fixture(golden_workout)
+
+    muscle_week = (
+        await get_muscle_group_volume(
+            session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+        )
+    ).weeks[0]
+    volume_week = (
+        await get_weekly_volume(
+            session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+        )
+    ).weeks[0]
+
+    cross_muscle_total = sum(
+        row.direct_sets + row.indirect_sets for row in muscle_week.muscle_groups
+    )
+    assert volume_week.hard_sets == 7
+    assert cross_muscle_total == 18
+    assert cross_muscle_total > volume_week.hard_sets, (
+        "per-muscle set counts are per-MUSCLE: one template maps to up to 9 muscle groups on "
+        "live data, so a cross-muscle total legitimately exceeds the week's hard sets. This "
+        "inequality is asserted deliberately so the property is recorded as intended rather "
+        "than later discovered as a defect"
+    )
+
+
+@pytest.mark.integration
+async def test_muscle_group_volume_carries_both_freshness_resources(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """DQ-01: a per-muscle answer is only as fresh as the STALER of its two sources.
+
+    The muscle map comes from `exercise_templates`, so a stale template sync silently changes
+    every number in this response with no error anywhere in the stack. The two timestamps are
+    the live-observed pair, 25 minutes apart -- collapsing them into one `last_synced_at` would
+    report the newer for both and hide exactly the staleness Claude needs in order to caveat an
+    answer instead of asserting it.
+
+    Written against the second user because `sync_state` rows for the default user are the Hevy
+    sync suite's territory, and the container is session-scoped and shared.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await _build_split_fixture(golden_workout, user_id=ANALYTICS_SECOND_USER_ID)
+    for resource, synced_at in (
+        (RESOURCE_WORKOUTS, _SYNCED_WORKOUTS_AT),
+        (RESOURCE_EXERCISE_TEMPLATES, _SYNCED_TEMPLATES_AT),
+    ):
+        await complete_sync(
+            session,
+            user_id=ANALYTICS_SECOND_USER_ID,
+            provider=PROVIDER_HEVY,
+            resource=resource,
+            last_synced_at=synced_at,
+        )
+    await session.flush()
+
+    result = await get_muscle_group_volume(
+        session, user_id=ANALYTICS_SECOND_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    assert result.freshness.resources == {
+        RESOURCE_WORKOUTS: _SYNCED_WORKOUTS_AT,
+        RESOURCE_EXERCISE_TEMPLATES: _SYNCED_TEMPLATES_AT,
+    }
+    # Two genuinely distinct values, not one row read twice under two keys.
+    assert len(set(result.freshness.resources.values())) == 2
+
+    volume = await get_weekly_volume(
+        session, user_id=ANALYTICS_SECOND_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+    assert set(volume.freshness.resources) == {RESOURCE_WORKOUTS}, (
+        "VOL-01 never resolves a muscle map, so exercise_templates staleness cannot change any "
+        "number in it -- reporting it there would be noise, and omitting it HERE would hide a "
+        "stale muscle map that silently changes every per-muscle figure"
+    )
+
+
+@pytest.mark.integration
+async def test_muscle_group_volume_is_scoped_to_one_user(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """T-04-02: three workouts for a second user and one for the default user, same local week.
+
+    Both users get a template under the SAME external id, because Hevy's built-in template ids
+    are global. `exercise_templates` is unique per (user_id, provider, external_id) and
+    `exercise_muscles` is user-scoped, so an unscoped resolve would attribute the other user's
+    mapping -- and an unscoped aggregate would attribute their sets.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_BENCH, muscles=list(_BENCH_MUSCLES))
+    await golden_workout.template(
+        external_id=_BENCH, muscles=list(_BENCH_MUSCLES), user_id=ANALYTICS_SECOND_USER_ID
+    )
+    await golden_workout.workout(start_time=_MONDAY, exercises=[_bench_exercise()])
+    for offset in range(3):
+        await golden_workout.workout(
+            start_time=_MONDAY + dt.timedelta(days=offset),
+            user_id=ANALYTICS_SECOND_USER_ID,
+            exercises=[_bench_exercise()],
+        )
+
+    mine = await get_muscle_group_volume(
+        session, user_id=DEFAULT_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+    theirs = await get_muscle_group_volume(
+        session, user_id=ANALYTICS_SECOND_USER_ID, start_day=_WEEK_START, end_day=_WEEK_END
+    )
+
+    their_chest = _by_group(theirs.weeks[0])[CanonicalMuscleGroup.CHEST]
+    my_chest = _by_group(mine.weeks[0])[CanonicalMuscleGroup.CHEST]
+
+    # Non-vacuous guard: if the second user's rows were missing entirely, the scoping assertion
+    # below would pass while proving nothing.
+    assert (their_chest.sessions, their_chest.direct_sets) == (3, 12)
+
+    assert (my_chest.sessions, my_chest.direct_sets) == (1, 4), (
+        "ASVS V4 violated: per-muscle volume included another user's workouts"
     )
