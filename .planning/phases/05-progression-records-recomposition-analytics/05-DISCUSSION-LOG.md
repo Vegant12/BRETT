@@ -150,12 +150,65 @@
 
 ## Claude's Discretion
 
-- Exact "no progress" plateau metric edge cases (how a `null`-estimated-1RM week counts toward the plateau streak)
-- How PROG-02's trend aggregates into BODY-02's label (which/how many exercises' trends count)
-- CMP-01 period comparison scope (which metrics beyond "normalized per week")
-- BODY-01 rolling-average behavior with data gaps, and its own insufficient-data threshold
-- Exact Pydantic schema shapes and module/file layout within `app/analytics/`
+- ~~Exact "no progress" plateau metric edge cases~~ — resolved 2026-08-30, see Critical Review below
+- How PROG-02's trend aggregates into BODY-02's label (which/how many exercises' trends count) — still open
+- CMP-01 period comparison scope (which metrics beyond "normalized per week") — still open
+- ~~BODY-01 rolling-average behavior with data gaps, and its own insufficient-data threshold~~ — resolved 2026-08-30, see Critical Review below
+- Exact Pydantic schema shapes and module/file layout within `app/analytics/` — still open
 
 ## Deferred Ideas
 
 None — discussion stayed within phase scope.
+
+---
+
+## Critical Review (2026-08-30, before planning)
+
+Before handing this phase to planning, the user asked for three of the locked decisions to be
+critically re-examined — not preserved by default — prioritizing "reliable, deterministic,
+explainable coaching analytics" over consistency with the original discussion. Instructed to
+review canonical references and Phase 4 patterns first (blueprint §21/§25/§26,
+`04-CONTEXT.md`, `app/analytics/schemas.py`/`metadata.py`) before answering.
+
+### 1. Plateau detection — verdict: MODIFY
+
+**Original (D-06/D-07):** adaptive session-count window (no calendar floor); a session "breaks"
+the streak only by exceeding the strict all-time-max estimated 1RM; no stated handling for
+sessions with a `null` estimate.
+
+**Problems identified:**
+- No noise tolerance — a lifter bouncing within ~1% of their peak (normal session variance) would
+  be flagged as "no progress" purely by the exact-max test.
+- Pure session-count adaptivity gives absurdly short windows for high-frequency exercises: 4
+  sessions of a 3×/week bench press is ~9–13 days, far below blueprint §21's own "3–6 weeks."
+- Undefined handling of `null`-e1RM sessions (high-rep weeks, non-`weight_reps` modality) risked
+  falsely inflating the streak for anyone periodizing rep ranges.
+
+**Resolved into:** D-06 (session count + 3-week calendar floor, whichever needs more evidence),
+D-07 (2% tolerance band via `PLATEAU_IMPROVEMENT_TOLERANCE`), D-07a (null-e1RM sessions skipped,
+neither extending nor breaking the streak), D-07b (report `recent_performance`/`historical_best`/
+`confidence` per blueprint §21's return shape, not a bare boolean).
+
+### 2. Bodyweight rolling averages — verdict: MODIFY (formalizing what was pure discretion)
+
+**Original:** left entirely to Claude's discretion with only a pointer to Phase 4's coverage
+pattern; no coverage floor, no interpolation stance, no same-day multi-source rule.
+
+**Resolved into:** D-13 (no interpolation — actual measured rows only), D-14 (prefer `'manual'`
+over `'hevy'` on a same-day collision), D-15 (independent per-window coverage floor: 7d≥3,
+14d≥5, 30d≥10 measured days), D-16 (weekly rate of change = smoothed 4-week trend, not a
+single-week delta), D-17 (surface the raw single-week delta too, as a secondary field, never used
+for classification).
+
+### 3. Lean-bulk weight thresholds — verdict: MODIFY (values kept, measurement basis replaced)
+
+**Original (D-11/D-12):** `weight_gain_too_fast` > +0.25%/week, `weight_loss_too_fast` > −1%/week,
+implicitly evaluated off blueprint §25's single most-recent-week delta.
+
+**Problem identified:** a single week-over-week delta is dominated by water retention and
+glycogen swings — large enough on its own to trip these percentage thresholds on pure noise,
+independent of any real trend.
+
+**Resolved into:** the numeric targets in D-11/D-12 are unchanged (they were reasonable sustained
+rates, not the flaw); both are now evaluated against D-16's smoothed 4-week trend rate instead of
+a single week's delta.

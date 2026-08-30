@@ -1,6 +1,10 @@
 # Phase 5: Progression, Records & Recomposition Analytics - Context
 
 **Gathered:** 2026-08-30
+**Revised:** 2026-08-30 — plateau detection (D-06/D-07), body-weight rolling averages
+(new D-13–D-17), and the recomposition rate-of-change basis (D-11/D-12) critically re-reviewed
+before planning and replaced/tightened; see the "Revision note" at the end of each affected
+subsection.
 **Status:** Ready for planning
 
 <domain>
@@ -51,17 +55,36 @@ signals in recomposition status — out of v1 scope per REQUIREMENTS.md (`RECOMP
   to `improving` / `stable` / `declining`. Below that threshold, the verdict is `unclear` —
   matches blueprint §20's "do not classify progression based on a single workout," scaled to a
   concrete minimum.
-- **D-06:** PROG-03's plateau window is **adaptive to the exercise's own training frequency** —
-  measured in **sessions of that exercise**, not a fixed calendar-week window. Blueprint §21's
-  "3–6 weeks depending on exercise and training frequency" is satisfied by counting occurrences
-  rather than picking one fixed week-count that fits every exercise regardless of how often it's
-  actually trained.
-- **D-07:** The plateau threshold is **4 consecutive sessions of that exercise with no new
-  estimated-1RM PR**. This reuses PROG-01's 1RM estimate (D-01–D-04) as the single "are you
-  stronger" measure across the whole phase, rather than introducing a second, formula-independent
-  progress definition (e.g. weight-PR-at-same-or-higher-reps) that could disagree with it.
-- Per PROG-03's requirement, every plateau result must report the window (session count) and
-  threshold actually used alongside the verdict — not just the boolean/label.
+- **D-06 (revised 2026-08-30):** PROG-03's plateau window is **adaptive session count, bounded by
+  a calendar floor**: **4 qualifying sessions of that exercise AND at least 3 weeks elapsed**
+  since the streak began — whichever requires more evidence. Pure session-count adaptivity (the
+  original D-06) was too permissive for high-frequency exercises: 4 sessions of a bench press
+  trained 3×/week is only ~9–13 days, far below blueprint §21's own explicit "3–6 weeks" floor
+  and squarely inside the "normal day-to-day fluctuation" range §21 warns against. The floor fixes
+  that while still letting low-frequency accessory exercises take longer than 3 weeks to
+  accumulate 4 qualifying sessions, exactly as "depending on... training frequency" intends.
+- **D-07 (revised 2026-08-30):** A session **breaks** the plateau streak only if its estimated 1RM
+  exceeds `historical_best × 1.02` (a 2% tolerance) — not any epsilon increase over the strict
+  historical maximum. Named module-level constant, same pattern as Phase 4's
+  `INSUFFICIENT_DATA_SESSION_THRESHOLD`: `PLATEAU_IMPROVEMENT_TOLERANCE = Decimal("0.02")`. A
+  strict "any new max" rule (the original D-07) has no noise tolerance: a lifter clearly trending
+  up but bouncing within 1% of their peak (sleep, RPE variance, normal session-to-session
+  fluctuation) would get flagged as "no progress" purely on the exact-max test — precisely the
+  false positive §21 warns against. This still reuses PROG-01's 1RM estimate (D-01–D-04) as the
+  single "are you stronger" measure for the whole phase, only with a tolerance band instead of a
+  bare `>` comparison.
+- **D-07a (new 2026-08-30):** Sessions with a `null` estimated 1RM (the D-02 rep-range gate or the
+  D-03 modality gate) are **skipped** when evaluating the plateau streak — they neither extend nor
+  break it. Without this, anyone periodizing rep ranges (a deload week, 5/3/1-style waves, a
+  higher-rep accessory day) would have those sessions silently read as "no PR," falsely inflating
+  the plateau streak purely because that day's modality/rep-range made an estimate untrustworthy,
+  not because training stalled.
+- **D-07b (new 2026-08-30):** Every plateau result reports `recent_performance` (mean qualifying
+  e1RM over the window), `historical_best`, the actual window/threshold used (session count *and*
+  elapsed weeks, per D-06), and a `confidence` derived from the qualifying-session count (e.g.
+  `low`/`medium`/`high`) — matching blueprint §21's return shape
+  (`plateau_duration`/`recent_performance`/`historical_best`/`confidence`) instead of a bare
+  boolean, which the original D-06/D-07 pair implied but didn't make explicit.
 
 ### Personal Records (PROG-04)
 - **D-08:** `'dropset'` and `'failure'` set types are **eligible for all PR types** (max weight,
@@ -71,6 +94,44 @@ signals in recomposition status — out of v1 scope per REQUIREMENTS.md (`RECOMP
 - **D-09:** When two sets tie for a PR value (same max weight, or same max reps at that weight),
   the PR date recorded is **the earliest date the value was first reached** — "when did I first
   hit this" is the standard convention, not "when did I most recently reconfirm it."
+
+### Body Weight Rolling Averages (BODY-01)
+*(All five decisions below are new 2026-08-30 — the original CONTEXT.md left this entirely to
+Claude's discretion with only a pointer to Phase 4's coverage pattern; these formalize it.)*
+- **D-13:** No interpolation or carry-forward for missing days. Each 7/14/30-day average is
+  computed from **actual `measured_on` rows only** within the window. Inventing values for
+  unweighed days would bias the number on an assumption (linear fill? last-known-value?) that
+  isn't a real measurement, breaking the "deterministic, explainable" bar and hiding exactly the
+  sparsity Claude needs to see.
+- **D-14:** If both a `'hevy'` and a `'manual'` row exist for the same `measured_on` date (the
+  natural key permits this), **prefer `'manual'`** — a manual entry represents a deliberate
+  correction of that day's number. Moot today (only `'hevy'` rows exist; manual entry is a
+  separate, unscoped phase), but locking it now prevents silently double-counting or averaging
+  two same-day values once manual entry ships.
+- **D-15:** Each window has its **own independent coverage floor**, mirroring Phase 4's D-05 "why
+  2 and not something else" reasoning but recalibrated from a per-session cadence to a per-day
+  one: **7-day window needs ≥3 measured days, 14-day needs ≥5, 30-day needs ≥10**. Below its floor,
+  that specific window's average is `null` with `insufficient_data=true` **for that window only**
+  — a 30-day average can be reliable while the 7-day one isn't (or vice versa), same additive
+  relationship as Phase 4's per-muscle `insufficient_data` sitting alongside the response-level
+  flag rather than replacing it.
+- **D-16:** The **weekly rate of change** BODY-01 reports is a **smoothed 4-week trend**, not a
+  single most-recent-week delta: `(current_7d_avg − 7d_avg_from_4_weeks_ago) / 4`. Blueprint §25's
+  own worked example (current 7-day avg vs. the immediately preceding 7-day avg) uses a single
+  week-over-week comparison — dominated by water retention, sodium/carb intake, and glycogen
+  swings, which alone can move a 70–80kg person's week-over-week number by several hundred grams,
+  large enough to false-positive against BODY-02's tight percentage thresholds below. The 4-week
+  window matches PROG-02's own "at least 4 weeks" minimum (D-05), keeping one "minimum meaningful
+  window" concept across the phase. Gated on D-15: `null` + `insufficient_data=true` if either the
+  current or the 4-weeks-ago 7-day average fails its coverage floor.
+- **D-17:** The raw single most-recent-week delta (blueprint §25's literal example calculation) is
+  **still surfaced**, as a clearly separate secondary field (e.g. `latest_week_delta_kg`) alongside
+  the smoothed `trend_rate_percent_per_week` from D-16 — visible to Claude for context, but never
+  the figure BODY-02 classifies against.
+- Coverage type note for planning: `CoverageMetadata` (Phase 4) is workout-session-grained
+  (`sessions_in_window`) and does not transfer verbatim to a day-grained weigh-in count — plan a
+  sibling type with the same three-field philosophy (e.g. `measured_days_in_window`,
+  `insufficient_data`, `earliest_measurement_at`) rather than overloading the existing one.
 
 ### Recomposition Status (BODY-02)
 - **Context (not a stored field):** the user's current goal is a **lean bulk** (slow weight gain,
@@ -82,33 +143,36 @@ signals in recomposition status — out of v1 scope per REQUIREMENTS.md (`RECOMP
   if bodyweight moves meaningfully over the tracked period.
 - **D-11:** `weight_gain_too_fast` triggers above **+0.25%/week** of bodyweight — the stricter end
   of the typical lean-bulk guideline (~0.25–0.5%/week), chosen to keep gains lean rather than
-  tolerate a faster, fattier surplus.
+  tolerate a faster, fattier surplus. **Revised 2026-08-30:** the target rate itself is unchanged,
+  but it is now evaluated against **D-16's smoothed 4-week trend rate**, not a single-week delta —
+  the numeric threshold was never the problem, measuring it off one noisy week was.
 - **D-12:** `weight_loss_too_fast` triggers above **−1%/week** of bodyweight even though loss
   isn't the current goal — any loss that fast during a bulk is a clear signal something is off
   (undereating, illness, a tracking error) and is worth surfacing regardless of the stated goal.
+  **Revised 2026-08-30:** same basis change as D-11 — evaluated against D-16's smoothed trend rate.
 
 ### Claude's Discretion
-- **Exact "no progress" plateau metric wording/edge cases** beyond D-07's headline rule (e.g. how
-  a `null` estimated-1RM week — a high-rep or non-`weight_reps` week — counts toward the
-  4-session streak: skipped/excluded vs. counted as "no PR"). Resolve consistently with D-01–D-04.
+- ~~Exact "no progress" plateau metric wording/edge cases~~ — **resolved 2026-08-30** by D-07/
+  D-07a/D-07b (2% tolerance band, null-e1RM sessions skipped, explicit `recent_performance`/
+  `historical_best`/`confidence` reporting).
+- ~~BODY-01 rolling-average mechanics with data gaps~~ — **resolved 2026-08-30** by D-13–D-17
+  (no interpolation, source tie-break, per-window coverage floors, smoothed 4-week trend rate plus
+  a surfaced raw single-week delta).
 - **How PROG-02's trend feeds BODY-02's label alongside the weight trend.** The user explicitly
-  deferred this. Lean toward: weight trend sets the primary direction/threshold check (D-10–D-12),
-  and training-progression trend (D-05's `improving`/`stable`/`declining`/`unclear`, aggregated
-  across tracked exercises) refines the label within that — e.g. weight roughly stable +
-  aggregate progression `improving` → `likely_recomp_progressing`; weight stable + `declining`/
-  `unclear` → plain `weight_stable`. Confirm the exact aggregation rule (how many/which exercises'
-  trends count) at plan/research time; it is not locked.
+  deferred this and it remains open. Lean toward: weight trend (now D-16's smoothed rate) sets the
+  primary direction/threshold check (D-10–D-12), and training-progression trend (D-05's
+  `improving`/`stable`/`declining`/`unclear`, aggregated across tracked exercises) refines the
+  label within that — e.g. weight roughly stable + aggregate progression `improving` →
+  `likely_recomp_progressing`; weight stable + `declining`/`unclear` → plain `weight_stable`.
+  Confirm the exact aggregation rule (how many/which exercises' trends count) at plan/research
+  time; it is not locked.
 - **CMP-01 period comparison scope** — which specific metrics get compared (volume, frequency,
   tonnage, per-muscle, progression?) beyond "normalized per week so unequal-length windows don't
   mislead." Not discussed as its own gray area; Phase 4's D-03 (arbitrary start/end date range,
   built for exactly this) is the existing building block to reuse.
-- **BODY-01 rolling-average mechanics with data gaps** — how 7/14/30-day averages behave when
-  `body_measurements` has missing days (skip vs. carry-forward vs. flag as reduced-coverage), and
-  how `insufficient_data` should be defined for weight trend (Phase 4's `INSUFFICIENT_DATA_SESSION_
-  THRESHOLD = 2` is a *session* count and doesn't directly map to weigh-in *days* — needs its own
-  threshold, following the same "why 2 and not something else" reasoning as Phase 4's D-05).
 - Exact Pydantic schema shapes for all new return types (following `app/analytics/schemas.py`'s
-  established `_AnalyticsModel` base, `Decimal`-not-`float`, deterministic-ordering conventions).
+  established `_AnalyticsModel` base, `Decimal`-not-`float`, deterministic-ordering conventions) —
+  including the new `BodyMeasurementCoverage`-style sibling type flagged under BODY-01 above.
 - Module/function naming and file layout within `app/analytics/` (e.g. `progression.py`,
   `records.py`, `recomposition.py` vs. fewer/more files) — no established split yet for this
   phase's five requirement areas.
@@ -137,7 +201,9 @@ below, not the blueprint's assumed shape, exactly as Phase 4's canonical refs wa
 - `BRETT blueprint.md` §20 "Progressive Overload Detection" — improving/stable/declining/unclear;
   "do not classify progression based on a single workout" — informs D-05
 - `BRETT blueprint.md` §21 "Plateau Detection" — 3–6 week configurable window; return shape
-  (exercise, plateau_duration, recent_performance, historical_best, confidence) — informs D-06/D-07
+  (exercise, plateau_duration, recent_performance, historical_best, confidence) — informs
+  D-06/D-07/D-07a/D-07b; its "do not immediately classify normal day-to-day fluctuations as a
+  plateau" warning is the direct rationale for D-07's tolerance band
 - `BRETT blueprint.md` §22 "Personal Records" — max weight, max reps at a weight, estimated-1RM
   PR, volume PR, rep PR, with dates — informs D-08/D-09
 - `BRETT blueprint.md` §24 "Body Recomposition Analytics" — combines body weight, waist, body fat
@@ -153,7 +219,8 @@ below, not the blueprint's assumed shape, exactly as Phase 4's canonical refs wa
 - `.planning/phases/04-volume-frequency-analytics/04-CONTEXT.md` — D-01 (raw `weight_kg × reps`
   tonnage, no per-dumbbell correction, **chosen explicitly because it's the input Phase 5's
   estimated-1RM formula needs**), D-05/D-06 (insufficient-data threshold + coverage metadata
-  shape — the pattern BODY-01's own threshold should follow, per the discretion note above)
+  shape — the pattern this phase's own D-15 per-window coverage floors and
+  `PLATEAU_IMPROVEMENT_TOLERANCE` constant are modeled on)
 - `backend/app/analytics/schemas.py` — `_AnalyticsModel` base (`hide_input_in_errors=True`,
   `extra="forbid"`, `frozen=True`), `FreshnessMetadata`, `CoverageMetadata` — reuse these types
   directly for every new Phase 5 return type's freshness/coverage fields
@@ -194,8 +261,9 @@ below, not the blueprint's assumed shape, exactly as Phase 4's canonical refs wa
 
 ### Reusable Assets
 - `backend/app/analytics/metadata.py::build_freshness()` / `build_coverage()` /
-  `is_insufficient()` — call directly for every new response's DQ-01/DQ-02 envelope; only a
-  weigh-in-day-based threshold (per the discretion note) needs a new constant, not new logic
+  `is_insufficient()` — call directly for every new response's DQ-01/DQ-02 envelope for
+  workout-grained data (progression, PRs); BODY-01/BODY-02 need a day-grained sibling per D-15,
+  not a reuse of `is_insufficient()`'s session-count logic
 - `backend/app/analytics/schemas.py::_AnalyticsModel` — the shared Pydantic base every new return
   type should subclass
 - `backend/app/core/time.py::local_range_bounds()` — already built in Phase 4 for arbitrary
@@ -232,6 +300,12 @@ below, not the blueprint's assumed shape, exactly as Phase 4's canonical refs wa
   PROG-01 computes (D-01–D-04), rather than introducing a second progress definition — the user
   picked this consistency explicitly when choosing "no new est-1RM PR" over a formula-independent
   weight-PR-based alternative.
+- **2026-08-30 critical review:** before planning, the user asked for the plateau rule, the
+  bodyweight-averaging approach, and the lean-bulk thresholds to be re-examined specifically for
+  false-positive risk (normal fluctuation, exercise frequency, water/glycogen noise) rather than
+  preserved as-is. All three were tightened as a result (D-06/D-07/D-07a/D-07b, new D-13–D-17,
+  and D-11/D-12's evaluation basis) — see `05-DISCUSSION-LOG.md`'s "Critical Review" section for
+  the full KEEP/MODIFY/REPLACE reasoning behind each change.
 
 </specifics>
 
