@@ -1,8 +1,8 @@
 ---
 phase: 4
 slug: volume-frequency-analytics
-status: draft
-nyquist_compliant: false
+status: planned
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-08-30
 ---
@@ -38,24 +38,24 @@ created: 2026-08-30
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | TBD | 0 | VOL-01 | — | Warm-up sets excluded from hard sets, reps and tonnage | integration | `pytest backend/tests/test_analytics_volume.py -k warmup -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-01 | — | `dropset` counts as a hard set; filter is `!= 'warmup'` not `== 'normal'` | integration | `pytest backend/tests/test_analytics_volume.py -k dropset -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-01 | — | Tonnage is `None` (never `0`) where the modality has no `weight × reps`; `tonnage_sets` reports coverage | integration | `pytest backend/tests/test_analytics_volume.py -k modality -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-01 | — | `weight_kg = 0` counts as a tonnage set contributing `Decimal("0.000")` | integration | `pytest backend/tests/test_analytics_volume.py -k zero_load -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-01 / D-02 | — | A `2026-08-23T17:00:00Z` workout buckets to local week `2026-08-24`; changing `users.timezone` changes the bucket | integration | `pytest backend/tests/test_analytics_volume.py -k week_boundary -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-02 | — | `direct_sets` / `indirect_sets` raw counts + `weighted_sets` exact `Decimal` at default 1.0/0.5 | integration | `pytest backend/tests/test_analytics_volume.py -k muscle_split -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-02 / NORM-03 | — | Passing `{DIRECT: 0.8, INDIRECT: 0.3}` changes `weighted_sets` and leaves raw counts untouched | integration | `pytest backend/tests/test_analytics_volume.py -k custom_weights -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-02 / NORM-02 | — | An `exercise_muscle_overrides` row changes the per-muscle result (proves the resolver is used, not a raw join) | integration | `pytest backend/tests/test_analytics_volume.py -k override -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-03 | — | Per-muscle `sessions` de-duplicates workouts — 3 hamstring exercises in one workout is 1 session | integration | `pytest backend/tests/test_analytics_frequency.py -k dedup -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-03 | — | `sessions_per_week` over an arbitrary (non-multiple-of-7) range is exact and quantized | unit + integration | `pytest backend/tests/test_analytics_frequency.py -k per_week -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | VOL-03 | — | Per-exercise frequency reported alongside per-muscle | integration | `pytest backend/tests/test_analytics_frequency.py -k exercise -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | DQ-01 | — | Response carries `last_synced_at` from `sync_state`; per-muscle responses carry both `workouts` and `exercise_templates` | integration | `pytest backend/tests/test_analytics_metadata.py -k freshness -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | DQ-01 | — | No `sync_state.last_error`, status detail, DSN or credential appears in any return model | unit | `pytest backend/tests/test_analytics_metadata.py -k no_leak -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | DQ-02 | — | `insufficient_data` is `True` at 1 session, `False` at 2 (D-05 boundary, both sides) | integration | `pytest backend/tests/test_analytics_metadata.py -k insufficient -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | DQ-02 | — | `earliest_data_at` is the oldest synced workout, and is `None` with no data | integration | `pytest backend/tests/test_analytics_metadata.py -k earliest -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | Criterion 5 | — | Superset fixture produces numbers identical to the non-superset equivalent | integration | `pytest backend/tests/test_analytics_volume.py -k superset -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | Architecture | — | `app/analytics/` imports nothing from `app.mcp` or `app.integrations` | unit (static, no integration marker) | `pytest backend/tests/test_analytics_isolation.py -x` | ❌ Wave 0 | ⬜ pending |
-| TBD | TBD | 0 | Regression | — | Fast suite stays green and fast | unit | `.venv/bin/python -m pytest -q -m "not integration"` | ✅ 177 passing | ⬜ pending |
+| 04-06 | 06 | 3 | VOL-01 | T-04-01..09 | Warm-up sets excluded from hard sets, reps and tonnage | integration | `pytest backend/tests/test_analytics_volume.py -k warmup -x` | ❌ Wave 0 | ⬜ pending |
+| 04-06 | 06 | 3 | VOL-01 | T-04-01..09 | `dropset` counts as a hard set; filter is `!= 'warmup'` not `== 'normal'` | integration | `pytest backend/tests/test_analytics_volume.py -k dropset -x` | ❌ Wave 0 | ⬜ pending |
+| 04-06 | 06 | 3 | VOL-01 | T-04-01..09 | Tonnage is `None` (never `0`) where the modality has no `weight × reps`; `tonnage_sets` reports coverage | integration | `pytest backend/tests/test_analytics_volume.py -k modality -x` | ❌ Wave 0 | ⬜ pending |
+| 04-06 | 06 | 3 | VOL-01 | T-04-01..09 | `weight_kg = 0` counts as a tonnage set contributing `Decimal("0.000")` | integration | `pytest backend/tests/test_analytics_volume.py -k zero_load -x` | ❌ Wave 0 | ⬜ pending |
+| 04-06 | 06 | 3 | VOL-01 / D-02 | T-04-01..09 | A `2026-08-23T17:00:00Z` workout buckets to local week `2026-08-24`; changing `users.timezone` changes the bucket | integration | `pytest backend/tests/test_analytics_volume.py -k week_boundary -x` | ❌ Wave 0 | ⬜ pending |
+| 04-08 | 08 | 4 | VOL-02 | T-04-02, T-04-04 | `direct_sets` / `indirect_sets` raw counts + `weighted_sets` exact `Decimal` at default 1.0/0.5 | integration | `pytest backend/tests/test_analytics_volume.py -k muscle_split -x` | ❌ Wave 0 | ⬜ pending |
+| 04-08 | 08 | 4 | VOL-02 / NORM-03 | T-04-02, T-04-04 | Passing `{DIRECT: 0.8, INDIRECT: 0.3}` changes `weighted_sets` and leaves raw counts untouched | integration | `pytest backend/tests/test_analytics_volume.py -k custom_weights -x` | ❌ Wave 0 | ⬜ pending |
+| 04-08 | 08 | 4 | VOL-02 / NORM-02 | T-04-02, T-04-04 | An `exercise_muscle_overrides` row changes the per-muscle result (proves the resolver is used, not a raw join) | integration | `pytest backend/tests/test_analytics_volume.py -k override -x` | ❌ Wave 0 | ⬜ pending |
+| 04-07 | 07 | 3 | VOL-03 | T-04-02, T-04-06 | Per-muscle `sessions` de-duplicates workouts — 3 hamstring exercises in one workout is 1 session | integration | `pytest backend/tests/test_analytics_frequency.py -k dedup -x` | ❌ Wave 0 | ⬜ pending |
+| 04-07 | 07 | 3 | VOL-03 | T-04-02, T-04-06 | `sessions_per_week` over an arbitrary (non-multiple-of-7) range is exact and quantized | unit + integration | `pytest backend/tests/test_analytics_frequency.py -k per_week -x` | ❌ Wave 0 | ⬜ pending |
+| 04-07 | 07 | 3 | VOL-03 | T-04-02, T-04-06 | Per-exercise frequency reported alongside per-muscle | integration | `pytest backend/tests/test_analytics_frequency.py -k exercise -x` | ❌ Wave 0 | ⬜ pending |
+| 04-04 | 04 | 2 | DQ-01 | T-04-03 | Response carries `last_synced_at` from `sync_state`; per-muscle responses carry both `workouts` and `exercise_templates` | integration | `pytest backend/tests/test_analytics_metadata.py -k freshness -x` | ❌ Wave 0 | ⬜ pending |
+| 04-04 | 04 | 2 | DQ-01 | T-04-03 | No `sync_state.last_error`, status detail, DSN or credential appears in any return model | unit | `pytest backend/tests/test_analytics_metadata.py -k no_leak -x` | ❌ Wave 0 | ⬜ pending |
+| 04-04 | 04 | 2 | DQ-02 | T-04-06 | `insufficient_data` is `True` at 1 session, `False` at 2 (D-05 boundary, both sides) | integration | `pytest backend/tests/test_analytics_metadata.py -k insufficient -x` | ❌ Wave 0 | ⬜ pending |
+| 04-04 | 04 | 2 | DQ-02 | T-04-06 | `earliest_data_at` is the oldest synced workout, and is `None` with no data | integration | `pytest backend/tests/test_analytics_metadata.py -k earliest -x` | ❌ Wave 0 | ⬜ pending |
+| 04-06 | 06 | 3 | Criterion 5 | — | Superset fixture produces numbers identical to the non-superset equivalent | integration | `pytest backend/tests/test_analytics_volume.py -k superset -x` | ❌ Wave 0 | ⬜ pending |
+| 04-02 | 02 | 1 | Architecture | T-04-09 | `app/analytics/` imports nothing from `app.mcp` or `app.integrations` | unit (static, no integration marker) | `pytest backend/tests/test_analytics_isolation.py -x` | ❌ Wave 0 | ⬜ pending |
+| all | 01-09 | 1-4 | Regression | — | Fast suite stays green and fast | unit | `.venv/bin/python -m pytest -q -m "not integration"` | ✅ 177 passing | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -80,11 +80,11 @@ created: 2026-08-30
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 5s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references (04-01/02/03 in wave 1 build the shared time/schema/fixture infrastructure every later wave's tests depend on)
+- [x] No watch-mode flags
+- [x] Feedback latency < 5s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved 2026-08-30 (mapped to plans 04-01..04-09 after /gsd-plan-phase 4 planning)
