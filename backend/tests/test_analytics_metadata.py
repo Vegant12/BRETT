@@ -18,13 +18,21 @@ session-scoped container clean whether the test passes or fails.
 """
 
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analytics.metadata import FRESHNESS_RESOURCES_MUSCLE, build_freshness
+from app.analytics.metadata import (
+    FRESHNESS_RESOURCES_MUSCLE,
+    INSUFFICIENT_DATA_SESSION_THRESHOLD,
+    build_coverage,
+    build_freshness,
+    is_insufficient,
+)
 from app.analytics.schemas import FreshnessMetadata
+from app.core.time import local_range_bounds
 from app.db.repositories.sync_state import (
     PROVIDER_HEVY,
     RESOURCE_EXERCISE_TEMPLATES,
@@ -33,7 +41,13 @@ from app.db.repositories.sync_state import (
     get_sync_state,
     record_sync_error,
 )
-from tests.conftest import ANALYTICS_SECOND_USER_ID, GoldenBuilder
+from tests.conftest import (
+    ANALYTICS_SECOND_USER_ID,
+    DEFAULT_USER_ID,
+    GoldenBuilder,
+    GoldenExercise,
+    GoldenSet,
+)
 
 # `ANALYTICS_SECOND_USER_ID` and not DEFAULT_USER_ID: the container is session-scoped and
 # shared, and DEFAULT_USER_ID's `sync_state` rows are written and asserted on by the Hevy sync
@@ -178,3 +192,185 @@ async def test_freshness_never_leaks_last_error(
         f"sync_state's stored error text is bounded by format_sync_error precisely so it "
         f"does not travel"
     )
+
+
+# DQ-02: coverage, the D-05 threshold, and cross-tenant scoping
+
+# Monday-anchored so the fixtures read the same way the weekly-volume plans' do. Jakarta is
+# UTC+7, so 02:00Z is 09:00 local on the same day -- comfortably inside the local Monday.
+_WEEK_START = dt.date(2026, 8, 24)
+_WEEK_END = dt.date(2026, 8, 30)
+_MONDAY = dt.datetime(2026, 8, 24, 2, 0, tzinfo=dt.UTC)
+_WEDNESDAY = dt.datetime(2026, 8, 26, 2, 0, tzinfo=dt.UTC)
+_LONG_AGO = dt.datetime(2026, 4, 6, 2, 0, tzinfo=dt.UTC)
+_TEMPLATE = "ANALYTICS-META-BENCH"
+
+_TIMEZONE = "Asia/Jakarta"
+
+
+def _bench(*sets: GoldenSet) -> GoldenExercise:
+    """One weighted exercise on the shared fixture template."""
+    return GoldenExercise(template_external_id=_TEMPLATE, sets=sets)
+
+
+_ONE_WORKING_SET = (GoldenSet(weight_kg=Decimal("60.000"), reps=10),)
+
+
+@pytest.mark.integration
+async def test_insufficient_data_is_true_at_one_session(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-05's whole point: one session cannot support a per-week rate.
+
+    Reporting a single workout without the flag is how sparse data gets read as a confident
+    result -- the number is arithmetically correct and the conclusion drawn from it is not.
+    """
+    utc_start, utc_end = local_range_bounds(_WEEK_START, _WEEK_END, _TIMEZONE)
+    await golden_workout.template(external_id=_TEMPLATE)
+    await golden_workout.workout(start_time=_MONDAY, exercises=[_bench(*_ONE_WORKING_SET)])
+
+    coverage = await build_coverage(
+        session, user_id=DEFAULT_USER_ID, utc_start=utc_start, utc_end=utc_end
+    )
+
+    assert coverage.sessions_in_window == 1
+    assert coverage.insufficient_data is True
+
+
+@pytest.mark.integration
+async def test_insufficient_data_is_false_at_two_sessions(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """The other side of the same boundary, and the reason both tests exist.
+
+    Pinning only the True case would leave `<=` and `<` indistinguishable, so an off-by-one in
+    the comparison operator would ship green and flag every two-session week as untrustworthy.
+    """
+    utc_start, utc_end = local_range_bounds(_WEEK_START, _WEEK_END, _TIMEZONE)
+    await golden_workout.template(external_id=_TEMPLATE)
+    await golden_workout.workout(start_time=_MONDAY, exercises=[_bench(*_ONE_WORKING_SET)])
+    await golden_workout.workout(start_time=_WEDNESDAY, exercises=[_bench(*_ONE_WORKING_SET)])
+
+    coverage = await build_coverage(
+        session, user_id=DEFAULT_USER_ID, utc_start=utc_start, utc_end=utc_end
+    )
+
+    assert coverage.sessions_in_window == 2
+    assert coverage.insufficient_data is False
+
+
+@pytest.mark.integration
+async def test_insufficient_data_is_true_with_no_sessions(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """An empty window is the zero case, and it is still insufficient rather than "fine"."""
+    utc_start, utc_end = local_range_bounds(_WEEK_START, _WEEK_END, _TIMEZONE)
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+
+    coverage = await build_coverage(
+        session, user_id=ANALYTICS_SECOND_USER_ID, utc_start=utc_start, utc_end=utc_end
+    )
+
+    assert coverage.sessions_in_window == 0
+    assert coverage.insufficient_data is True
+
+
+def test_is_insufficient_boundary_is_the_shared_constant() -> None:
+    """The flip point is the CONSTANT, not the literal 2.
+
+    Written this way so revisiting D-05 later is a one-line change that does not silently
+    invalidate this test into asserting a threshold the code no longer uses.
+    """
+    assert INSUFFICIENT_DATA_SESSION_THRESHOLD == 2
+    assert is_insufficient(INSUFFICIENT_DATA_SESSION_THRESHOLD - 1) is True
+    assert is_insufficient(INSUFFICIENT_DATA_SESSION_THRESHOLD) is False
+
+
+@pytest.mark.integration
+async def test_earliest_data_at_is_the_oldest_workout_across_all_time(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """The two assertions together are the point: the count is windowed, the floor is not.
+
+    `earliest_data_at` is deliberately NOT window-scoped, because that is what separates "you
+    did not train that week" from "your synced history does not reach back that far". Scoping
+    it would collapse both into the same pair of zeroes.
+    """
+    utc_start, utc_end = local_range_bounds(_WEEK_START, _WEEK_END, _TIMEZONE)
+    await golden_workout.template(external_id=_TEMPLATE)
+    await golden_workout.workout(start_time=_LONG_AGO, exercises=[_bench(*_ONE_WORKING_SET)])
+    await golden_workout.workout(start_time=_MONDAY, exercises=[_bench(*_ONE_WORKING_SET)])
+
+    coverage = await build_coverage(
+        session, user_id=DEFAULT_USER_ID, utc_start=utc_start, utc_end=utc_end
+    )
+
+    assert coverage.sessions_in_window == 1
+    assert coverage.earliest_data_at == _LONG_AGO
+
+
+@pytest.mark.integration
+async def test_earliest_data_at_is_none_without_any_workouts(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """No history at all reports `None`, not the window start masquerading as a floor.
+
+    The default user is given a workout months before the window on purpose. Without it this
+    test passes against an empty table no matter what predicate `earliest_workout_at` uses,
+    and the all-time lookup is the one place where forgetting `user_id` is easiest to miss --
+    the window bounds would not save it.
+    """
+    utc_start, utc_end = local_range_bounds(_WEEK_START, _WEEK_END, _TIMEZONE)
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_TEMPLATE)
+    await golden_workout.workout(start_time=_LONG_AGO, exercises=[_bench(*_ONE_WORKING_SET)])
+
+    coverage = await build_coverage(
+        session, user_id=ANALYTICS_SECOND_USER_ID, utc_start=utc_start, utc_end=utc_end
+    )
+
+    assert coverage.earliest_data_at is None, (
+        "T-04-02: earliest_data_at reported another user's history as this user's floor. "
+        "The all-time lookup needs its own user_id predicate -- the window bounds do not "
+        "constrain it"
+    )
+
+
+@pytest.mark.integration
+async def test_coverage_does_not_count_another_users_workouts(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """T-04-02: a single-user suite cannot see a missing `user_id` predicate.
+
+    With one user every row belongs to them, so an unscoped count returns the right answer by
+    accident. Three workouts for a second user in the same window is the smallest arrangement
+    where the unscoped and scoped answers differ, and differ by more than one.
+    """
+    utc_start, utc_end = local_range_bounds(_WEEK_START, _WEEK_END, _TIMEZONE)
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_TEMPLATE)
+    await golden_workout.template(external_id=_TEMPLATE, user_id=ANALYTICS_SECOND_USER_ID)
+
+    for start_time in (_MONDAY, _WEDNESDAY, _MONDAY + dt.timedelta(days=3)):
+        await golden_workout.workout(
+            start_time=start_time,
+            exercises=[_bench(*_ONE_WORKING_SET)],
+            user_id=ANALYTICS_SECOND_USER_ID,
+        )
+    await golden_workout.workout(start_time=_MONDAY, exercises=[_bench(*_ONE_WORKING_SET)])
+
+    mine = await build_coverage(
+        session, user_id=DEFAULT_USER_ID, utc_start=utc_start, utc_end=utc_end
+    )
+    theirs = await build_coverage(
+        session, user_id=ANALYTICS_SECOND_USER_ID, utc_start=utc_start, utc_end=utc_end
+    )
+
+    # Guard against a vacuous pass: if the fixture wrote nothing, both would be 0 and equal.
+    assert theirs.sessions_in_window == 3
+    assert mine.sessions_in_window == 1, (
+        "ASVS V4 violated: the coverage count includes another user's workouts. The schema is "
+        "multi-user-ready, so a missing user_id predicate is a cross-tenant disclosure"
+    )
+    assert mine.insufficient_data is True
+    assert theirs.insufficient_data is False
