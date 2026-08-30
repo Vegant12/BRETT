@@ -57,10 +57,25 @@ class ExerciseTemplate(Base, TimestampMixin):
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Hevy's `type`, stored verbatim: weight_reps | reps_only | bodyweight_reps |
-    # bodyweight_assisted_reps | duration | weight_duration | distance_duration |
-    # short_distance_weight. This is the modality signal PROG-01 (Phase 5) needs to decide
-    # whether an estimated 1RM is meaningful at all. Persist it now or resync everything later.
+    # Hevy's `type`, stored verbatim. The nine values OBSERVED in a full live sync
+    # (463 templates / 7,984 sets, 2026-08-30), with the set counts that make each
+    # modality real rather than theoretical:
+    #   weight_reps 7167 | reps_only 503 | bodyweight_weighted 270 | duration 24 |
+    #   short_distance_weight 16 | bodyweight_assisted 4 |
+    #   distance_duration, floors_duration, steps_duration: 0 sets (templates only)
+    #
+    # This list REPLACES an earlier one that named three type strings Hevy has never sent
+    # here and omitted four it does send. Those three phantom strings are deliberately not
+    # repeated anywhere in this file -- a grep for the modality vocabulary must not surface
+    # them again. The before/after is recorded in 04-RESEARCH.md, "Live Data Ground Truth".
+    #
+    # DO NOT hardcode a modality allow-list from this list. Phase 4's tonnage gate branches
+    # on OPERAND PRESENCE (`weight_kg IS NOT NULL AND reps IS NOT NULL`), which reproduces
+    # the counts above exactly and survives Hevy inventing a tenth type. The string is worth
+    # REPORTING so Claude can explain why a tonnage figure is absent; it must not be the gate.
+    #
+    # Still the modality signal PROG-01 (Phase 5) needs to decide whether an estimated 1RM is
+    # meaningful at all. Persist it now or resync everything later.
     exercise_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # Hevy's RAW values, NOT translated. This pair is the audit baseline NORM-02 compares an
