@@ -73,7 +73,7 @@ async def upsert_exercise_template(
         "exercise_type": template.type,
         "primary_muscle_group": template.primary_muscle_group,
         "secondary_muscle_groups": list(template.secondary_muscle_groups),
-        "equipment_category": template.equipment_category,
+        "equipment_category": template.equipment,
         "is_custom": template.is_custom,
     }
     statement = pg_insert(ExerciseTemplate).values(

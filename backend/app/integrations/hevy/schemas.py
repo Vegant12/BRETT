@@ -131,14 +131,21 @@ class PaginatedWorkoutEvents(_HevyModel):
 
 
 class HevyExerciseTemplate(_HevyModel):
-    """`id` is an 8-char hex code for built-ins and a full UUID for custom templates."""
+    """`id` is an 8-char hex code for built-ins and a full UUID for custom templates.
+
+    The wire field is ``equipment``, not ``equipment_category`` -- confirmed by a live
+    `/v1/exercise_templates` response during plan 03-11's real-API validation. `_HevyModel`
+    declares no alias generator, so a mismatched field name here does not raise: under
+    `extra="ignore"`, the real `equipment` key is silently dropped and this field would default
+    to `None` for every template. See `docs/hevy-api-observations.md`.
+    """
 
     id: str
     title: str
     type: str | None = None
     primary_muscle_group: str | None = None
     secondary_muscle_groups: list[str] = Field(default_factory=list)
-    equipment_category: str | None = None
+    equipment: str | None = None
     is_custom: bool = False
 
 

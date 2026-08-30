@@ -8,7 +8,7 @@
       "type": "weight_reps",
       "primary_muscle_group": "chest",
       "secondary_muscle_groups": ["triceps", "shoulders"],
-      "equipment_category": "barbell",
+      "equipment": "barbell",
       "is_custom": false
     },
     {
@@ -17,7 +17,7 @@
       "type": "weight_reps",
       "primary_muscle_group": "shoulders",
       "secondary_muscle_groups": [],
-      "equipment_category": "dumbbell",
+      "equipment": "dumbbell",
       "is_custom": false
     },
     {
@@ -26,7 +26,7 @@
       "type": "weight_reps",
       "primary_muscle_group": "lats",
       "secondary_muscle_groups": ["biceps", "upper_back"],
-      "equipment_category": "machine",
+      "equipment": "machine",
       "is_custom": false
     },
     {
@@ -35,7 +35,7 @@
       "type": "distance_duration",
       "primary_muscle_group": "full_body",
       "secondary_muscle_groups": ["other"],
-      "equipment_category": "other",
+      "equipment": "other",
       "is_custom": true
     }
   ]
