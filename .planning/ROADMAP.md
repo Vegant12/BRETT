@@ -150,9 +150,22 @@ Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
 3. Personal records (max weight, max reps at a weight, estimated-1RM, volume, rep PR) are detected with their dates and exclude warm-up sets
 4. Two time periods can be compared with values normalized per week, so unequal-length windows do not produce misleading deltas
 5. Body weight trend (7/14/30-day rolling averages, weekly rate of change) and a recomposition status verdict are produced from synced measurements, degrading cleanly to insufficient-data and framed as decision support rather than a medical claim
-**Plans**: TBD
+**Plans**: 10 plans
 
+Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
 
+- [ ] 05-01-PLAN.md — Wave 1: `analytics/estimates.py` — Epley with the D-02 rep gate and D-03 modality gate, plus the static no-float and no-Epley-in-SQL guards (PROG-01)
+- [ ] 05-02-PLAN.md — Wave 1: `rollup.qualifying_set_rows()` set-grain aggregate carrying title/modality, and `GoldenBuilder.body_measurement()` (PROG-01, PROG-04)
+- [ ] 05-03-PLAN.md — Wave 2: all 23 Phase 5 return types in `schemas.py`, plus `MeasurementCoverage`, the D-15 floors and body freshness in `metadata.py` (PROG-01..04, CMP-01, BODY-01, BODY-02)
+- [ ] 05-04-PLAN.md — Wave 3: `analytics/progression.py` — the D-04 `best_set_per_day` series and `get_exercise_progression` (PROG-01)
+- [ ] 05-05-PLAN.md — Wave 3: `analytics/records.py` — five PR types at set grain, D-08 dropset eligibility, D-09 earliest-date tie-break (PROG-04)
+- [ ] 05-06-PLAN.md — Wave 3: `analytics/bodyweight.py` — one 35-day fetch folded five ways, D-13..D-17, frozen-clock tests (BODY-01)
+- [ ] 05-07-PLAN.md — Wave 4: exact-Decimal OLS trend slope, the D-18 ±0.5%/week dead-band, `get_exercise_trends` (PROG-02)
+- [ ] 05-08-PLAN.md — Wave 4: `analytics/comparison.py` — counts-and-sums-only per-week normalization, levels never divided (CMP-01)
+- [ ] 05-09-PLAN.md — Wave 5: plateau streak scan with the D-07 2% tolerance, D-07a skip, seeded historical best and D-19's 12-week bounded lookback (PROG-03)
+- [ ] 05-10-PLAN.md — Wave 5: `analytics/recomposition.py` — D-20 net-progression score and the 5x3 label matrix, plus the package docstring refresh (BODY-02)
+
+*This phase adds **zero** dependencies to `pyproject.toml` and creates **no** migration, exactly as Phase 4 did. A proposed dependency or schema change is a signal the design drifted from CLAUDE.md's "SQL aggregates + `Decimal`/Pydantic". Plans 05-01 and 05-02 are the Wave 0 equivalents: they ship the one pure formula every other number depends on, the one set-grain query every progression and records fold reads, and the static guards that keep the Epley integer-division trap unreachable.*
 
 ### Phase 6: MCP Tools
 
@@ -197,7 +210,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 2. Deploy & Connector Auth Spike                  | 4/8            | Executing   | -         |
 | 3. Hevy Integration & Normalization               | 0/12           | Planned     | -         |
 | 4. Volume & Frequency Analytics                   | 0/9            | Planned     | -         |
-| 5. Progression, Records & Recomposition Analytics | 0/TBD          | Not started | -         |
+| 5. Progression, Records & Recomposition Analytics | 0/10           | Planned     | -         |
 | 6. MCP Tools                                      | 0/TBD          | Not started | -         |
 | 7. Production Hardening & Coaching Layer          | 0/TBD          | Not started | -         |
 
