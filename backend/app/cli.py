@@ -2,6 +2,7 @@
 
     PYTHONPATH=backend uv run python -m app.cli sync-hevy
     PYTHONPATH=backend uv run python -m app.cli sync-status
+    PYTHONPATH=backend uv run python -m app.cli mapping-gaps
 
 Bootstrap order is load-bearing and is the same order `app/main.py` uses: configuration is
 read first so a misconfigured process dies immediately, then logging is configured -- the
@@ -26,13 +27,17 @@ import uuid
 from collections.abc import Sequence
 
 import structlog
+from sqlalchemy import select
 
 from app.config import Settings, get_settings
 from app.db import session as db_session
+from app.db.models.exercise import ExerciseTemplate
 from app.integrations.hevy.client import build_hevy_client
 from app.integrations.hevy.errors import HevyError
 from app.integrations.hevy.sync import HevySyncService, SyncMode, resource_status
 from app.logging import configure_logging
+from app.normalization.exercise_map import DELIBERATELY_UNMAPPED
+from app.normalization.resolver import unmapped_template_ids
 
 # Migration 0002's fixed id, not uuid4(). v1 is single-user; `--user-id` exists so the CLI
 # does not have to change when a second user does. A uuid4 default would write rows against
@@ -94,6 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_user_id(status)
 
+    gaps = subcommands.add_parser(
+        "mapping-gaps",
+        help="List exercise templates with no canonical muscle mapping (D-03).",
+    )
+    _add_user_id(gaps)
+
     return parser
 
 
@@ -109,6 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings)  # then logging, so the scrubber has the secret values
     if args.command == "sync-status":
         return asyncio.run(_run_status(settings, args))
+    if args.command == "mapping-gaps":
+        return asyncio.run(_run_mapping_gaps(settings, args))
     return asyncio.run(_run_sync(settings, args))
 
 
@@ -212,6 +225,55 @@ async def _run_status(settings: Settings, args: argparse.Namespace) -> int:
     for entry in entries:
         when = entry.last_synced_at.isoformat() if entry.last_synced_at is not None else "never"
         print(f"{entry.resource}: {when} ({entry.status})")
+    return 0
+
+
+async def _run_mapping_gaps(settings: Settings, args: argparse.Namespace) -> int:
+    """NORM-01/D-03 as operator output: which templates resolve to no canonical muscle.
+
+    Splits "unmapped" into the two states that look identical in the database but mean
+    opposite things: `deliberate` (an id listed in `DELIBERATELY_UNMAPPED` -- cardio,
+    conditioning, `neck`; the intended end state) and `GAP` (nobody has curated it yet).
+    Without the split, a curation backlog and a finished taxonomy produce the same output.
+
+    Local-only, like `sync-status`: it reads the database and never needs `HEVY_API_KEY`.
+    """
+    log = structlog.get_logger()
+    engine = db_session.make_engine(settings)
+    sessionmaker = db_session.make_sessionmaker(engine)
+    log.info("hevy_cli_started", command="mapping-gaps")
+    try:
+        async with sessionmaker() as session:
+            external_ids = await unmapped_template_ids(session, user_id=args.user_id)
+            rows = (
+                await session.execute(
+                    select(ExerciseTemplate.external_id, ExerciseTemplate.title).where(
+                        ExerciseTemplate.user_id == args.user_id,
+                        ExerciseTemplate.external_id.in_(external_ids),
+                    )
+                )
+            ).all()
+            titles: dict[str, str] = {row[0]: row[1] for row in rows}
+    finally:
+        await engine.dispose()
+        log.info("hevy_cli_stopped", command="mapping-gaps")
+
+    deliberate = 0
+    for external_id in external_ids:
+        if external_id in DELIBERATELY_UNMAPPED:
+            deliberate += 1
+            flag = "deliberate"
+        else:
+            flag = "GAP"
+        # `?` rather than a blank: a template row that vanished between the two reads is a
+        # different problem from one that was never given a title.
+        print(f"{external_id}  {titles.get(external_id, '?')}  [{flag}]")
+    gaps = len(external_ids) - deliberate
+    print(f"{len(external_ids)} unmapped ({deliberate} deliberate, {gaps} gaps)")
+
+    # Exit 0 even with gaps. This is an inspection command, and D-03 makes an unmapped
+    # exercise a supported state -- exiting non-zero would turn a curation backlog into a
+    # broken pipeline the moment this is ever wired into CI.
     return 0
 
 

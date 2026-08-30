@@ -49,6 +49,7 @@ keep it in `.env`) first.
 
     PYTHONPATH=backend uv run python -m app.cli sync-hevy
     PYTHONPATH=backend uv run python -m app.cli sync-status
+    PYTHONPATH=backend uv run python -m app.cli mapping-gaps
 
 `sync-hevy` syncs exercise templates, workouts and body measurements, in that order. It picks
 its own workout strategy: the full `/v1/workouts` import the first time, and the
@@ -59,6 +60,13 @@ its own workout strategy: the full `/v1/workouts` import the first time, and the
 `sync-status` prints one line per resource — `resource: last_synced_at (status)`, or `never`
 for a resource that has not run yet. It reads only the local database, so it works without a
 Hevy key.
+
+`mapping-gaps` prints every exercise template that resolves to no canonical muscle group,
+one per line as `external_id  title  [deliberate|GAP]`, then a summary count. `deliberate`
+means the template is listed in `DELIBERATELY_UNMAPPED` (cardio, conditioning, `neck` — the
+intended end state); `GAP` means nobody has curated it yet. **It always exits 0**, even with
+gaps: an unmapped exercise is a supported state (D-03), so this is an inspection command and
+never a build gate. It reads only the local database, so it works without a Hevy key.
 
 `HEVY_API_KEY` must be set for `sync-hevy`; without it the command exits 1 and names the
 variable. `PYTHONPATH=backend` is required because `backend/` is the import root (the same
