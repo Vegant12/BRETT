@@ -81,3 +81,65 @@ def local_day_bounds(day: dt.date, tz: str) -> tuple[dt.datetime, dt.datetime]:
     start_local = dt.datetime.combine(day, dt.time.min, tzinfo=zone)
     end_local = start_local + dt.timedelta(days=1)
     return start_local.astimezone(dt.UTC), end_local.astimezone(dt.UTC)
+
+
+def local_range_bounds(
+    start_day: dt.date, end_day: dt.date, tz: str
+) -> tuple[dt.datetime, dt.datetime]:
+    """Half-open ``[start, end)`` UTC range covering an INCLUSIVE local date range.
+
+    D-03: Phase 4 analytics windows are arbitrary start/end dates, so this generalizes
+    ``local_day_bounds``, which it DELEGATES to rather than repeating the ``ZoneInfo``
+    arithmetic -- a second copy is how the two would eventually disagree about a DST
+    transition day.
+
+    Same reason for existing as ``local_day_bounds``: it produces two constants to compare
+    a BARE timestamp column against, keeping ``ix_workouts_user_id_start_time`` usable.
+    Wrapping the column in ``AT TIME ZONE`` instead was measured on the live database as a
+    Seq Scan removing 299 of 327 rows, versus a Bitmap Index Scan for this form.
+    """
+    if end_day < start_day:
+        raise ValueError("end_day precedes start_day")
+    start_utc, _ = local_day_bounds(start_day, tz)
+    _, end_utc = local_day_bounds(end_day, tz)
+    return start_utc, end_utc
+
+
+def snap_local_week_range(start_day: dt.date, end_day: dt.date) -> tuple[dt.date, dt.date]:
+    """Widen an inclusive local date range OUTWARD to whole Monday-start weeks.
+
+    Weekly volume only. Asking for a window starting Wednesday 2026-07-01 otherwise produces
+    a first bucket of Monday 2026-06-29 holding only the part of the week inside the window --
+    a partial week whose total is not comparable to a full one, which reads as "volume
+    dropped". Snapping outward is the user-locked resolution (extends D-02/D-03).
+
+    Training frequency does NOT use this: it divides by the true window length (D-03), so an
+    incomplete week is already handled by the arithmetic.
+    """
+    if end_day < start_day:
+        raise ValueError("end_day precedes start_day")
+    return (
+        start_day - dt.timedelta(days=start_day.weekday()),
+        end_day + dt.timedelta(days=6 - end_day.weekday()),
+    )
+
+
+def local_week_spine(start_day: dt.date, end_day: dt.date) -> list[dt.date]:
+    """Every local week-start Monday in an inclusive range, ascending and gap-free.
+
+    Built by enumeration rather than inferred from the rows a query returned, because a week
+    in which nothing was trained returns no rows -- and a silently missing zero week is the
+    most diagnostically interesting one Claude could have seen.
+
+    Enumerated in Python rather than with ``generate_series`` so it stays unit-testable with
+    no container, and so SQLAlchemy's set-returning-function alias trap
+    (``UndefinedColumnError`` without ``.render_derived()``) never applies.
+    """
+    if end_day < start_day:
+        raise ValueError("end_day precedes start_day")
+    week = start_day - dt.timedelta(days=start_day.weekday())
+    spine: list[dt.date] = []
+    while week <= end_day:
+        spine.append(week)
+        week += dt.timedelta(weeks=1)
+    return spine
