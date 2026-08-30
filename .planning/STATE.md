@@ -79,8 +79,9 @@ None yet.
 [Issues that affect future work]
 
 - **Resolved (Phase 2, 2026-08-29):** A personal Claude account authenticates a custom remote MCP connector via WorkOS AuthKit (OAuth 2.1, CIMD client identification), not a bearer token — verified on Claude Desktop. See `.planning/phases/02-deploy-connector-auth-spike/02-DEPLOY-LOG.md`.
-- **Open (Phase 3):** Build against the *live* Hevy schema, not the blueprint's assumed one — no `rir`, no `weight_unit`, `pageSize` caps at 10, no stable child-object IDs, events return newest-to-oldest.
-- **Open (Phase 3):** Hevy's real rate limits are undocumented and whether dumbbell weight is per-dumbbell or combined is unverified — both must be discovered empirically during the first full sync and recorded.
+- **Resolved (Phase 3, 2026-08-30):** Build against the *live* Hevy schema, not the blueprint's assumed one — no `rir`, no `weight_unit`, `pageSize` caps at 10, no stable child-object IDs, events return newest-to-oldest. Confirmed against a real full + incremental sync (327 workouts, 463 templates, 123 body-measurement rows); also caught a live-only schema bug (`equipment_category` → `equipment`) that no mocked test could have found. See `docs/hevy-api-observations.md`.
+- **Resolved (Phase 3, 2026-08-30):** Dumbbell `weight_kg` is confirmed **per-dumbbell** (matches the Hevy app directly, no correction factor needed) and the seven unsuffixed body-measurement fields are confirmed **centimetres**. Both verified by direct comparison with the Hevy app during plan 03-11. See `docs/hevy-api-observations.md`.
+- **Open (Phase 3):** Hevy's real rate limits remain undocumented — no `429` or `ratelimit-*`/`retry-after` header was observed across 71 requests in the first live sync, so the existing retry policy (`wait_exponential_jitter` + `stop_after_attempt(5)`) is unverified against a real limit, not confirmed unnecessary. Re-check if a live sync ever throttles.
 - **Open (Phase 6):** MCP Python SDK had a breaking `FastMCP` → `MCPServer` rework (spec revision 2026-07-28); re-read SDK docs at phase start rather than trusting cached knowledge.
 
 ## Deferred Items
