@@ -111,14 +111,22 @@ def test_session_manager_is_available(mcp_server: ModuleType) -> None:
     assert mcp_server.mcp.session_manager is not None
 
 
-async def test_exactly_one_tool_registered(mcp_server: ModuleType) -> None:
-    """D-08: one throwaway tool, and nothing else leaked into the tool surface."""
+async def test_ping_is_registered(mcp_server: ModuleType) -> None:
+    """D-08: the Phase 2 canary is still on the registry.
+
+    This asserted ``== ["fitness_ping"]`` until plan 06-09 registered the twelve
+    Phase 6 tools beside it. The exact-registry claim did not disappear -- it
+    MOVED, to ``test_mcp_tool_schemas.test_tool_registry_is_exactly_the_thirteen``,
+    which owns the whole tool surface. What belongs in this file is only the part
+    that is about mounting: the ping tool the mount was proven against is still
+    there.
+    """
     from mcp import Client
 
     async with Client(mcp_server.mcp) as client:
         tools = (await client.list_tools()).tools
 
-    assert [tool.name for tool in tools] == ["fitness_ping"]
+    assert "fitness_ping" in [tool.name for tool in tools]
 
 
 async def test_ping_tool_hides_ctx_from_the_model(mcp_server: ModuleType) -> None:
@@ -130,13 +138,19 @@ async def test_ping_tool_hides_ctx_from_the_model(mcp_server: ModuleType) -> Non
     model is asked to invent a value for the server's own lifespan handle and
     every call fails schema validation. Asserted against the serialized
     (``by_alias``) form because that is the payload the model actually receives.
+
+    Looked up BY NAME rather than by ``tools[0]``: positional indexing was
+    correct only while one tool existed, and with thirteen registered it would
+    silently start asserting against whichever tool the registry happens to
+    order first.
     """
     from mcp import Client
 
     async with Client(mcp_server.mcp) as client:
         tools = (await client.list_tools()).tools
 
-    input_schema = tools[0].model_dump(by_alias=True)["inputSchema"]
+    ping = next(tool for tool in tools if tool.name == "fitness_ping")
+    input_schema = ping.model_dump(by_alias=True)["inputSchema"]
 
     assert input_schema["properties"] == {}, (
         "`ctx` leaked into the model-facing tool schema -- check that it is "
