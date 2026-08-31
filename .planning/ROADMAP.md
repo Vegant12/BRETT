@@ -183,8 +183,8 @@ Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
 - [x] 06-07-PLAN.md — Wave 2: `fitness_compare_periods` (explicit dates, D-06) and the two anchored-on-today body tools (D-07) (MCP-02, MCP-03, MCP-05, MCP-06)
 - [x] 06-08-PLAN.md — Wave 3: `fitness_get_training_summary` — the one-call composed picture (MCP-02, MCP-03, MCP-05, MCP-06)
 - [x] 06-09-PLAN.md — Wave 4: register all twelve tools with `ToolAnnotations(read_only_hint=True)`; `test_mcp_tool_schemas.py`; `test_mcp_isolation.py` static guards (MCP-02, MCP-03, MCP-05, MCP-06)
-- [ ] 06-10-PLAN.md — Wave 5: `test_mcp_tool_budget.py` (D-13 byte budgets on the full `CallToolResult`) and `test_mcp_readonly.py` (PostgreSQL refuses the write) (MCP-03, MCP-05)
-- [ ] 06-11-PLAN.md — Wave 5: per-tool integration coverage, D-02 disambiguation, composed-summary proof, and the DSN-leak test parametrized over all thirteen tools (MCP-02, MCP-06)
+- [x] 06-10-PLAN.md — Wave 5: `test_mcp_tool_budget.py` (D-13 byte budgets on the full `CallToolResult`) and `test_mcp_readonly.py` (PostgreSQL refuses the write) (MCP-03, MCP-05)
+- [x] 06-11-PLAN.md — Wave 5: per-tool integration coverage, D-02 disambiguation, composed-summary proof, and the DSN-leak test parametrized over all thirteen tools (MCP-02, MCP-06)
 
 *This phase adds **zero** dependencies and creates **no** migration — it composes shipped Phase 4/5 analytics. Two facts drive the plan shape. First, `MuscleGroupVolumeResult` over a 52-week window measures 128 KB structured / ~348 KB on the wire, so `fitness_get_muscle_group_volume` rolls up to 19 rows over the window (Open Question 1, resolved by the user in favour of option (a)); the reshape is documented at the model that performs it and is the ONE exception to "compose, don't reshape". Second, `mcp 2.0.0` returns any escaping exception's `str()` to Claude verbatim and structlog never sees that channel, so `@safe_tool` is mandatory on all twelve tools and is enforced statically as well as behaviourally.*
 
