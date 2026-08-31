@@ -181,7 +181,7 @@ Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
 - [x] 06-05-PLAN.md — Wave 2: `roll_up_muscles` plus `fitness_get_weekly_volume`, `fitness_get_muscle_group_volume`, `fitness_get_training_frequency` (MCP-02, MCP-03, MCP-05, MCP-06)
 - [x] 06-06-PLAN.md — Wave 2: `fitness_get_exercise_progression`, `fitness_get_plateaus`, `fitness_get_personal_records` with the D-01/D-02 name resolution (MCP-02, MCP-03, MCP-05, MCP-06)
 - [x] 06-07-PLAN.md — Wave 2: `fitness_compare_periods` (explicit dates, D-06) and the two anchored-on-today body tools (D-07) (MCP-02, MCP-03, MCP-05, MCP-06)
-- [ ] 06-08-PLAN.md — Wave 3: `fitness_get_training_summary` — the one-call composed picture (MCP-02, MCP-03, MCP-05, MCP-06)
+- [x] 06-08-PLAN.md — Wave 3: `fitness_get_training_summary` — the one-call composed picture (MCP-02, MCP-03, MCP-05, MCP-06)
 - [ ] 06-09-PLAN.md — Wave 4: register all twelve tools with `ToolAnnotations(read_only_hint=True)`; `test_mcp_tool_schemas.py`; `test_mcp_isolation.py` static guards (MCP-02, MCP-03, MCP-05, MCP-06)
 - [ ] 06-10-PLAN.md — Wave 5: `test_mcp_tool_budget.py` (D-13 byte budgets on the full `CallToolResult`) and `test_mcp_readonly.py` (PostgreSQL refuses the write) (MCP-03, MCP-05)
 - [ ] 06-11-PLAN.md — Wave 5: per-tool integration coverage, D-02 disambiguation, composed-summary proof, and the DSN-leak test parametrized over all thirteen tools (MCP-02, MCP-06)
