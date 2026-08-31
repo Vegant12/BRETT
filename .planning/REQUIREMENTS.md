@@ -49,7 +49,7 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 ### Body Composition & Recomposition
 
-- [ ] **BODY-01**: System calculates rolling body-weight averages (7/14/30-day) and weekly rate of change from synced measurements
+- [x] **BODY-01**: System calculates rolling body-weight averages (7/14/30-day) and weekly rate of change from synced measurements
 - [ ] **BODY-02**: System classifies overall recomposition status (e.g. progressing, muscle gain, fat loss, weight stable, too fast/slow, insufficient data) from combined weight trend, training volume, and progression data, explicitly framed as decision support rather than a medical or diagnostic claim
 
 ### Data Quality & Trust
@@ -153,7 +153,7 @@ Every v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for p
 | PROG-03 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
 | PROG-04 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
 | CMP-01 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
-| BODY-01 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| BODY-01 | Phase 5 | Progression, Records & Recomposition Analytics | Complete |
 | BODY-02 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
 | MCP-02 | Phase 6 | MCP Tools | Pending |
 | MCP-03 | Phase 6 | MCP Tools | Pending |
