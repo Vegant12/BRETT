@@ -1,4 +1,6 @@
-"""Deterministic volume and frequency analytics (VOL-01..03, DQ-01, DQ-02).
+"""Deterministic training and body-composition analytics.
+
+Requirements: VOL-01..03, PROG-01..04, CMP-01, BODY-01, BODY-02, DQ-01, DQ-02.
 
 A sibling of ``app/normalization/`` and ``app/core/``, not a layer above them. Nothing here
 may import from ``app.integrations`` (HEVY-05: a second provider must feed the same tables)

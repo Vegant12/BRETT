@@ -42,17 +42,26 @@ here to weight plus training. Do not design a body-fat input into this module.
 holds zero weigh-ins after a real 52-day logging gap. It is a first-class tested path.
 """
 
+import datetime as dt
+import uuid
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.analytics.bodyweight import get_body_weight_trend
+from app.analytics.metadata import FRESHNESS_RESOURCES_ALL, build_freshness
+from app.analytics.progression import get_exercise_trends
 from app.analytics.schemas import (
     AggregateProgression,
     ProgressionSignal,
+    RecompositionResult,
     RecompositionStatus,
     TrendVerdict,
 )
+from app.analytics.volume import get_weekly_volume
 
 # The user's stated goal is a LEAN BULK. There is no `users.goal` column and none is being added;
 # the goal shapes these threshold VALUES and nothing structural. If the goal changes, these five
@@ -275,3 +284,57 @@ def classify_recomposition(
     by the tests.
     """
     return _LABEL_MATRIX[(_weight_bucket(rate_percent_per_week), signal)]
+
+
+async def get_recomposition_status(
+    session: AsyncSession, *, user_id: uuid.UUID
+) -> RecompositionResult:
+    """BODY-02: a recomposition verdict from the weight trend and the training-progression signal.
+
+    Takes no date range, for the same reason ``get_body_weight_trend`` does not: "where does my
+    recomposition stand" is always anchored on today.
+
+    Session positional, ``user_id`` keyword-only with no default (ASVS V4). The caller owns the
+    transaction; nothing here writes.
+    """
+    weight_trend = await get_body_weight_trend(session, user_id=user_id)
+    # The anchor is REUSED from the body-weight call rather than recomputed. Recomputing it would
+    # let the two halves of one answer straddle a local midnight and describe different "todays".
+    anchor = weight_trend.anchor_day
+    window_start = anchor - dt.timedelta(days=7 * RECOMP_LOOKBACK_WEEKS - 1)
+
+    # Reused, never re-implemented: `get_exercise_trends` is the ONE definition of "improving",
+    # and a second copy here is how the recomposition verdict and the progression tool would
+    # eventually disagree about the same exercise over the same weeks.
+    trends = await get_exercise_trends(
+        session, user_id=user_id, start_day=window_start, end_day=anchor
+    )
+    progression = aggregate_progression([e.verdict for e in trends.exercises])
+
+    # Reported for CONTEXT only. BODY-02's requirement text names training volume as an input to
+    # the picture, not to the label: the classification is the weight rate crossed with the
+    # progression signal, and adding volume to it would make the verdict depend on a figure that
+    # rises during a deload-free overreach as readily as during productive training.
+    training_volume = await get_weekly_volume(
+        session, user_id=user_id, start_day=window_start, end_day=anchor
+    )
+
+    return RecompositionResult(
+        status=classify_recomposition(
+            # D-16's SMOOTHED rate, never D-17's raw single-week delta.
+            rate_percent_per_week=weight_trend.trend_rate_percent_per_week,
+            signal=progression.signal,
+        ),
+        # A required field, always populated -- including on the insufficient path, which is the
+        # response most likely to be quoted without its context.
+        disclaimer=INTERPRETATION_DISCLAIMER,
+        weight_trend=weight_trend,
+        progression_signal=progression,
+        training_volume=training_volume,
+        # ALL THREE resources: this response reads body measurements AND workouts AND exercise
+        # templates (the D-03 e1RM gate). It is only as fresh as the stalest of the three, and a
+        # stale template sync silently changes the progression signal with no error anywhere.
+        freshness=await build_freshness(
+            session, user_id=user_id, resources=FRESHNESS_RESOURCES_ALL
+        ),
+    )
