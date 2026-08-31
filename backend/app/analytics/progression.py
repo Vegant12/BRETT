@@ -33,8 +33,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.analytics.estimates import NoEstimateReason, estimate_1rm
-from app.analytics.rollup import QualifyingSetRow
+from app.analytics.metadata import (
+    FRESHNESS_RESOURCES_MUSCLE,
+    build_coverage,
+    build_freshness,
+)
+from app.analytics.rollup import QualifyingSetRow, qualifying_set_rows, resolve_window
+from app.analytics.schemas import ExerciseProgressionResult, ProgressionPoint
 
 # The leading slot of the comparison key: an ESTIMATED set always outranks an unestimated one,
 # whatever their magnitudes. `Decimal` rather than `int` so the whole key is one numeric type and
@@ -175,3 +183,81 @@ def best_set_per_day(
     # Returned UNSORTED on purpose: the caller decides the output order, and PROG-01 sorts by
     # local day while PROG-02 and PROG-03 group by template first.
     return bests
+
+
+async def get_exercise_progression(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    exercise_template_external_id: str,
+    start_day: dt.date,
+    end_day: dt.date,
+) -> ExerciseProgressionResult:
+    """PROG-01: weight, reps, sets, volume and a trusted estimated 1RM per local training day.
+
+    Takes the session positionally and everything else keyword-only, matching
+    ``app/db/repositories/``. ``user_id`` has no default: ASVS V4, the schema is multi-user-ready,
+    so forgetting it must be a ``TypeError`` and never a cross-tenant read a single-user suite
+    cannot see. The caller owns the transaction; nothing here writes.
+
+    The window is resolved WITHOUT week snapping. This follows ``frequency.py``, not
+    ``volume.py``: weekly volume widens outward because its buckets must be comparable to one
+    another, and a per-day series has no such requirement. Snapping would silently return days
+    the caller did not ask for.
+
+    ``freshness`` names BOTH ``workouts`` and ``exercise_templates``, not just workouts, because
+    ``exercise_type`` -- the D-03 e1RM gate -- comes from the templates table. A stale template
+    sync silently changes every eligibility decision in this response, with no error anywhere in
+    the stack.
+    """
+    window = await resolve_window(
+        session, user_id=user_id, start_day=start_day, end_day=end_day, snap_to_weeks=False
+    )
+    # ONE aggregate, folded once, narrowed to this exercise by a BOUND `IN` list (ASVS V5).
+    # Re-querying per figure defeats the reason the grain is this fine.
+    rows = await qualifying_set_rows(
+        session,
+        user_id=user_id,
+        window=window,
+        template_external_ids=[exercise_template_external_id],
+    )
+    bests = best_set_per_day(rows)
+
+    points = [
+        ProgressionPoint(
+            local_day=best.local_day,
+            workout_id=best.workout_id,
+            sets=best.sets,
+            total_reps=best.total_reps,
+            # None, never 0: "no set that day had both a weight and reps" is a different fact
+            # from "the day's volume was zero kilograms" -- the same distinction `volume.py`
+            # draws for tonnage, and the reason `volume_sets` is carried at all.
+            volume_kg=best.volume_kg if best.volume_sets else None,
+            volume_sets=best.volume_sets,
+            best_weight_kg=best.best_weight_kg,
+            best_reps=best.best_reps,
+            estimated_1rm_kg=best.best_e1rm_kg,
+            no_estimate_reason=best.no_estimate_reason,
+        )
+        # Ascending by local day. Deterministic ordering is a repo-wide rule, and for a series
+        # Claude reads chronologically it is also the only correct one.
+        for _, best in sorted(bests.items(), key=lambda item: item[0][1])
+    ]
+
+    return ExerciseProgressionResult(
+        exercise_template_external_id=exercise_template_external_id,
+        # Read off the rows rather than re-queried: `qualifying_set_rows` already carries the
+        # title and modality from its tenant-scoped template outerjoin, which is why
+        # `frequency._template_titles` is neither needed nor copied here.
+        title=next((row.title for row in rows), None),
+        exercise_type=next((row.exercise_type for row in rows), None),
+        window_start=window.start_day,
+        window_end=window.end_day,
+        points=points,
+        coverage=await build_coverage(
+            session, user_id=user_id, utc_start=window.utc_start, utc_end=window.utc_end
+        ),
+        freshness=await build_freshness(
+            session, user_id=user_id, resources=FRESHNESS_RESOURCES_MUSCLE
+        ),
+    )
