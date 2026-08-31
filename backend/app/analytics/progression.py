@@ -59,6 +59,8 @@ from app.analytics.metadata import (
 from app.analytics.rollup import QualifyingSetRow, qualifying_set_rows, resolve_window
 from app.analytics.schemas import (
     ExerciseProgressionResult,
+    ExerciseTrend,
+    ExerciseTrendsResult,
     ProgressionPoint,
     TrendVerdict,
 )
@@ -400,3 +402,81 @@ def classify_trend(
     if rate <= -TREND_STABLE_BAND_PERCENT_PER_WEEK:
         return TrendVerdict.DECLINING, rate
     return TrendVerdict.STABLE, rate
+
+
+async def get_exercise_trends(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    start_day: dt.date,
+    end_day: dt.date,
+    template_external_ids: Sequence[str] | None = None,
+) -> ExerciseTrendsResult:
+    """PROG-02: an improving / stable / declining / unclear verdict per tracked exercise.
+
+    PUBLIC rather than an internal of ``recomposition.py``, even though BODY-02 is currently its
+    only other consumer: Phase 6's MCP-02 lists exercise progression as a tool, and one
+    computation with two consumers beats two definitions of "improving".
+
+    Session positional, everything else keyword-only, ``user_id`` with no default (ASVS V4). The
+    window resolves WITHOUT week snapping so the caller's range is the range that is reported --
+    but note that the week OFFSETS inside it are still whole Monday-start weeks, because a
+    fortnight boundary that moves with the request would make two callers disagree about the same
+    training.
+
+    Every template with a hard set in the window is reported, INCLUDING the ``unclear`` ones.
+    Omitting them would silently shrink BODY-02's denominator and turn "we could not tell" into
+    "there was nothing there" -- and D-20 excludes `unclear` from its net score explicitly, which
+    it can only do if `unclear` is visible.
+    """
+    window = await resolve_window(
+        session, user_id=user_id, start_day=start_day, end_day=end_day, snap_to_weeks=False
+    )
+    rows = await qualifying_set_rows(
+        session,
+        user_id=user_id,
+        window=window,
+        template_external_ids=template_external_ids,
+    )
+    # ONE aggregate, folded once, through the SAME D-04 selection PROG-01 reports. A second
+    # "best set" rule here is how the series and the verdict would eventually disagree about
+    # whether the lifter got stronger.
+    bests = best_set_per_day(rows)
+    points_by_template = weekly_e1rm_points(bests, window_start=window.start_day)
+
+    # `titles.get(...)`, never `titles[...]`: a template that is not synced locally has no title
+    # and must not raise. Read off the rows -- `qualifying_set_rows` already carries them from its
+    # tenant-scoped outerjoin, so `frequency._template_titles` is neither needed nor copied.
+    titles = {row.template_external_id: row.title for row in rows}
+
+    exercises = []
+    # Sorted by a stated key, never dict-iteration order -- Phase 6 will diff these between runs.
+    for template_external_id in sorted(titles):
+        points = points_by_template.get(template_external_id, [])
+        verdict, rate = classify_trend(points)
+        exercises.append(
+            ExerciseTrend(
+                exercise_template_external_id=template_external_id,
+                title=titles.get(template_external_id),
+                verdict=verdict,
+                rate_percent_per_week=rate,
+                # Distinct weeks that produced an ESTIMATE, not distinct weeks trained. An
+                # exercise trained weekly at 15 reps has 12 training weeks and 0 usable points,
+                # and reporting 12 here would make `unclear` look like a bug.
+                weeks_with_data=len(points),
+            )
+        )
+
+    return ExerciseTrendsResult(
+        window_start=window.start_day,
+        window_end=window.end_day,
+        exercises=exercises,
+        coverage=await build_coverage(
+            session, user_id=user_id, utc_start=window.utc_start, utc_end=window.utc_end
+        ),
+        # BOTH resources: `exercise_type` is the D-03 e1RM gate and comes from the templates
+        # table, so a stale template sync silently changes every verdict in this response.
+        freshness=await build_freshness(
+            session, user_id=user_id, resources=FRESHNESS_RESOURCES_MUSCLE
+        ),
+    )
