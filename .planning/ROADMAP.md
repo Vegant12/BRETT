@@ -15,8 +15,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Backend Foundation** - FastAPI app, PostgreSQL, Alembic, configurable timezone, secret-safe logging, health endpoint
 - [x] **Phase 2: Deploy & Connector Auth Spike** - Prove a real Claude client can authenticate to a Cloud Run-hosted MCP endpoint before building on the assumption
-- [ ] **Phase 3: Hevy Integration & Normalization** - Idempotent sync of workouts, exercise templates, and body measurements into a canonical muscle-mapped schema
-- [ ] **Phase 4: Volume & Frequency Analytics** - Hard-set volume, per-muscle direct/indirect breakdown, training frequency, and the freshness/uncertainty envelope
+- [x] **Phase 3: Hevy Integration & Normalization** - Idempotent sync of workouts, exercise templates, and body measurements into a canonical muscle-mapped schema
+- [x] **Phase 4: Volume & Frequency Analytics** - Hard-set volume, per-muscle direct/indirect breakdown, training frequency, and the freshness/uncertainty envelope
 - [ ] **Phase 5: Progression, Records & Recomposition Analytics** - Progression trends, plateau detection, PRs, period comparison, weight trend, recomposition verdict
 - [ ] **Phase 6: MCP Tools** - Purpose-built, read-only, budgeted tools composing the analytics layer for Claude
 - [ ] **Phase 7: Production Hardening & Coaching Layer** - Full test coverage, rate limiting, backup/restore, secret rotation, and the coaching instructions document
@@ -39,6 +39,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 3. Day/week bucketing helpers place a workout timestamped near midnight UTC into the correct Asia/Jakarta local day, with the timezone read from user configuration rather than hard-coded
 4. Every timestamp is stored in UTC and converted only at calculation boundaries — enforced by a test, not by convention
 5. A seeded secret passed through config, logs, and error output never appears in any log line or response
+
 **Plans**: 5 plans
 
 Plans:
@@ -62,6 +63,7 @@ Plans:
 2. A Claude custom connector pointed at the deployed `/mcp` endpoint discovers a throwaway tool and successfully calls it from an actual Claude client (Desktop/Web/Mobile), not just a local test client
 3. An unauthenticated request to the MCP endpoint is rejected and an authenticated one succeeds, verified against the deployed URL
 4. The auth mechanism that actually works — static bearer header or a minimal OAuth 2.1 resource-server shim — is chosen and recorded in PROJECT.md Key Decisions, confirming or explicitly overturning the "bearer token, not OAuth" decision
+
 **Plans**: 8 plans
 
 Plans (listed in execution order):
@@ -89,6 +91,7 @@ Plans (listed in execution order):
 3. An injected mid-sync failure (network drop, malformed page, rate limit) leaves all previously-synced data intact and the sync resumable from where it left off
 4. Every synced exercise resolves to canonical muscle groups with direct/indirect distinction and a front/side/rear deltoid split, and a manual override changes the effective mapping while the original source mapping stays visible for audit
 5. Each data source reports a readable `last_synced_at`, and all Hevy request/response code lives only under `backend/app/integrations/hevy/`
+
 **Plans**: 12 plans
 
 Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
@@ -120,6 +123,7 @@ Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
 3. Training frequency per muscle group and per exercise reports sessions per week over a requested window
 4. Every analytics response carries freshness metadata (when the underlying data was last synced) and coverage/uncertainty metadata (sessions in window, insufficient-data flag)
 5. All calculations are verified against golden fixture workouts covering warm-ups, dropsets, supersets, and bodyweight exercises
+
 **Plans**: 9 plans
 
 Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
@@ -134,9 +138,9 @@ Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
 - [x] 04-09-PLAN.md — Wave 3: `test_analytics_rollup.py` — window guards and pure folds in the fast suite, the SQL aggregate against real Postgres (VOL-01, VOL-02, VOL-03)
 - [x] 04-08-PLAN.md — Wave 4: `get_muscle_group_volume` (VOL-02) with the override test that proves the resolver is used (VOL-02, DQ-01, DQ-02)
 
-*Plan 04-09 is numbered after 04-08 but runs a wave earlier: it was split out of 04-05 to keep that implementation plan inside its context budget, and it touches only `test_analytics_rollup.py`, so it runs in parallel with 04-06 and 04-07. 04-08 is wave 4 solely because it appends to `volume.py` and `test_analytics_volume.py`, which 04-06 creates in wave 3.*
+*Plan 04-09 is numbered after 04-08 but runs a wave earlier: it was split out of 04-05 to keep that implementation plan inside its context budget, and it touches only* `test_analytics_rollup.py`*, so it runs in parallel with 04-06 and 04-07. 04-08 is wave 4 solely because it appends to* `volume.py` *and* `test_analytics_volume.py`*, which 04-06 creates in wave 3.*
 
-*This phase adds **zero** dependencies to `pyproject.toml` and creates **no** migration. A proposed dependency or schema change is a signal the design drifted from CLAUDE.md's "SQL aggregates + plain Python".*
+*This phase adds **zero** dependencies to* `pyproject.toml` *and creates **no** migration. A proposed dependency or schema change is a signal the design drifted from CLAUDE.md's "SQL aggregates + plain Python".*
 
 ### Phase 5: Progression, Records & Recomposition Analytics
 
@@ -150,22 +154,8 @@ Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
 3. Personal records (max weight, max reps at a weight, estimated-1RM, volume, rep PR) are detected with their dates and exclude warm-up sets
 4. Two time periods can be compared with values normalized per week, so unequal-length windows do not produce misleading deltas
 5. Body weight trend (7/14/30-day rolling averages, weekly rate of change) and a recomposition status verdict are produced from synced measurements, degrading cleanly to insufficient-data and framed as decision support rather than a medical claim
-**Plans**: 10 plans
 
-Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
-
-- [ ] 05-01-PLAN.md — Wave 1: `analytics/estimates.py` — Epley with the D-02 rep gate and D-03 modality gate, plus the static no-float and no-Epley-in-SQL guards (PROG-01)
-- [ ] 05-02-PLAN.md — Wave 1: `rollup.qualifying_set_rows()` set-grain aggregate carrying title/modality, and `GoldenBuilder.body_measurement()` (PROG-01, PROG-04)
-- [ ] 05-03-PLAN.md — Wave 2: all 23 Phase 5 return types in `schemas.py`, plus `MeasurementCoverage`, the D-15 floors and body freshness in `metadata.py` (PROG-01..04, CMP-01, BODY-01, BODY-02)
-- [ ] 05-04-PLAN.md — Wave 3: `analytics/progression.py` — the D-04 `best_set_per_day` series and `get_exercise_progression` (PROG-01)
-- [ ] 05-05-PLAN.md — Wave 3: `analytics/records.py` — five PR types at set grain, D-08 dropset eligibility, D-09 earliest-date tie-break (PROG-04)
-- [ ] 05-06-PLAN.md — Wave 3: `analytics/bodyweight.py` — one 35-day fetch folded five ways, D-13..D-17, frozen-clock tests (BODY-01)
-- [ ] 05-07-PLAN.md — Wave 4: exact-Decimal OLS trend slope, the D-18 ±0.5%/week dead-band, `get_exercise_trends` (PROG-02)
-- [ ] 05-08-PLAN.md — Wave 4: `analytics/comparison.py` — counts-and-sums-only per-week normalization, levels never divided (CMP-01)
-- [ ] 05-09-PLAN.md — Wave 5: plateau streak scan with the D-07 2% tolerance, D-07a skip, seeded historical best and D-19's 12-week bounded lookback (PROG-03)
-- [ ] 05-10-PLAN.md — Wave 5: `analytics/recomposition.py` — D-20 net-progression score and the 5x3 label matrix, plus the package docstring refresh (BODY-02)
-
-*This phase adds **zero** dependencies to `pyproject.toml` and creates **no** migration, exactly as Phase 4 did. A proposed dependency or schema change is a signal the design drifted from CLAUDE.md's "SQL aggregates + `Decimal`/Pydantic". Plans 05-01 and 05-02 are the Wave 0 equivalents: they ship the one pure formula every other number depends on, the one set-grain query every progression and records fold reads, and the static guards that keep the Epley integer-division trap unreachable.*
+**Plans**: TBD
 
 ### Phase 6: MCP Tools
 
@@ -179,9 +169,8 @@ Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
 3. Every tool response is compact structured JSON within an enforced size cap — no raw table access, no unbounded result sets, no arithmetic pushed onto the model
 4. No tool can write, modify, or delete any data; every tool is annotated read-only and a write attempt has no surface to reach
 5. No tool response or log line contains an API key, database credential, or internal token, verified by test
+
 **Plans**: TBD
-
-
 
 ### Phase 7: Production Hardening & Coaching Layer
 
@@ -194,9 +183,8 @@ Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
 2. The deployed connector serves the real tool set with finalized auth and rate limiting applied ahead of handler work; unauthenticated and over-limit requests are rejected without leaking detail
 3. A database backup restores into a fresh instance with no data loss, and a secret can be rotated without breaking the live connector
 4. The coaching system-prompt/instructions document exists, and with it loaded Claude answers "Am I progressing?" and "Which muscles are undertrained?" from real synced data, correctly flagging stale or sparse data when present
+
 **Plans**: TBD
-
-
 
 ## Progress
 
@@ -210,7 +198,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 2. Deploy & Connector Auth Spike                  | 4/8            | Executing   | -         |
 | 3. Hevy Integration & Normalization               | 0/12           | Planned     | -         |
 | 4. Volume & Frequency Analytics                   | 0/9            | Planned     | -         |
-| 5. Progression, Records & Recomposition Analytics | 0/10           | Planned     | -         |
+| 5. Progression, Records & Recomposition Analytics | 0/TBD          | Not started | -         |
 | 6. MCP Tools                                      | 0/TBD          | Not started | -         |
 | 7. Production Hardening & Coaching Layer          | 0/TBD          | Not started | -         |
 
