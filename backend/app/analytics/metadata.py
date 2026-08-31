@@ -32,15 +32,18 @@ keyword-only, matching `app/db/repositories/`.
 
 import datetime as dt
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analytics.schemas import CoverageMetadata, FreshnessMetadata
+from app.analytics.schemas import CoverageMetadata, FreshnessMetadata, MeasurementCoverage
+from app.db.models.body import BodyMeasurement
 from app.db.models.workout import Workout
 from app.db.repositories.sync_state import (
     PROVIDER_HEVY,
+    RESOURCE_BODY_MEASUREMENTS,
     RESOURCE_EXERCISE_TEMPLATES,
     RESOURCE_WORKOUTS,
     get_sync_state,
@@ -57,6 +60,28 @@ INSUFFICIENT_DATA_SESSION_THRESHOLD = 2
 # template sync silently changes every per-muscle figure with no error anywhere in the stack.
 FRESHNESS_RESOURCES_WORKOUTS: tuple[str, ...] = (RESOURCE_WORKOUTS,)
 FRESHNESS_RESOURCES_MUSCLE: tuple[str, ...] = (RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES)
+FRESHNESS_RESOURCES_BODY: tuple[str, ...] = (RESOURCE_BODY_MEASUREMENTS,)
+# BODY-02 reads BOTH sides -- a body-weight trend and a training-progression signal -- so its
+# answer is only as fresh as the STALEST of the three. A stale template sync silently changes
+# every e1RM eligibility decision (exercise_type is the D-03 gate), which changes the progression
+# signal, with no error anywhere in the stack.
+FRESHNESS_RESOURCES_ALL: tuple[str, ...] = (
+    RESOURCE_WORKOUTS,
+    RESOURCE_EXERCISE_TEMPLATES,
+    RESOURCE_BODY_MEASUREMENTS,
+)
+
+# D-15. Keys are the window length in DAYS; values are the minimum number of distinct measured
+# days that window needs before its average is believable. Recalibrated from
+# `INSUFFICIENT_DATA_SESSION_THRESHOLD`'s per-SESSION cadence to a per-DAY one -- a weigh-in is
+# not a training session and two of them do not carry the same weight over a month as two
+# workouts do over a week.
+#
+# Why these three numbers and not others: each is a little under half the window, so an average
+# always rests on a plurality of the days it claims to cover. Independent by design -- a 30-day
+# average can be trustworthy while the 7-day one is not, which is exactly the case a single
+# response-level flag cannot express.
+MEASURED_DAY_FLOORS: Mapping[int, int] = MappingProxyType({7: 3, 14: 5, 30: 10})
 
 
 def is_insufficient(sessions: int) -> bool:
@@ -152,3 +177,57 @@ async def build_coverage(
         insufficient_data=is_insufficient(sessions),
         earliest_data_at=await earliest_workout_at(session, user_id=user_id),
     )
+
+
+def is_measurement_insufficient(*, window_days: int, measured_days: int) -> bool:
+    """DQ-02 / D-15: is this specific window's average believable?
+
+    An unsupported window length is a caller bug, not a permissive default -- raising beats
+    silently accepting a window whose floor nobody chose. The message names the failure and
+    carries no value, because it will be logged (FOUND-05).
+    """
+    floor = MEASURED_DAY_FLOORS.get(window_days)
+    if floor is None:
+        raise ValueError("unsupported measurement window length")
+    return measured_days < floor
+
+
+def build_measurement_coverage(
+    *, window_days: int, measured_days: int, earliest_measurement_at: dt.date | None
+) -> MeasurementCoverage:
+    """DQ-02 for a day-grained window. PURE and synchronous, unlike ``build_coverage``.
+
+    The divergence from its session-grained sibling is deliberate and is the one place the copy
+    breaks. ``build_coverage`` issues its own count query because a workout count needs one;
+    BODY-01 fetches all 35 candidate rows in a SINGLE query and folds them five ways, so calling
+    an async builder per window would turn one query into five for no new information. Keeping
+    this pure also puts D-15's floors in the fast suite instead of behind Docker.
+
+    Note the argument type: LOCAL DATES and counts derived from them, never UTC instants.
+    ``measured_on`` is a calendar ``Date`` column, so threading ``utc_start``/``utc_end`` through
+    here by analogy with ``build_coverage`` would be wrong.
+    """
+    return MeasurementCoverage(
+        window_days=window_days,
+        measured_days_in_window=measured_days,
+        insufficient_data=is_measurement_insufficient(
+            window_days=window_days, measured_days=measured_days
+        ),
+        earliest_measurement_at=earliest_measurement_at,
+    )
+
+
+async def earliest_measurement_at(session: AsyncSession, *, user_id: uuid.UUID) -> dt.date | None:
+    """The user's oldest synced weigh-in, across ALL time -- deliberately not window-scoped.
+
+    The body-weight analogue of ``earliest_workout_at`` and for the same reason: it is what
+    separates "you did not weigh in during that window" from "your synced history does not reach
+    back that far". Scoping it to the window would make the two identical and the field pointless.
+
+    ``user_id`` is keyword-only with no default (ASVS V4): the schema is multi-user-ready, so an
+    unscoped read is a cross-tenant disclosure a single-user suite cannot see.
+    """
+    result: dt.date | None = await session.scalar(
+        select(func.min(BodyMeasurement.measured_on)).where(BodyMeasurement.user_id == user_id)
+    )
+    return result
