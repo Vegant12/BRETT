@@ -62,17 +62,25 @@ from app.analytics.metadata import (
     FRESHNESS_RESOURCES_MUSCLE,
     build_coverage,
     build_freshness,
+    earliest_workout_at,
 )
-from app.analytics.rollup import QualifyingSetRow, qualifying_set_rows, resolve_window
+from app.analytics.rollup import (
+    MAX_ANALYTICS_WINDOW_DAYS,
+    QualifyingSetRow,
+    qualifying_set_rows,
+    resolve_window,
+)
 from app.analytics.schemas import (
     ExerciseProgressionResult,
     ExerciseTrend,
     ExerciseTrendsResult,
     PlateauConfidence,
+    PlateauReport,
+    PlateauResult,
     ProgressionPoint,
     TrendVerdict,
 )
-from app.core.time import snap_local_week_range
+from app.core.time import local_day, snap_local_week_range, utc_now
 
 # The leading slot of the comparison key: an ESTIMATED set always outranks an unestimated one,
 # whatever their magnitudes. `Decimal` rather than `int` so the whole key is one numeric type and
@@ -345,10 +353,12 @@ def weekly_e1rm_points(
     """
     window_monday = snap_local_week_range(window_start, window_start)[0]
     points: dict[str, dict[int, Decimal]] = {}
-    for (template_external_id, local_day), best in bests.items():
+    # `day`, not `local_day`: PROG-03 imports `app.core.time.local_day` into this module, and a
+    # loop variable of that name would shadow the function (Ruff F402).
+    for (template_external_id, day), best in bests.items():
         if best.best_e1rm_kg is None:
             continue
-        offset = (snap_local_week_range(local_day, local_day)[0] - window_monday).days // 7
+        offset = (snap_local_week_range(day, day)[0] - window_monday).days // 7
         week_bests = points.setdefault(template_external_id, {})
         current = week_bests.get(offset)
         if current is None or best.best_e1rm_kg > current:
@@ -626,4 +636,144 @@ def scan_plateau(
         recent_performance_kg=recent,
         historical_best_kg=running_best,
         confidence=_plateau_confidence(qualifying),
+    )
+
+
+async def get_plateaus(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    lookback_weeks: int = DEFAULT_PLATEAU_LOOKBACK_WEEKS,
+    template_external_ids: Sequence[str] | None = None,
+) -> PlateauReport:
+    """PROG-03: plateau detection over a bounded, caller-configurable multi-week window.
+
+    Takes ``lookback_weeks`` rather than a start/end pair because a plateau is always measured
+    BACK FROM TODAY: "you have not PR'd in 40 days" is only meaningful relative to now, and a
+    caller-supplied end date would let a stale window report a duration that stopped accruing.
+    PROG-03's requirement text calls for a "configurable multi-week window" and for the window to
+    be returned alongside the result -- both fields are echoed into every ``PlateauResult``.
+
+    Session positional, everything else keyword-only, ``user_id`` with no default (ASVS V4). The
+    caller owns the transaction; nothing here writes.
+    """
+    if lookback_weeks <= 0:
+        # A caller bug, not an empty window. The message names the failure and carries no value,
+        # because it will be logged (FOUND-05).
+        raise ValueError("lookback_weeks must be positive")
+
+    # Same probe idiom as `bodyweight.get_body_weight_trend`, and for the same reason:
+    # `resolve_window` is the only sanctioned reader of `users.timezone`, but the anchor day
+    # cannot be known until the timezone is. The probe window is never queried against.
+    probe_day = local_day(utc_now(), "UTC")
+    tz = (
+        await resolve_window(
+            session,
+            user_id=user_id,
+            start_day=probe_day,
+            end_day=probe_day,
+            snap_to_weeks=False,
+        )
+    ).tz
+    lookback_end = local_day(utc_now(), tz)
+    # INCLUSIVE of both ends, so twelve weeks is exactly 84 days: `[end - 83, end]`. Subtracting a
+    # bare `7 * lookback_weeks` would return an 85-day window and call it twelve weeks.
+    lookback_start = lookback_end - dt.timedelta(days=7 * lookback_weeks - 1)
+
+    # The running best must be SEEDED from history strictly before the lookback, or truncating
+    # the window manufactures a fake improvement on the first in-window session. One query
+    # covering [history_start, lookback_end], split in Python -- not two queries, and not a second
+    # aggregate with its own copy of the warm-up rule.
+    earliest = await earliest_workout_at(session, user_id=user_id)
+    history_start = lookback_start if earliest is None else local_day(earliest, tz)
+    # `build_window` refuses a span above MAX_ANALYTICS_WINDOW_DAYS. Clamping here rather than
+    # letting it raise means a user with more than five years of history gets a correctly seeded
+    # plateau report instead of an error -- the seed loses only history older than five years,
+    # which cannot be anyone's current ceiling.
+    clamp_floor = lookback_end - dt.timedelta(days=MAX_ANALYTICS_WINDOW_DAYS - 1)
+    history_start = max(min(history_start, lookback_start), clamp_floor)
+
+    window = await resolve_window(
+        session,
+        user_id=user_id,
+        start_day=history_start,
+        end_day=lookback_end,
+        snap_to_weeks=False,
+    )
+    rows = await qualifying_set_rows(
+        session,
+        user_id=user_id,
+        window=window,
+        template_external_ids=template_external_ids,
+    )
+    # The SAME D-04 selection PROG-01 and PROG-02 use. A second "best set" rule here is how the
+    # plateau verdict and the progression series would disagree about the same day.
+    bests = best_set_per_day(rows)
+
+    seeds: dict[str, Decimal] = {}
+    in_window: dict[str, list[SessionBest]] = {}
+    titles: dict[str, str | None] = {}
+    # Ascending by local day, so each template's in-window series arrives in the order
+    # `scan_plateau` documents as its precondition. Python's sort is stable, so days that tie
+    # across templates keep the SQL ordering they were folded in.
+    for (template_external_id, day), best in sorted(bests.items(), key=lambda item: item[0][1]):
+        if day < lookback_start:
+            if best.best_e1rm_kg is not None:
+                current = seeds.get(template_external_id)
+                if current is None or best.best_e1rm_kg > current:
+                    seeds[template_external_id] = best.best_e1rm_kg
+            continue
+        # Only templates trained INSIDE the lookback are reported. An exercise last trained four
+        # months ago is not plateaued, it is abandoned -- that is the whole point of D-19's bound.
+        in_window.setdefault(template_external_id, []).append(best)
+        titles[template_external_id] = best.title
+
+    threshold_percent = (PLATEAU_IMPROVEMENT_TOLERANCE * Decimal(100)).quantize(_PERCENT_QUANTUM)
+    exercises = []
+    # Sorted by a stated key, never dict-iteration order -- Phase 6 will diff these between runs.
+    for template_external_id, series in sorted(in_window.items()):
+        scan = scan_plateau(
+            series,
+            historical_best=seeds.get(template_external_id),
+            as_of=lookback_end,
+        )
+        exercises.append(
+            PlateauResult(
+                exercise_template_external_id=template_external_id,
+                title=titles.get(template_external_id),
+                plateaued=scan.plateaued,
+                # None, not 0, when not plateaued: "we did not call this a plateau" is a different
+                # fact from "the plateau has lasted zero days".
+                plateau_duration_days=(
+                    None
+                    if not scan.plateaued or scan.streak_start is None
+                    else (lookback_end - scan.streak_start).days
+                ),
+                qualifying_sessions_in_streak=scan.qualifying_sessions,
+                recent_performance_kg=scan.recent_performance_kg,
+                historical_best_kg=scan.historical_best_kg,
+                confidence=scan.confidence,
+                # PROG-03's requirement text: return the window AND the threshold used, alongside
+                # the result. All five echoed fields exist for that sentence.
+                threshold_percent=threshold_percent,
+                min_sessions=PLATEAU_MIN_QUALIFYING_SESSIONS,
+                min_elapsed_days=PLATEAU_MIN_ELAPSED_DAYS,
+                lookback_start=lookback_start,
+                lookback_end=lookback_end,
+            )
+        )
+
+    return PlateauReport(
+        lookback_weeks=lookback_weeks,
+        lookback_start=lookback_start,
+        lookback_end=lookback_end,
+        exercises=exercises,
+        coverage=await build_coverage(
+            session, user_id=user_id, utc_start=window.utc_start, utc_end=window.utc_end
+        ),
+        # BOTH resources: `exercise_type` is the D-03 e1RM gate and comes from the templates
+        # table, so a stale template sync silently changes every streak in this response.
+        freshness=await build_freshness(
+            session, user_id=user_id, resources=FRESHNESS_RESOURCES_MUSCLE
+        ),
     )
