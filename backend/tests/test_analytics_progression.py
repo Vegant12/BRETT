@@ -48,10 +48,12 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 import pytest
+import time_machine
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics.estimates import NoEstimateReason
 from app.analytics.progression import (
+    DEFAULT_PLATEAU_LOOKBACK_WEEKS,
     MIN_TREND_WEEKS,
     PLATEAU_IMPROVEMENT_TOLERANCE,
     PLATEAU_MIN_ELAPSED_DAYS,
@@ -62,6 +64,7 @@ from app.analytics.progression import (
     classify_trend,
     get_exercise_progression,
     get_exercise_trends,
+    get_plateaus,
     scan_plateau,
     weekly_e1rm_points,
 )
@@ -144,6 +147,20 @@ _PLATEAU_NOW = "2026-08-30T02:00:00+00:00"
 _PLATEAU_END = dt.date(2026, 8, 30)
 _PLATEAU_START_12W = dt.date(2026, 6, 8)
 _PLATEAU_START_24W = dt.date(2026, 3, 16)
+
+# The four weekly sessions every plateau fixture puts INSIDE the 12-week lookback. The streak
+# therefore starts on 2026-08-03, which is 27 days before `_PLATEAU_END` -- comfortably past
+# D-06's 21-day floor, so these fixtures never sit on the boundary they are not testing.
+_PLATEAU_WEEKS = (_DAY_1, _DAY_2, _DAY_3, _DAY_4)
+_PLATEAU_DURATION_DAYS = 27
+
+# Strictly before BOTH `_PLATEAU_START_12W` and `_PLATEAU_START_24W`, which is what lets the
+# seeding test widen the lookback without pulling a new session into the window. A session between
+# the two starts would legitimately lengthen the streak and prove nothing about the seed.
+_PRE_LOOKBACK = dt.datetime(2026, 3, 1, 2, 0, tzinfo=dt.UTC)
+
+# A fifth in-window session, five days after the last weekly one, for the cleared-streak case.
+_PR_DAY = dt.datetime(2026, 8, 29, 2, 0, tzinfo=dt.UTC)
 
 # Two workout ids on ONE local day. Hand-built rather than random so a failure message names a
 # stable value, and distinct so "which workout did the selected set come from" is answerable.
@@ -1392,3 +1409,332 @@ def test_duration_is_measured_to_as_of_not_the_last_session() -> None:
         "the elapsed span was measured to the last session instead of to as_of; the streak has "
         "not been broken in the twenty days since"
     )
+
+
+# ---------------------------------------------------------------------------
+# PROG-03's public function. Container-backed, and every one of these freezes the clock:
+# `get_plateaus` anchors its window on the user's local TODAY, so an unfrozen test rots within
+# days and the failure reads as an algorithm bug rather than as a stale fixture.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_plateau_sessions(
+    golden_workout: GoldenBuilder,
+    *,
+    sessions: Sequence[tuple[dt.datetime, Decimal]],
+    template_external_id: str = _PLATEAU,
+    reps: int = 5,
+    user_id: uuid.UUID = DEFAULT_USER_ID,
+) -> None:
+    """One workout per ``(instant, weight)`` pair, one working set each.
+
+    Five reps throughout, so every set clears D-02's rep gate and the only thing that varies
+    between fixtures is the load -- and therefore the estimate the streak is scanned over.
+    """
+    for start_time, weight in sessions:
+        await golden_workout.workout(
+            start_time=start_time,
+            exercises=[
+                _bench_exercise(
+                    GoldenSet(weight_kg=weight, reps=reps),
+                    template_external_id=template_external_id,
+                )
+            ],
+            user_id=user_id,
+        )
+
+
+def _flat_weeks(weight: str) -> list[tuple[dt.datetime, Decimal]]:
+    """The four in-window weekly sessions, all at one load -- the plateau shape itself."""
+    return [(week, Decimal(weight)) for week in _PLATEAU_WEEKS]
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_plateaued_exercise_reports_window_and_threshold(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """PROG-03's requirement text: the window and the threshold come back WITH the result.
+
+    Four weekly sessions at 100 kg x 5 (e1RM 116.667) under a 105 kg x 5 ceiling (122.500) set
+    before the lookback. All five echoed fields are asserted, because a verdict whose window and
+    tolerance are not on the response is a number Claude cannot qualify.
+    """
+    await golden_workout.template(external_id=_PLATEAU, title="Plateau Press")
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[(_PRE_LOOKBACK, Decimal("105.000")), *_flat_weeks("100.000")],
+    )
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID)
+
+    assert result.lookback_weeks == DEFAULT_PLATEAU_LOOKBACK_WEEKS == 12
+    assert (result.lookback_start, result.lookback_end) == (_PLATEAU_START_12W, _PLATEAU_END)
+    assert len(result.exercises) == 1
+
+    row = result.exercises[0]
+    assert row.exercise_template_external_id == _PLATEAU
+    assert row.title == "Plateau Press"
+    assert row.plateaued is True
+    assert row.qualifying_sessions_in_streak == 4
+    assert row.plateau_duration_days == _PLATEAU_DURATION_DAYS
+    assert row.confidence is PlateauConfidence.LOW
+    assert row.recent_performance_kg == Decimal("116.667")
+    assert row.historical_best_kg == Decimal("122.500"), (
+        "the pre-lookback 105 kg session is the ceiling this streak has not beaten; a "
+        "window-scoped maximum reports 116.667 and makes a detrained exercise look like one "
+        "sitting at its peak"
+    )
+    # The five echoed fields, asserted as literals rather than against the constants they came
+    # from -- a wrong constant would otherwise agree with itself.
+    assert row.threshold_percent == Decimal("2.00")
+    assert row.min_sessions == 4
+    assert row.min_elapsed_days == 21
+    assert (row.lookback_start, row.lookback_end) == (_PLATEAU_START_12W, _PLATEAU_END)
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_historical_best_is_seeded_from_before_the_lookback(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """THE load-bearing PROG-03 test: widening the lookback must not move the streak start.
+
+    The in-window loads ESCALATE -- 90, 95, 96, 97 kg, i.e. 105.000, 110.833, 112.000, 113.167 --
+    so the second session beats the first by more than 2%. Seeded from the 120 kg session that
+    predates BOTH lookbacks (140.000), nothing in the window comes close to breaking and the
+    streak runs the full four sessions. Seeded from None, the first session sets the bar at
+    105.000 and the second manufactures a break at the window edge, leaving a three-session
+    streak twenty days long -- below D-06's calendar floor, so ``plateau_duration_days`` collapses
+    to ``None``. A flat fixture cannot tell the two apart.
+
+    The pre-lookback session sits before the 24-week start as well, so widening the window adds
+    no new sessions and the two answers must agree exactly.
+    """
+    await golden_workout.template(external_id=_PLATEAU, title="Plateau Press")
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[
+            (_PRE_LOOKBACK, Decimal("120.000")),
+            (_DAY_1, Decimal("90.000")),
+            (_DAY_2, Decimal("95.000")),
+            (_DAY_3, Decimal("96.000")),
+            (_DAY_4, Decimal("97.000")),
+        ],
+    )
+
+    narrow = await get_plateaus(session, user_id=DEFAULT_USER_ID, lookback_weeks=12)
+    wide = await get_plateaus(session, user_id=DEFAULT_USER_ID, lookback_weeks=24)
+
+    assert narrow.lookback_start == _PLATEAU_START_12W
+    assert wide.lookback_start == _PLATEAU_START_24W
+    narrow_row, wide_row = narrow.exercises[0], wide.exercises[0]
+
+    assert narrow_row.plateau_duration_days == _PLATEAU_DURATION_DAYS, (
+        "the streak start moved when the lookback widened but the training did not change -- the "
+        "running best was seeded from None"
+    )
+    assert wide_row.plateau_duration_days == narrow_row.plateau_duration_days
+    assert wide_row.qualifying_sessions_in_streak == narrow_row.qualifying_sessions_in_streak == 4
+    assert wide_row.historical_best_kg == narrow_row.historical_best_kg == Decimal("140.000")
+    # 105.000 + 110.833 + 112.000 + 113.167 = 441.000, over four sessions.
+    assert narrow_row.recent_performance_kg == Decimal("110.250")
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_abandoned_exercise_is_not_reported(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-19's bound: only templates trained INSIDE the lookback are reported.
+
+    The abandoned template's only session predates the window by nearly six months and it holds
+    the account's heaviest load, so an unbounded scan would rank it as the most severe plateau in
+    the response.
+    """
+    await golden_workout.template(external_id=_PLATEAU, title="Plateau Press")
+    await golden_workout.template(external_id=_ABANDONED, title="Abandoned Pushdown")
+    await _seed_plateau_sessions(golden_workout, sessions=_flat_weeks("100.000"))
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[(_PRE_LOOKBACK, Decimal("140.000"))],
+        template_external_id=_ABANDONED,
+    )
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID)
+
+    reported = [row.exercise_template_external_id for row in result.exercises]
+    assert _ABANDONED not in reported, (
+        "unbounded, the scan reports 'plateaued 402 days' for an exercise last trained three "
+        "months ago -- literally true and useless as coaching"
+    )
+    # Guard against a vacuous pass: the in-window template really is reported.
+    assert reported == [_PLATEAU]
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_a_recent_pr_clears_the_plateau(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """A session past the tolerance band restarts the clock FROM itself.
+
+    Four flat sessions at 116.667 set the bar; 103 kg x 5 is 120.167, which clears
+    116.667 x 1.02 = 119.000. The streak collapses to that one session, so the exercise is no
+    longer plateaued at all.
+    """
+    await golden_workout.template(external_id=_PLATEAU, title="Plateau Press")
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[*_flat_weeks("100.000"), (_PR_DAY, Decimal("103.000"))],
+    )
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID)
+
+    row = result.exercises[0]
+    assert row.plateaued is False
+    assert row.qualifying_sessions_in_streak == 1, (
+        "the PR did not restart the streak; a session above the 2% band is the most recent "
+        "evidence of progress and the clock runs from it"
+    )
+    assert row.plateau_duration_days is None
+    assert row.historical_best_kg == Decimal("120.167")
+    assert row.recent_performance_kg == Decimal("120.167")
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_not_plateaued_reports_null_duration(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """``None``, never ``0``: "we did not call this a plateau" is not "it has lasted zero days".
+
+    Two exercises in one response so the invariant is checked on both sides at once, and so the
+    stated sort order is pinned by ids whose alphabetical order differs from their insertion
+    order.
+    """
+    await golden_workout.template(external_id=_TREND, title="Two Session Press")
+    await golden_workout.template(external_id=_PLATEAU, title="Plateau Press")
+    await _seed_plateau_sessions(golden_workout, sessions=_flat_weeks("100.000"))
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[(_DAY_1, Decimal("80.000")), (_DAY_2, Decimal("80.000"))],
+        template_external_id=_TREND,
+    )
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID)
+
+    reported = [row.exercise_template_external_id for row in result.exercises]
+    assert reported == [_PLATEAU, _TREND], (
+        "the response fell through to dict-iteration order; Phase 6 will diff these between runs"
+    )
+    by_id = {row.exercise_template_external_id: row for row in result.exercises}
+
+    assert by_id[_PLATEAU].plateaued is True
+    assert by_id[_PLATEAU].plateau_duration_days == _PLATEAU_DURATION_DAYS
+    assert by_id[_TREND].plateaued is False
+    assert by_id[_TREND].qualifying_sessions_in_streak == 2
+
+    for row in result.exercises:
+        assert (row.plateau_duration_days is None) is (not row.plateaued), (
+            "a duration of 0 for a non-plateaued exercise reads as 'plateaued since today'"
+        )
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_lookback_weeks_must_be_positive(session: AsyncSession) -> None:
+    """T-05-67 / T-05-68: a caller bug RAISES, and the message carries no value.
+
+    A zero-week window would return an empty ``exercises`` list, which reads as "nothing is
+    plateaued" rather than as a bug. The message is asserted digit-free because it will be logged
+    (FOUND-05) -- no lookback value, no date, no weight and no user id may reach a log line.
+    """
+    for weeks in (0, -1):
+        with pytest.raises(ValueError) as excinfo:
+            await get_plateaus(session, user_id=DEFAULT_USER_ID, lookback_weeks=weeks)
+
+        message = str(excinfo.value)
+        assert message == "lookback_weeks must be positive"
+        assert not any(char.isdigit() for char in message), (
+            "the rejected value was interpolated into a message that will be logged"
+        )
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_second_users_sessions_do_not_break_a_streak(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """ASVS V4 / T-05-69: a leaked set does not add a row here, it CLEARS a plateau.
+
+    Both users train the SAME external id -- Hevy's built-in template ids are global. This user is
+    flat at 100 kg for four weeks; the other hits 200 kg x 5 (233.333) on the last of them. A
+    missing tenant predicate folds both into one (template, local day) entry, the day's best
+    becomes 233.333, and the streak breaks on its final session -- a wrong coaching verdict rather
+    than merely an extra row.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_SHARED, title="Mine")
+    await golden_workout.template(
+        external_id=_SHARED, title="Theirs", user_id=ANALYTICS_SECOND_USER_ID
+    )
+    await _seed_plateau_sessions(
+        golden_workout, sessions=_flat_weeks("100.000"), template_external_id=_SHARED
+    )
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[(_DAY_4, Decimal("200.000"))],
+        template_external_id=_SHARED,
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID)
+
+    # Guard against a vacuous pass: this user really did train, and the row is theirs.
+    assert len(result.exercises) == 1
+    row = result.exercises[0]
+    assert row.title == "Mine"
+    assert row.plateaued is True, "another user's PR broke this user's streak (ASVS V4)"
+    assert row.qualifying_sessions_in_streak == 4
+    assert row.historical_best_kg == Decimal("116.667")
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_plateau_freshness_names_both_resources(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """DQ-01: a stale template sync silently changes every streak in the response.
+
+    ``exercise_type`` is the D-03 e1RM gate and comes from the templates table. Written against
+    the second user because ``sync_state`` rows for the default user are the Hevy sync suite's
+    territory and the container is session-scoped and shared.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_PLATEAU, user_id=ANALYTICS_SECOND_USER_ID)
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[(_DAY_1, Decimal("100.000"))],
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+    for resource, synced_at in (
+        (RESOURCE_WORKOUTS, _SYNCED_WORKOUTS_AT),
+        (RESOURCE_EXERCISE_TEMPLATES, _SYNCED_TEMPLATES_AT),
+    ):
+        await complete_sync(
+            session,
+            user_id=ANALYTICS_SECOND_USER_ID,
+            provider=PROVIDER_HEVY,
+            resource=resource,
+            last_synced_at=synced_at,
+        )
+
+    result = await get_plateaus(session, user_id=ANALYTICS_SECOND_USER_ID)
+
+    assert set(result.freshness.resources) == {RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES}
+    assert result.freshness.resources == {
+        RESOURCE_WORKOUTS: _SYNCED_WORKOUTS_AT,
+        RESOURCE_EXERCISE_TEMPLATES: _SYNCED_TEMPLATES_AT,
+    }
+    assert result.coverage.sessions_in_window == 1
