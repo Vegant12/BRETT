@@ -30,8 +30,8 @@ from app.analytics.recomposition import (
     WEIGHT_GAIN_TOO_FAST_PERCENT_PER_WEEK,
     WEIGHT_LOSS_TOO_FAST_PERCENT_PER_WEEK,
     WEIGHT_STABLE_BAND_PERCENT_PER_WEEK,
-    _WeightBucket,
     _weight_bucket,
+    _WeightBucket,
     aggregate_progression,
     classify_recomposition,
 )
@@ -140,7 +140,10 @@ def test_full_label_matrix() -> None:
     assert set(produced.values()) <= set(RecompositionStatus), (
         "an eighth status is reachable; blueprint 26's enum is the contract Phase 6 codes against"
     )
-    assert {pair for pair, status in produced.items() if status is _RS.LIKELY_RECOMP_PROGRESSING} == {
+    recomp_pairs = {
+        pair for pair, status in produced.items() if status is _RS.LIKELY_RECOMP_PROGRESSING
+    }
+    assert recomp_pairs == {
         (_WB.STABLE, _PS.POSITIVE),
         (_WB.LOSING, _PS.POSITIVE),
     }, (
@@ -151,9 +154,10 @@ def test_full_label_matrix() -> None:
 
 def test_gain_threshold_both_sides() -> None:
     """D-11, from each side. One side alone is satisfiable by a constant."""
-    assert classify_recomposition(
-        rate_percent_per_week=Decimal("0.26"), signal=_PS.NEUTRAL
-    ) is _RS.WEIGHT_GAIN_TOO_FAST
+    assert (
+        classify_recomposition(rate_percent_per_week=Decimal("0.26"), signal=_PS.NEUTRAL)
+        is _RS.WEIGHT_GAIN_TOO_FAST
+    )
     for rate in (Decimal("0.25"), Decimal("0.24")):
         assert classify_recomposition(rate_percent_per_week=rate, signal=_PS.NEUTRAL) is (
             _RS.LIKELY_MUSCLE_GAIN
@@ -162,9 +166,10 @@ def test_gain_threshold_both_sides() -> None:
 
 def test_loss_threshold_both_sides() -> None:
     """D-12, from each side. Exactly -1.00%/week is still the losing row."""
-    assert classify_recomposition(
-        rate_percent_per_week=Decimal("-1.01"), signal=_PS.POSITIVE
-    ) is _RS.WEIGHT_LOSS_TOO_FAST
+    assert (
+        classify_recomposition(rate_percent_per_week=Decimal("-1.01"), signal=_PS.POSITIVE)
+        is _RS.WEIGHT_LOSS_TOO_FAST
+    )
     for rate in (Decimal("-1.00"), Decimal("-0.99")):
         assert classify_recomposition(rate_percent_per_week=rate, signal=_PS.POSITIVE) is (
             _RS.LIKELY_RECOMP_PROGRESSING
