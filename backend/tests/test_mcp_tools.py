@@ -58,6 +58,57 @@ from tests.conftest import DEFAULT_USER_ID, GoldenBuilder, GoldenExercise, Golde
 # connection fails immediately rather than hanging on a routable-but-silent host.
 DEAD_DB_URL = "postgresql+asyncpg://nobody:nopass@127.0.0.1:1/nodb"
 
+# Every string that must not appear in ANY tool result. The first four are `DEAD_DB_URL`'s own
+# components -- user, password, host and database -- because an asyncpg connection error carries
+# the whole DSN. The rest are how a driver, an ORM or the interpreter names ITSELF, which is what
+# an escaped exception message would carry even if the DSN had been stripped out of it.
+LEAK_MARKERS = (
+    "nobody",
+    "nopass",
+    "127.0.0.1",
+    "nodb",
+    "asyncpg",
+    "Traceback",
+    "psycopg",
+    "ConnectionRefused",
+    "sqlalchemy",
+)
+
+# The minimal VALID call for every registered tool: `{}` for the eight that take none, a sentinel
+# name for the two that resolve by title, a sentinel id for the detail tool, and four dates for
+# the comparison tool.
+#
+# The comparison dates are deliberately VALID and in forward order. `fitness_compare_periods`
+# checks its range BEFORE opening a session (T-06-05), so a reversed or over-long pair would
+# return `data_available=False` without ever touching the database -- and the leak test below
+# would then be asserting that a tool which never ran leaked nothing, which is true and worthless.
+# Fixed literals rather than clock-relative dates because nothing here depends on "now"; only the
+# ordering and the span do.
+#
+# Exported rather than private: `test_secret_redaction.py` drives the same thirteen calls against
+# a HEALTHY database, and two copies of "the minimal call for every tool" is one copy that stops
+# covering a tool the day a signature changes.
+MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
+    "fitness_ping": {},
+    "fitness_get_recent_workouts": {},
+    "fitness_get_workout": {"workout_id": "whatever"},
+    "fitness_get_training_summary": {},
+    "fitness_get_weekly_volume": {},
+    "fitness_get_muscle_group_volume": {},
+    "fitness_get_training_frequency": {},
+    "fitness_get_exercise_progression": {"exercise_name": "Bench Press (Barbell)"},
+    "fitness_get_personal_records": {"exercise_name": "Bench Press (Barbell)"},
+    "fitness_get_plateaus": {},
+    "fitness_compare_periods": {
+        "period_a_start": "2026-01-01",
+        "period_a_end": "2026-01-14",
+        "period_b_start": "2026-01-15",
+        "period_b_end": "2026-01-28",
+    },
+    "fitness_get_body_weight_trend": {},
+    "fitness_get_recomposition_status": {},
+}
+
 # --------------------------------------------------------------------------
 # The reference history every behavioural test seeds.
 #
@@ -296,13 +347,30 @@ async def test_ping_degrades_cleanly(client: TestClient) -> None:
 
 
 @pytest.mark.integration
-async def test_ping_degradation_leaks_nothing(client: TestClient) -> None:
-    """T-02-09: not one byte of connection detail reaches the tool result.
+async def test_every_tool_degradation_leaks_nothing(client: TestClient) -> None:
+    """T-02-09/T-06-01: not one byte of connection detail reaches ANY tool result.
 
-    MCP tool output is model-facing and, through the transcript, user-facing.
-    An asyncpg connection error carries the full DSN -- user, password, host,
-    port, database -- so the degraded payload is where a credential would escape
-    if the ``except`` branch ever started interpolating the exception.
+    MCP tool output is model-facing and, through the transcript, user-facing. ``mcp 2.0.0`` wraps
+    any escaping exception as ``ToolError(f"Error executing tool {name}: {e}")`` and returns that
+    string to the model VERBATIM -- and an asyncpg connection error's message carries the full
+    DSN: user, password, host, port and database. Structlog's three-layer redaction (FOUND-05)
+    never sees it, because a tool result is not a log record. ``@safe_tool`` is the only thing
+    standing in that path.
+
+    Every registered tool is exercised, not just ``fitness_ping``. The guard is applied
+    per-function, so proving one ``except`` branch runs proves nothing about the other twelve; the
+    equality assertion below makes "all thirteen" structural, so a fourteenth tool registered
+    without an entry in ``MINIMAL_TOOL_ARGUMENTS`` fails here rather than being silently skipped.
+
+    One swap for all thirteen, and failures are COLLECTED rather than asserted in the loop: a bare
+    ``assert`` on the first tool would hide every tool after it, and the interesting fact is which
+    tools leak, not that one does.
+
+    The swap happens BEFORE ``async with Client(mcp)`` because ``mcp_lifespan`` reads
+    ``app.state.sessionmaker`` once, when the client context is entered, and hands the result to
+    every tool call as ``AppContext``. Swapping after entry would leave every tool holding the
+    healthy factory and the test would pass while proving nothing. The session-scoped engine is
+    restored in ``finally``, never disposed: disposing a shared engine poisons every later test.
     """
     from mcp import Client
 
@@ -312,18 +380,86 @@ async def test_ping_degradation_leaks_nothing(client: TestClient) -> None:
     original = app.state.sessionmaker
     dead = create_async_engine(DEAD_DB_URL, connect_args={"timeout": 1}, pool_pre_ping=False)
     app.state.sessionmaker = async_sessionmaker(dead, expire_on_commit=False, autoflush=False)
+    failures: list[str] = []
     try:
         async with Client(mcp) as mcp_client:
-            result = await mcp_client.call_tool("fitness_ping", {})
-
-        rendered = f"{result.structured_content}{result.content}"
-        for leak in ("nobody", "nopass", "127.0.0.1", "nodb", "asyncpg", "Traceback"):
-            assert leak not in rendered, (
-                f"FOUND-05/T-02-09 violated: {leak!r} leaked into the tool result"
+            registered = {tool.name for tool in (await mcp_client.list_tools()).tools}
+            assert registered == set(MINIMAL_TOOL_ARGUMENTS), (
+                "MINIMAL_TOOL_ARGUMENTS must name exactly the registered tool set, or this test "
+                "silently stops covering whichever tool was added or renamed. Missing: "
+                f"{sorted(registered - set(MINIMAL_TOOL_ARGUMENTS))}; stale: "
+                f"{sorted(set(MINIMAL_TOOL_ARGUMENTS) - registered)}"
             )
+
+            for name, arguments in MINIMAL_TOOL_ARGUMENTS.items():
+                result = await mcp_client.call_tool(name, arguments)
+                rendered = f"{result.structured_content}{result.content}"
+
+                failures.extend(
+                    f"MCP-06/Pitfall 3 violated: {leak!r} leaked out of {name}"
+                    for leak in LEAK_MARKERS
+                    if leak in rendered
+                )
+                if result.is_error is not False:
+                    failures.append(
+                        f"{name} returned is_error=True: @safe_tool degrades, it does not error, "
+                        "and an error result is where the SDK puts an uncontrolled string"
+                    )
+                payload = result.structured_content
+                if payload is None:
+                    failures.append(f"{name} returned no structured content to degrade into")
+                elif name == "fitness_ping":
+                    # D-08's canary predates `data_available` and keeps its own degrade contract:
+                    # it reports connectivity as a value, so `database="error"` IS its "I could
+                    # not reach the data" flag. Every other tool carries `data_available`.
+                    if payload != {"status": "ok", "database": "error"}:
+                        failures.append(f"fitness_ping degraded to {payload!r}, not database=error")
+                elif payload["data_available"] is not False:
+                    failures.append(
+                        f"{name} degraded with data_available={payload['data_available']!r}: an "
+                        "outage reported as a real empty result is a wrong answer with no signal"
+                    )
     finally:
         app.state.sessionmaker = original
         dead.sync_engine.dispose()
+
+    assert not failures, "\n".join(failures)
+
+
+async def test_a_raising_tool_would_leak_without_the_guard() -> None:
+    """This test asserts the leak EXISTS, on purpose. It is why ``@safe_tool`` is mandatory.
+
+    ``_common.safe_tool``'s docstring claims that ``mcp 2.0.0`` hands an escaping exception's
+    ``str()`` back to the model verbatim. Every other test in this module asserts the guard's
+    EFFECT; none of them would notice if the SDK quietly started sanitizing tool errors itself, at
+    which point the guard's justification would be folklore rather than a verified fact.
+
+    So the channel is documented rather than assumed: a throwaway tool on a SEPARATE ``MCPServer``
+    -- never the app's ``mcp``, which would register a raising tool into the real server for the
+    rest of the session -- raises with a DSN in its message, and the DSN is asserted to come back.
+
+    If this test ever starts FAILING, the SDK has changed its error handling. That is a signal to
+    re-verify the guard's justification against the new behaviour, not a signal to relax it.
+    """
+    from mcp import Client
+    from mcp.server import MCPServer
+
+    async def leaky_probe() -> str:
+        """Raises on purpose. Never registered on the application's MCP server."""
+        raise ValueError("postgresql://user:SECRET@host:5432/db unreachable")
+
+    probe = MCPServer(name="leak-probe", version="0.0.0")
+    probe.add_tool(leaky_probe, name="leaky_probe", description="Raises on purpose.")
+
+    async with Client(probe) as probe_client:
+        result = await probe_client.call_tool("leaky_probe", {})
+
+    rendered = f"{result.structured_content}{result.content}"
+    assert "SECRET@host" in rendered, (
+        "the SDK no longer returns an unguarded exception's message to the model. @safe_tool's "
+        "stated justification must be re-verified against the new behaviour before anyone "
+        "concludes the guard is unnecessary."
+    )
 
 
 @pytest.mark.integration

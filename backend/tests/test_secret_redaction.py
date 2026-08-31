@@ -5,6 +5,13 @@ stream. ``structlog.testing``'s log-capturing context manager clears the entire
 configured processor list for its duration, so the redaction processors under test
 would never run and this suite would pass while proving nothing. Do not reach for
 it here, no matter how much more convenient it looks.
+
+Phase 6 adds one case that is NOT about a log line (MCP-06). The three-layer
+redaction chain covers log records and only log records; an MCP tool result is a
+different channel entirely, and the SDK writes to it directly. So
+``test_mcp_tool_response_contains_no_configured_secret`` scans every tool's whole
+result for every ``Settings.secret_values()`` string -- the same accessor the
+value scrubber consumes, so the two can never disagree about what a secret is.
 """
 
 import io
@@ -256,3 +263,60 @@ def test_correlation_id_links_body_to_log(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert response.json()["correlation_id"] == REQUEST_ID
     assert REQUEST_ID in buf.getvalue()
+
+
+@pytest.mark.integration
+async def test_mcp_tool_response_contains_no_configured_secret(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """MCP-06/T-06-19: no configured secret reaches a tool response, by ANY path.
+
+    Every other case in this module asserts on a rendered LOG line, and that is the limit of what
+    the structlog redaction chain can promise: it is a processor pipeline over log records, and a
+    tool result never becomes one. The SDK serializes a tool's return value and writes it to the
+    model directly, so a secret that reached a response field would pass all three redaction
+    layers untouched and be entirely invisible to every test above.
+
+    Driven against the HEALTHY container rather than the dead-database sessionmaker, because the
+    exception channel already has its own coverage in ``test_mcp_tools.py``. What this closes is
+    the OTHER direction: a secret arriving in a response through some ordinary, successful path --
+    a settings value composed into a payload, a DSN echoed in a freshness field, a token surfaced
+    as provenance -- none of which raises anything for ``@safe_tool`` to catch.
+
+    ``Settings.secret_values()`` is the accessor, and deliberately the same one
+    ``app.logging.make_value_scrubber`` consumes: a second hand-listed set of "the secrets" here
+    is a second definition that would drift, and the drift would show up as a test that passes
+    while a newly-added secret field goes unscanned.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+    from tests.test_mcp_tools import MINIMAL_TOOL_ARGUMENTS
+
+    secrets = _settings(monkeypatch).secret_values()
+    assert secrets, "a scan for nothing passes trivially -- the seeded settings must carry secrets"
+
+    rendered_parts: list[str] = []
+    async with Client(mcp) as mcp_client:
+        registered = {tool.name for tool in (await mcp_client.list_tools()).tools}
+        assert registered == set(MINIMAL_TOOL_ARGUMENTS), (
+            "the argument table must name exactly the registered tool set, or a newly added tool "
+            "is never scanned"
+        )
+        for name, arguments in MINIMAL_TOOL_ARGUMENTS.items():
+            result = await mcp_client.call_tool(name, arguments)
+            # Asserted so the scan below cannot pass on thirteen degraded placeholders. A tool
+            # that failed against the healthy container produces a payload with no real values in
+            # it, which is exactly the response least likely to carry a secret -- green while
+            # proving nothing, the failure mode this module's docstring warns about.
+            assert result.is_error is False, f"{name} errored against the healthy container"
+            # BOTH channels concatenated: `structured_content` is the model-facing JSON and
+            # `content` the text block beside it. Scanning only one leaves the other unexamined.
+            rendered_parts.append(f"{name}{result.structured_content}{result.content}")
+    rendered = "".join(rendered_parts)
+
+    for secret in secrets:
+        assert secret not in rendered, (
+            "MCP-06 violated: a configured secret reached an MCP tool response. The structlog "
+            "redaction chain covers log records ONLY and cannot have caught this."
+        )
