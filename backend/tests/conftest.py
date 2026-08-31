@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import insert
+from sqlalchemy import Executable, delete, insert, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -45,10 +45,17 @@ from sqlalchemy.ext.asyncio import (
 )
 from testcontainers.community.postgres import PostgresContainer
 
+from app.core.time import utc_now
 from app.db.models.body import BodyMeasurement
-from app.db.models.exercise import ExerciseMuscle, ExerciseTemplate
+from app.db.models.exercise import ExerciseMuscle, ExerciseMuscleOverride, ExerciseTemplate
+from app.db.models.sync_state import SyncState
 from app.db.models.user import User
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
+from app.db.repositories.sync_state import (
+    PROVIDER_HEVY,
+    SYNC_RESOURCES,
+    complete_sync,
+)
 from app.normalization.muscles import CanonicalMuscleGroup, MappingSource, MuscleRole
 from app.normalization.resolver import set_override
 
@@ -542,6 +549,301 @@ async def golden_workout(session: AsyncSession) -> AsyncIterator[GoldenBuilder]:
         yield GoldenBuilder(session)
     finally:
         await session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: COMMITTED history fixtures.
+#
+# This is the single most confusing thing about testing this phase, so it is
+# written down rather than left to be rediscovered.
+#
+# `golden_workout` FLUSHES and rolls back. An analytics function receives the
+# SAME `AsyncSession`, so it sees the uncommitted rows inside the open
+# transaction, and that is exactly why every analytics function takes a
+# `session: AsyncSession` rather than a sessionmaker.
+#
+# An MCP tool driven through `Client(mcp)` does NOT. It opens a NEW session from
+# `ctx.request_context.lifespan_context.sessionmaker` -- a different transaction,
+# on a different connection, which cannot see uncommitted rows at all. The same
+# is true of the `client` fixture above, which builds its own engine and
+# sessionmaker and assigns them to `app.state`.
+#
+# Phase 6 integration tests therefore need COMMITTED data, and committed data
+# needs a compensating teardown rather than a rollback.
+# ---------------------------------------------------------------------------
+
+# FK-child-first. The ORDER is what this constant exists to pin down; the
+# statements are built below and keyed on these names, so dropping a table here
+# is a KeyError rather than a silently skipped purge.
+#
+# `users` is deliberately ABSENT. Migration 0002 seeds exactly one row and
+# `test_migrations.py` asserts `count(*) == 1` on it from a separate connection,
+# so a purge that took the user out would fail that test with no visible link to
+# this fixture. That test is the canary for this whole mechanism.
+_MCP_PURGE_TABLES: tuple[str, ...] = (
+    "workout_sets",
+    "workout_exercises",
+    "workouts",
+    "exercise_muscle_overrides",
+    "exercise_muscles",
+    "exercise_templates",
+    "body_measurements",
+    "sync_state",
+)
+
+
+def _mcp_purge_statements() -> list[Executable]:
+    """One scoped DELETE per entry in ``_MCP_PURGE_TABLES``, in that exact order.
+
+    SQLAlchemy Core ``delete()`` rather than ``text("DELETE FROM " + table)``:
+    the table names never reach the driver as a string fragment at all, so there
+    is nothing here for Ruff ``S608`` to flag and nothing for a future edit to
+    turn into an interpolation. Nothing caller-supplied is interpolated anywhere.
+
+    ``workout_sets`` and ``workout_exercises`` carry no ``user_id`` column -- the
+    parent ``workouts`` row owns the tenant -- so they are scoped through their
+    FK chain instead. ``ON DELETE CASCADE`` would take them out anyway; deleting
+    them explicitly keeps the purge honest if that constraint is ever relaxed.
+    """
+    workout_ids = select(Workout.id).where(Workout.user_id == DEFAULT_USER_ID)
+    exercise_ids = select(WorkoutExercise.id).where(WorkoutExercise.workout_id.in_(workout_ids))
+
+    by_table: dict[str, Executable] = {
+        "workout_sets": delete(WorkoutSet).where(
+            WorkoutSet.workout_exercise_id.in_(exercise_ids)
+        ),
+        "workout_exercises": delete(WorkoutExercise).where(
+            WorkoutExercise.workout_id.in_(workout_ids)
+        ),
+        "workouts": delete(Workout).where(Workout.user_id == DEFAULT_USER_ID),
+        "exercise_muscle_overrides": delete(ExerciseMuscleOverride).where(
+            ExerciseMuscleOverride.user_id == DEFAULT_USER_ID
+        ),
+        "exercise_muscles": delete(ExerciseMuscle).where(
+            ExerciseMuscle.user_id == DEFAULT_USER_ID
+        ),
+        "exercise_templates": delete(ExerciseTemplate).where(
+            ExerciseTemplate.user_id == DEFAULT_USER_ID
+        ),
+        "body_measurements": delete(BodyMeasurement).where(
+            BodyMeasurement.user_id == DEFAULT_USER_ID
+        ),
+        "sync_state": delete(SyncState).where(SyncState.user_id == DEFAULT_USER_ID),
+    }
+    return [by_table[table] for table in _MCP_PURGE_TABLES]
+
+
+@pytest_asyncio.fixture
+async def committed_history(session: AsyncSession) -> AsyncIterator[GoldenBuilder]:
+    """A GoldenBuilder whose rows are COMMITTED, with a purge-and-commit teardown.
+
+    The test must call ``await session.commit()`` itself once it has finished
+    building -- making the builder commit per statement would break
+    ``GoldenBuilder``'s contract for every Phase 4/5 test that shares it.
+
+    Teardown deletes in FK-child-first order for ``DEFAULT_USER_ID`` and commits.
+    A compensating delete rather than a rollback because the whole point is that
+    the rows outlived this transaction; a ``TRUNCATE`` because it would also take
+    out the seeded ``users`` row, which ``test_migrations.py`` asserts
+    ``count(*) == 1`` on from a separate connection.
+
+    Rows belonging to ``ANALYTICS_SECOND_USER_ID`` are NOT purged here -- they
+    cascade away with their ``users`` row, and a test that creates a second user
+    is responsible for it. See ``test_repository_workouts.py``.
+    """
+    try:
+        yield GoldenBuilder(session)
+    finally:
+        # First, so a mid-test failure that left the transaction in an aborted
+        # state does not make every statement below raise `InFailedSqlTransaction`
+        # and skip the purge entirely.
+        await session.rollback()
+        for statement in _mcp_purge_statements():
+            await session.execute(statement)
+        # Second users are rare and always fixture-created; CASCADE takes their
+        # whole tree with them, which is why this is the only extra delete needed.
+        await session.execute(delete(User).where(User.id == ANALYTICS_SECOND_USER_ID))
+        await session.commit()
+
+
+# `worst_case_history` shape constants. Named rather than inlined so the budget
+# tests in later plans can assert against the same numbers the fixture seeded.
+WORST_CASE_TEMPLATES = 30
+WORST_CASE_WEEKS = 52
+WORST_CASE_SESSIONS_PER_WEEK = 5
+WORST_CASE_EXERCISES_PER_WORKOUT = 5
+WORST_CASE_SETS_PER_EXERCISE = 4
+WORST_CASE_BODY_MEASUREMENT_DAYS = 120
+
+# 02:00Z is 09:00 in Asia/Jakarta -- well inside the local day, so these fixtures
+# exercise the arithmetic and never the local-midnight boundary (which has its
+# own dedicated tests).
+_WORST_CASE_HOUR = 2
+
+
+def _worst_case_anchor() -> dt.datetime:
+    """The most recent workout instant: today at 02:00Z, or yesterday's if it has not arrived.
+
+    Anchored on ``utc_now()`` and never on a hard-coded date. A fixed anchor
+    silently ages out of every ``weeks=N`` window that ends today, at which point
+    the budget assertions measure an empty response and pass for the wrong reason.
+
+    The step back to yesterday matters for a run that starts between 00:00Z and
+    02:00Z: without it the newest "historical" workout is in the future.
+    """
+    now = utc_now()
+    day = now.date() if now.hour >= _WORST_CASE_HOUR else now.date() - dt.timedelta(days=1)
+    return dt.datetime.combine(day, dt.time(hour=_WORST_CASE_HOUR), tzinfo=dt.UTC)
+
+
+@pytest_asyncio.fixture
+async def worst_case_history(committed_history: GoldenBuilder, session: AsyncSession) -> None:
+    """A maximal-but-realistic 52 weeks, seeded once and committed. D-13's worst case.
+
+    Shape (matching RESEARCH.md's A2 live-data cardinalities): 30 templates each
+    mapped to 2-3 canonical muscle groups spanning all 19; 52 weeks x 5
+    sessions/week = 260 workouts; each workout 5 exercises x 4 sets = 20 sets, of
+    which the first of each exercise is a ``warmup``. Every ``start_time`` is
+    timezone-aware UTC -- ``GoldenBuilder.workout`` rejects a naive one, and so
+    does this fixture's own arithmetic.
+
+    Anchored on ``utc_now()`` so ``weeks=N`` windows ending today actually contain
+    data; DO NOT anchor it on a hard-coded date, or every budget assertion
+    silently measures an empty response.
+
+    The workout tree is written with THREE batched statements rather than through
+    ``GoldenBuilder.workout``, which issues one statement per workout and per
+    exercise: 260 workouts x 5 exercises x 4 sets is ~5,200 set rows, and a
+    statement per row makes the budget test unusably slow. The templates still go
+    through the builder, because their muscle mappings are the part a hand-rolled
+    insert would get subtly wrong.
+
+    Teardown is inherited from ``committed_history`` -- this fixture adds rows to
+    the same purge scope and adds no cleanup of its own.
+    """
+    anchor = _worst_case_anchor()
+    groups = list(CanonicalMuscleGroup)
+
+    # 2-3 groups per template, walked round-robin over all 19 so every group is
+    # mapped by at least one template -- the per-muscle tools return a row per
+    # group, and a group nothing maps to would shrink the worst case it exists
+    # to measure.
+    template_ids: list[str] = []
+    for index in range(WORST_CASE_TEMPLATES):
+        assigned = [groups[(index * 3 + offset) % len(groups)] for offset in range(2 + index % 2)]
+        external_id = f"WORST-T{index:03d}"
+        await committed_history.template(
+            external_id=external_id,
+            title=f"Worst Case Exercise {index:03d}",
+            muscles=[
+                (group, MuscleRole.DIRECT if position == 0 else MuscleRole.INDIRECT)
+                for position, group in enumerate(assigned)
+            ],
+        )
+        template_ids.append(external_id)
+
+    workout_rows: list[dict[str, Any]] = []
+    exercise_rows: list[dict[str, Any]] = []
+    set_rows: list[dict[str, Any]] = []
+
+    session_index = 0
+    for week in range(WORST_CASE_WEEKS):
+        for day in range(WORST_CASE_SESSIONS_PER_WEEK):
+            # Distinct calendar days, newest first, spanning exactly 52 weeks.
+            start_time = anchor - dt.timedelta(days=week * 7 + day)
+            workout_id = uuid.uuid4()
+            workout_rows.append(
+                {
+                    "id": workout_id,
+                    "user_id": DEFAULT_USER_ID,
+                    "provider": PROVIDER_HEVY,
+                    "external_id": f"WORST-W{session_index:04d}",
+                    "title": f"Worst Case Session {session_index:04d}",
+                    "description": None,
+                    "routine_external_id": None,
+                    "start_time": start_time,
+                    "end_time": start_time + dt.timedelta(minutes=75),
+                    "provider_created_at": start_time,
+                    "provider_updated_at": start_time,
+                }
+            )
+
+            for exercise_index in range(WORST_CASE_EXERCISES_PER_WORKOUT):
+                exercise_id = uuid.uuid4()
+                template_external_id = template_ids[
+                    (session_index * WORST_CASE_EXERCISES_PER_WORKOUT + exercise_index)
+                    % WORST_CASE_TEMPLATES
+                ]
+                exercise_rows.append(
+                    {
+                        "id": exercise_id,
+                        "workout_id": workout_id,
+                        "exercise_index": exercise_index,
+                        "title": f"Worst Case Exercise {template_external_id}",
+                        "notes": None,
+                        "exercise_template_external_id": template_external_id,
+                        "supersets_id": None,
+                    }
+                )
+                for set_index in range(WORST_CASE_SETS_PER_EXERCISE):
+                    set_rows.append(
+                        {
+                            "id": uuid.uuid4(),
+                            "workout_exercise_id": exercise_id,
+                            "set_index": set_index,
+                            # The first set of every exercise is a warm-up, so any
+                            # tool that forgets the exclusion reports 20 hard sets
+                            # per session instead of 15.
+                            "set_type": "warmup" if set_index == 0 else "normal",
+                            "weight_kg": Decimal("60.000") + Decimal(set_index),
+                            "reps": 8 + set_index,
+                            "distance_meters": None,
+                            "duration_seconds": None,
+                            "rpe": None,
+                            "custom_metric": None,
+                        }
+                    )
+            session_index += 1
+
+    await session.execute(insert(Workout), workout_rows)
+    await session.execute(insert(WorkoutExercise), exercise_rows)
+    await session.execute(insert(WorkoutSet), set_rows)
+
+    # ~120 daily weigh-ins ending today, so `get_body_weight_trend` and
+    # `get_recomposition_status` have a real series rather than an empty one.
+    # A gentle downward drift, in Decimal: these average into rolling 7/14/30-day
+    # figures and binary floating point would make two identical averages differ.
+    anchor_day = anchor.date()
+    await session.execute(
+        insert(BodyMeasurement),
+        [
+            {
+                "id": uuid.uuid4(),
+                "user_id": DEFAULT_USER_ID,
+                "source": PROVIDER_HEVY,
+                "external_id": None,
+                "measured_on": anchor_day - dt.timedelta(days=offset),
+                "weight_kg": Decimal("80.000") + Decimal(offset) / Decimal(20),
+            }
+            for offset in range(WORST_CASE_BODY_MEASUREMENT_DAYS)
+        ],
+    )
+
+    # So `build_freshness` returns three real timestamps rather than three `None`s
+    # -- an all-None envelope is a materially smaller payload than the real one,
+    # and D-13's budget must be measured against the real one. Written through the
+    # repository's own upsert, never by hand: one implementation of the
+    # ON CONFLICT rule.
+    for resource in sorted(SYNC_RESOURCES):
+        await complete_sync(
+            session,
+            user_id=DEFAULT_USER_ID,
+            provider=PROVIDER_HEVY,
+            resource=resource,
+            last_synced_at=anchor,
+        )
+
+    await session.commit()
 
 
 @pytest.fixture
