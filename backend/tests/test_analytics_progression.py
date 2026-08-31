@@ -25,9 +25,25 @@ import datetime as dt
 import uuid
 from decimal import Decimal
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.analytics.estimates import NoEstimateReason
-from app.analytics.progression import best_set_per_day
+from app.analytics.progression import best_set_per_day, get_exercise_progression
 from app.analytics.rollup import QualifyingSetRow
+from app.db.repositories.sync_state import (
+    PROVIDER_HEVY,
+    RESOURCE_EXERCISE_TEMPLATES,
+    RESOURCE_WORKOUTS,
+    complete_sync,
+)
+from tests.conftest import (
+    ANALYTICS_SECOND_USER_ID,
+    DEFAULT_USER_ID,
+    GoldenBuilder,
+    GoldenExercise,
+    GoldenSet,
+)
 
 # `PROG-*` so these cannot collide with `test_analytics_volume.py`'s `VOL-*`,
 # `test_analytics_frequency.py`'s `FREQ-*`, `test_analytics_rollup.py`'s `ROLLUP-*`/`QSR-*`,
@@ -46,6 +62,19 @@ _END = dt.date(2026, 8, 30)
 _DAY_1 = dt.datetime(2026, 8, 3, 2, 0, tzinfo=dt.UTC)
 _DAY_2 = dt.datetime(2026, 8, 10, 2, 0, tzinfo=dt.UTC)
 _DAY_3 = dt.datetime(2026, 8, 17, 2, 0, tzinfo=dt.UTC)
+
+# Deliberately NOT week-aligned: Wednesday to Tuesday. `_START`/`_END` happen to be a Monday and
+# a Sunday, so an implementation that snapped outward to whole weeks would agree with them
+# exactly -- this pair is the only shape that can tell the two apart, since snapping widens it to
+# Mon 2026-08-03 .. Sun 2026-08-16 and pulls `_DAY_1` into an answer that never asked for it.
+_UNALIGNED_START = dt.date(2026, 8, 5)
+_UNALIGNED_END = dt.date(2026, 8, 11)
+
+# A window that ENDS before any fixture workout starts, for the empty-series case. Chosen rather
+# than "seed nothing" so the test cannot pass vacuously: rows exist, and the window is what
+# excludes them.
+_EMPTY_START = dt.date(2026, 7, 1)
+_EMPTY_END = dt.date(2026, 7, 31)
 
 # The local days those three instants belong to, spelled out rather than derived: deriving them
 # with the same timezone arithmetic the code under test uses would make a wrong conversion agree
@@ -229,3 +258,358 @@ def test_two_workouts_same_local_day_fold_into_one_entry() -> None:
     assert best.workout_id == _EVENING_WORKOUT, (
         "workout_id must identify the workout carrying the SELECTED set, not the first one seen"
     )
+
+
+# ---------------------------------------------------------------------------
+# PROG-01's public function. Container-backed: the local-day conversion, the tenant-scoped
+# template outerjoin and the coverage/freshness envelope have no meaning anywhere else.
+# ---------------------------------------------------------------------------
+
+# The two live-observed sync timestamps, 25 minutes apart -- the drift that makes a single
+# collapsed `last_synced_at` lossy.
+_SYNCED_WORKOUTS_AT = dt.datetime(2026, 8, 30, 5, 43, 18, tzinfo=dt.UTC)
+_SYNCED_TEMPLATES_AT = dt.datetime(2026, 8, 30, 6, 8, 4, tzinfo=dt.UTC)
+
+
+def _bench_exercise(*sets: GoldenSet, template_external_id: str = _BENCH) -> GoldenExercise:
+    """One exercise carrying exactly the sets a test names, and no defaults it did not ask for."""
+    return GoldenExercise(template_external_id=template_external_id, sets=sets)
+
+
+@pytest.mark.integration
+async def test_progression_series_is_ascending_and_omits_untrained_days(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """One point per TRAINED local day, ascending, and nothing for the 25 days in between.
+
+    The window is 28 days long and holds three workouts. A gap-free day spine would return 28
+    points, 25 of them zeros -- which is not the ``volume.py`` case: a zero-training WEEK is
+    diagnostically interesting, a non-training DAY is every day, and the signal would be buried.
+    """
+    await golden_workout.template(external_id=_BENCH, title="Bench Press (Barbell)")
+    for start_time, weight in (
+        (_DAY_1, Decimal("60.000")),
+        (_DAY_2, Decimal("65.000")),
+        (_DAY_3, Decimal("70.000")),
+    ):
+        await golden_workout.workout(
+            start_time=start_time,
+            exercises=[_bench_exercise(GoldenSet(weight_kg=weight, reps=8))],
+        )
+
+    result = await get_exercise_progression(
+        session,
+        user_id=DEFAULT_USER_ID,
+        exercise_template_external_id=_BENCH,
+        start_day=_START,
+        end_day=_END,
+    )
+
+    local_days = [point.local_day for point in result.points]
+    assert local_days == [_LOCAL_DAY_1, _LOCAL_DAY_2, _LOCAL_DAY_3], (
+        "a gap-free day spine was copied from volume.py; a non-training day is not a "
+        "diagnostically interesting zero"
+    )
+    assert local_days == sorted(local_days)
+    assert result.exercise_template_external_id == _BENCH
+    assert result.title == "Bench Press (Barbell)"
+    assert result.exercise_type == "weight_reps"
+    assert result.window_start == _START
+    assert result.window_end == _END
+    # 60x8 -> 76.000, 65x8 -> 82.333, 70x8 -> 88.667. Ascending in value as well as in date, so
+    # a reversed series would be visible here and not only in the day ordering.
+    assert [point.estimated_1rm_kg for point in result.points] == [
+        Decimal("76.000"),
+        Decimal("82.333"),
+        Decimal("88.667"),
+    ]
+
+
+@pytest.mark.integration
+async def test_window_is_not_snapped_to_whole_weeks(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-03: progression follows ``frequency.py``, not ``volume.py`` -- the raw range IS the window.
+
+    Weekly volume widens outward because its buckets must be comparable to one another. A per-day
+    series has no such requirement, and snapping would silently return days the caller did not
+    ask for -- here, a whole extra training session on 2026-08-03.
+    """
+    await golden_workout.template(external_id=_BENCH)
+    for start_time in (_DAY_1, _DAY_2):
+        await golden_workout.workout(
+            start_time=start_time,
+            exercises=[_bench_exercise(GoldenSet(weight_kg=Decimal("60.000"), reps=8))],
+        )
+
+    result = await get_exercise_progression(
+        session,
+        user_id=DEFAULT_USER_ID,
+        exercise_template_external_id=_BENCH,
+        start_day=_UNALIGNED_START,
+        end_day=_UNALIGNED_END,
+    )
+
+    assert (result.window_start, result.window_end) == (_UNALIGNED_START, _UNALIGNED_END), (
+        "the window was snapped outward to whole weeks; PROG-01 answers the range it was asked "
+        "about"
+    )
+    assert [point.local_day for point in result.points] == [_LOCAL_DAY_2], (
+        "2026-08-03 is outside the requested Wed-to-Tue range and only week snapping could have "
+        "pulled it in"
+    )
+
+
+@pytest.mark.integration
+async def test_null_estimate_day_still_returns_a_point(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-02's rep-range gate removes the ESTIMATE, never the day.
+
+    Dropping ungated days would delete 16.8% of real exercise-sessions (376 of 2,239) from the
+    series and make a rep-periodized block read as a training gap. Every other figure the day
+    produced is still reportable, and PROG-01 requires a REASON rather than a bare null.
+    """
+    await golden_workout.template(external_id=_HIGH_REP, title="Cable Fly")
+    await golden_workout.workout(
+        start_time=_DAY_1,
+        exercises=[
+            _bench_exercise(
+                GoldenSet(weight_kg=Decimal("80.000"), reps=15),
+                GoldenSet(weight_kg=Decimal("90.000"), reps=15),
+                template_external_id=_HIGH_REP,
+            )
+        ],
+    )
+
+    result = await get_exercise_progression(
+        session,
+        user_id=DEFAULT_USER_ID,
+        exercise_template_external_id=_HIGH_REP,
+        start_day=_START,
+        end_day=_END,
+    )
+
+    assert len(result.points) == 1
+    point = result.points[0]
+    assert point.estimated_1rm_kg is None
+    assert point.no_estimate_reason is NoEstimateReason.REP_RANGE
+    # Everything the day actually reported survives the missing estimate.
+    assert point.sets == 2
+    assert point.total_reps == 30
+    assert point.volume_kg == Decimal("2550.000")
+    assert point.volume_sets == 2
+    assert point.best_weight_kg == Decimal("90.000")
+    assert point.best_reps == 15
+
+
+@pytest.mark.integration
+async def test_modality_reason_for_reps_only_day(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-03's modality gate, and the ``None``-versus-zero distinction it forces.
+
+    A pull-up day has reps and no weight, so ``volume_kg`` is not computable at all. Reporting
+    ``Decimal("0")`` would claim the lifter moved zero kilograms, which is a different and false
+    fact -- ``volume_sets`` is what makes the difference visible.
+    """
+    await golden_workout.template(external_id=_PULLUP, title="Pull Up", exercise_type="reps_only")
+    await golden_workout.workout(
+        start_time=_DAY_1,
+        exercises=[
+            _bench_exercise(GoldenSet(reps=12), GoldenSet(reps=10), template_external_id=_PULLUP)
+        ],
+    )
+
+    result = await get_exercise_progression(
+        session,
+        user_id=DEFAULT_USER_ID,
+        exercise_template_external_id=_PULLUP,
+        start_day=_START,
+        end_day=_END,
+    )
+
+    assert len(result.points) == 1
+    point = result.points[0]
+    assert point.no_estimate_reason is NoEstimateReason.MODALITY
+    assert point.estimated_1rm_kg is None
+    assert point.volume_kg is None, (
+        "'no set that day had both a weight and reps' is a different fact from 'the day's volume "
+        "was zero kilograms'"
+    )
+    assert point.volume_sets == 0
+    assert point.best_weight_kg is None
+    assert point.best_reps == 12
+    assert point.total_reps == 22
+    assert result.exercise_type == "reps_only"
+
+
+@pytest.mark.integration
+async def test_unsynced_template_yields_null_title_and_type_but_still_points(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """A workout may reference a template that is not synced locally, and must still answer.
+
+    ``workout_exercises.exercise_template_external_id`` is a plain string and deliberately not a
+    foreign key, so a template deleted upstream or not yet reached by a partial sync must degrade
+    to "no title, no modality" rather than block the series. A missing ``exercise_type`` is
+    naturally MODALITY under D-03's exact-match gate, never a crash.
+    """
+    await golden_workout.workout(
+        start_time=_DAY_1,
+        exercises=[
+            _bench_exercise(
+                GoldenSet(weight_kg=Decimal("100.000"), reps=5),
+                template_external_id=_UNSYNCED,
+            )
+        ],
+    )
+
+    result = await get_exercise_progression(
+        session,
+        user_id=DEFAULT_USER_ID,
+        exercise_template_external_id=_UNSYNCED,
+        start_day=_START,
+        end_day=_END,
+    )
+
+    assert result.title is None
+    assert result.exercise_type is None
+    assert len(result.points) == 1
+    assert result.points[0].no_estimate_reason is NoEstimateReason.MODALITY
+    assert result.points[0].best_weight_kg == Decimal("100.000")
+
+
+@pytest.mark.integration
+async def test_second_users_sets_are_invisible(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """ASVS V4 / T-05-22: a single-user suite cannot see a missing tenant predicate.
+
+    Both users are given a template under the SAME external id, because Hevy's built-in template
+    ids are GLOBAL. That covers two distinct leaks in one arrangement: the set rows themselves,
+    and the outer-joined template whose title and ``exercise_type`` would otherwise be attached
+    to this user's answer -- and ``exercise_type`` is the D-03 e1RM gate, so the second leak is a
+    correctness bug as well as a disclosure one.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_SHARED, title="Mine")
+    await golden_workout.template(
+        external_id=_SHARED, title="Theirs", user_id=ANALYTICS_SECOND_USER_ID
+    )
+    await golden_workout.workout(
+        start_time=_DAY_1,
+        exercises=[
+            _bench_exercise(
+                GoldenSet(weight_kg=Decimal("100.000"), reps=5), template_external_id=_SHARED
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=_DAY_1,
+        exercises=[
+            _bench_exercise(
+                GoldenSet(weight_kg=Decimal("200.000"), reps=5), template_external_id=_SHARED
+            )
+        ],
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+
+    result = await get_exercise_progression(
+        session,
+        user_id=DEFAULT_USER_ID,
+        exercise_template_external_id=_SHARED,
+        start_day=_START,
+        end_day=_END,
+    )
+
+    assert all(point.best_weight_kg != Decimal("200.000") for point in result.points), (
+        "another user's set leaked into this user's progression (ASVS V4)"
+    )
+    assert result.title == "Mine", (
+        "the template outerjoin dropped its own tenant predicate; Hevy's built-in template ids "
+        "are global"
+    )
+    # Guard against a vacuous pass: this user really did train, and the point is theirs.
+    assert len(result.points) == 1
+    assert result.points[0].best_weight_kg == Decimal("100.000")
+
+
+@pytest.mark.integration
+async def test_empty_window_returns_empty_points_not_an_error(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """No training in the window is an ANSWER, not an exception.
+
+    ``earliest_data_at`` is asserted alongside the empty series because it is what separates
+    "you did not train in this window" from "your synced history does not reach back that far" --
+    two facts a bare empty list cannot tell apart.
+    """
+    await golden_workout.template(external_id=_BENCH)
+    await golden_workout.workout(
+        start_time=_DAY_1,
+        exercises=[_bench_exercise(GoldenSet(weight_kg=Decimal("60.000"), reps=8))],
+    )
+
+    result = await get_exercise_progression(
+        session,
+        user_id=DEFAULT_USER_ID,
+        exercise_template_external_id=_BENCH,
+        start_day=_EMPTY_START,
+        end_day=_EMPTY_END,
+    )
+
+    assert result.points == []
+    assert result.coverage.sessions_in_window == 0
+    assert result.coverage.insufficient_data is True
+    assert result.coverage.earliest_data_at == _DAY_1
+    assert result.title is None
+    assert result.exercise_type is None
+
+
+@pytest.mark.integration
+async def test_freshness_names_workouts_and_exercise_templates(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """DQ-01: PROG-01 is only as fresh as the STALER of its two sources.
+
+    Written against the second user because ``sync_state`` rows for the default user are the Hevy
+    sync suite's territory and the container is session-scoped and shared.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_BENCH, user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.workout(
+        start_time=_DAY_1,
+        exercises=[_bench_exercise(GoldenSet(weight_kg=Decimal("60.000"), reps=8))],
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+    for resource, synced_at in (
+        (RESOURCE_WORKOUTS, _SYNCED_WORKOUTS_AT),
+        (RESOURCE_EXERCISE_TEMPLATES, _SYNCED_TEMPLATES_AT),
+    ):
+        await complete_sync(
+            session,
+            user_id=ANALYTICS_SECOND_USER_ID,
+            provider=PROVIDER_HEVY,
+            resource=resource,
+            last_synced_at=synced_at,
+        )
+
+    result = await get_exercise_progression(
+        session,
+        user_id=ANALYTICS_SECOND_USER_ID,
+        exercise_template_external_id=_BENCH,
+        start_day=_START,
+        end_day=_END,
+    )
+
+    assert set(result.freshness.resources) == {RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES}, (
+        "exercise_type is the D-03 e1RM gate and comes from the templates table; a stale "
+        "template sync silently changes every eligibility decision"
+    )
+    assert result.freshness.resources == {
+        RESOURCE_WORKOUTS: _SYNCED_WORKOUTS_AT,
+        RESOURCE_EXERCISE_TEMPLATES: _SYNCED_TEMPLATES_AT,
+    }
+    # Two genuinely distinct values, not one row read twice.
+    assert len(set(result.freshness.resources.values())) == 2
