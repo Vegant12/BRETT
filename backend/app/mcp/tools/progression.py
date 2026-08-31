@@ -26,20 +26,27 @@ from typing import Annotated
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from app.analytics.progression import get_exercise_progression
+from app.analytics.progression import (
+    DEFAULT_PLATEAU_LOOKBACK_WEEKS,
+    get_exercise_progression,
+    get_plateaus,
+)
 from app.mcp.context import AppContext
 from app.mcp.tools._common import (
+    MAX_PLATEAU_EXERCISES,
     MAX_PROGRESSION_POINTS,
     MAX_WEEKS,
     find_templates_by_title,
     read_only_session,
     resolve_user_id,
     safe_tool,
+    truncate,
     window_from_weeks,
 )
 from app.mcp.tools.schemas import (
     ExerciseCandidate,
     ExerciseProgressionResponse,
+    PlateauResponse,
 )
 
 
@@ -133,4 +140,88 @@ async def fitness_get_exercise_progression(
         progression=progression,
         points_truncated=points_truncated,
         total_points=total_points,
+    )
+
+
+def _degraded_plateaus() -> PlateauResponse:
+    """The payload Claude gets when the tool body raised (MCP-06, T-06-01).
+
+    Every window field is ``None`` rather than a plausible default: a degraded response that
+    carried a lookback window would let Claude report "nothing is plateaued over the last 12 weeks"
+    when the truth is that no weeks were examined at all.
+    """
+    return PlateauResponse(
+        data_available=False,
+        plateaued_only=True,
+        lookback_weeks=None,
+        lookback_start=None,
+        lookback_end=None,
+        exercises=[],
+        exercises_truncated=False,
+        total_exercises=0,
+        coverage=None,
+        freshness=None,
+    )
+
+
+@safe_tool(degraded=_degraded_plateaus)
+async def fitness_get_plateaus(
+    ctx: Context[AppContext],
+    lookback_weeks: Annotated[
+        int,
+        Field(ge=1, le=MAX_WEEKS, description="Weeks of history to judge against. Max 52."),
+    ] = DEFAULT_PLATEAU_LOOKBACK_WEEKS,
+    plateaued_only: Annotated[
+        bool,
+        Field(description="Return only exercises judged plateaued. Set false to see every one."),
+    ] = True,
+) -> PlateauResponse:
+    """Exercises that have stopped progressing, with the lookback window, the threshold and the
+    minimum-session and minimum-elapsed-day rules each verdict was reached under.
+    """
+    user_id = resolve_user_id(ctx)
+    async with read_only_session(ctx) as session:
+        # D-05: `lookback_weeks` goes STRAIGHT through -- no `window_from_weeks` conversion, unlike
+        # every other window-taking tool in this phase. `get_plateaus` takes a relative window on
+        # purpose, because a plateau is always measured back from today ("you have not PR'd in 40
+        # days" is only meaningful relative to now) and it resolves the anchor day in the user's
+        # timezone itself. Handing it a start/end pair computed here would duplicate that
+        # resolution and let a stale end date freeze a duration that should still be accruing.
+        # The `Field(ge=1)` bound above is also what makes the function's own
+        # `ValueError("lookback_weeks must be positive")` unreachable from MCP (T-06-01).
+        report = await get_plateaus(session, user_id=user_id, lookback_weeks=lookback_weeks)
+
+    candidates = (
+        [e for e in report.exercises if e.plateaued] if plateaued_only else list(report.exercises)
+    )
+    # Longest-standing plateaus first, so the cap keeps the rows a coach would act on. The full
+    # key is total and deterministic: `not plateaued` sorts the stalled ones ahead of the rest when
+    # `plateaued_only=False`, the negated duration puts the longest first, and the external id
+    # breaks remaining ties so two runs over the same data cannot disagree.
+    candidates.sort(
+        key=lambda e: (
+            not e.plateaued,
+            -(e.plateau_duration_days or 0),
+            e.exercise_template_external_id,
+        )
+    )
+    # `total_exercises` counts the FILTERED candidate set, not the whole report, so "3 of 47
+    # plateaued, showing 3" is expressible rather than being flattened into one ambiguous number.
+    exercises, exercises_truncated, total_exercises = truncate(candidates, MAX_PLATEAU_EXERCISES)
+
+    # PROG-03 requires the window and the threshold to travel WITH the result, and `PlateauResult`
+    # already echoes both per exercise (`threshold_percent`, `min_sessions`, `min_elapsed_days`,
+    # `lookback_start`, `lookback_end`). Nothing is re-derived here -- a second copy of the
+    # threshold in this module is a second copy that drifts.
+    return PlateauResponse(
+        data_available=True,
+        plateaued_only=plateaued_only,
+        lookback_weeks=report.lookback_weeks,
+        lookback_start=report.lookback_start,
+        lookback_end=report.lookback_end,
+        exercises=exercises,
+        exercises_truncated=exercises_truncated,
+        total_exercises=total_exercises,
+        coverage=report.coverage,
+        freshness=report.freshness,
     )
