@@ -1304,7 +1304,7 @@ a substring check would fail on the sentence explaining the rule.
 
 ## Open Questions
 
-### 1. `fitness_get_muscle_group_volume`: shape change, or a much lower week cap? — **NEEDS A DECISION BEFORE PLANNING**
+### 1. `fitness_get_muscle_group_volume`: shape change, or a much lower week cap? — **(RESOLVED — user selected option (a) via AskUserQuestion during /gsd-plan-phase 6; implemented in plan 06-02/06-05)**
 
 - **What we know:** returning `MuscleGroupVolumeResult` verbatim over the D-04-permitted 52-week
   window is 128 KB structured / ~348 KB on the wire (measured). That is a straightforward MCP-03
@@ -1330,7 +1330,7 @@ a substring check would fail on the sentence explaining the rule.
 - **This should go to the user via `/gsd-discuss-phase` or be surfaced in the plan for confirmation** —
   it is the one place where the measured evidence contradicts a stated constraint.
 
-### 2. Where does `DEFAULT_USER_ID` live for application code?
+### 2. Where does `DEFAULT_USER_ID` live for application code? — **(RESOLVED — implemented as recommended in plan 06-01: module constant in `app/config.py`)**
 
 - **What we know:** it exists at `backend/app/cli.py:45` and `backend/migrations/versions/0002_seed_default_user.py:28`.
   `conftest.py:62` has a third copy, deliberately (a test asserting against a value it imports proves
@@ -1342,7 +1342,7 @@ a substring check would fail on the sentence explaining the rule.
   is a migration-fixed identity, and making it env-overridable creates a way to point production at a
   `user_id` with no `users` row behind it.
 
-### 3. Do truncated lists need a Phase 7 follow-up?
+### 3. Do truncated lists need a Phase 7 follow-up? — **(RESOLVED — implemented as recommended: Python-side truncation with `truncated`/`total_available` fields, across plans 06-05/06-06/06-07; query-pushdown noted as a Phase 7 candidate, not blocking)**
 
 - **What we know:** three tools need list truncation the analytics layer does not perform
   (`training_frequency.exercises`, `plateaus.exercises`, `compare_periods.exercises`).
