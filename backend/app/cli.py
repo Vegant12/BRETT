@@ -29,7 +29,7 @@ from collections.abc import Sequence
 import structlog
 from sqlalchemy import select
 
-from app.config import Settings, get_settings
+from app.config import DEFAULT_USER_ID, Settings, get_settings
 from app.db import session as db_session
 from app.db.models.exercise import ExerciseTemplate
 from app.integrations.hevy.client import build_hevy_client
@@ -39,10 +39,10 @@ from app.logging import configure_logging
 from app.normalization.exercise_map import DELIBERATELY_UNMAPPED
 from app.normalization.resolver import unmapped_template_ids
 
-# Migration 0002's fixed id, not uuid4(). v1 is single-user; `--user-id` exists so the CLI
+# `DEFAULT_USER_ID` is migration 0002's fixed id, not uuid4(), and now lives in `app.config`
+# because the MCP layer needs the same identity. v1 is single-user; `--user-id` exists so the CLI
 # does not have to change when a second user does. A uuid4 default would write rows against
 # a user_id with no `users` row behind it.
-DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 # The three Hevy resources, in the order `sync_all` walks them. Named for the operator
 # ("body") rather than for the table ("body_measurements"), because this is a keystroke.

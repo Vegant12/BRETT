@@ -12,6 +12,7 @@ Layer 1 of the three-layer FOUND-05 secret defense:
 Nothing here may ``print`` or log a settings value.
 """
 
+import uuid
 from functools import lru_cache
 from typing import Literal
 
@@ -22,6 +23,14 @@ from sqlalchemy.engine import make_url
 _SSL_REQUIRING_MODES = ("require", "verify-ca", "verify-full")
 
 _SECRET_FIELDS = ("database_url", "hevy_api_key", "mcp_auth_secret")
+
+# The single v1 user, fixed by migration 0002. A plain module constant and deliberately NOT a
+# `Settings` field: this is a migration-fixed identity, not configuration, and making it
+# env-overridable creates a way to point production at a `user_id` with no `users` row behind it.
+# `backend/migrations/versions/0002_seed_default_user.py` holds a second literal on purpose --
+# migrations must not import application code -- and `backend/tests/conftest.py` a third, because
+# a test asserting against a value it imports proves nothing. This is the only APPLICATION copy.
+DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
 class Settings(BaseSettings):
