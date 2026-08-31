@@ -170,7 +170,23 @@ Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
 4. No tool can write, modify, or delete any data; every tool is annotated read-only and a write attempt has no surface to reach
 5. No tool response or log line contains an API key, database credential, or internal token, verified by test
 
-**Plans**: TBD
+**Plans**: 11 plans
+
+Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
+
+- [ ] 06-01-PLAN.md — Wave 1: `DEFAULT_USER_ID` promoted to `app/config.py`; `mcp/tools/_common.py` (read-only session, Monday-anchored `weeks` window, name lookup, `@safe_tool`, ten cap constants); fast window tests (MCP-02, MCP-03, MCP-05, MCP-06)
+- [ ] 06-02-PLAN.md — Wave 1: `mcp/tools/schemas.py` — `_McpModel` plus the twelve tool response wrappers, the workout projections, the muscle rollup and the training-summary shape (MCP-02, MCP-03, MCP-06)
+- [ ] 06-03-PLAN.md — Wave 1: `hard_set_predicates` made public; read-only `db/repositories/workouts.py`; `committed_history` / `worst_case_history` conftest fixtures (MCP-02, MCP-03, MCP-05)
+- [ ] 06-04-PLAN.md — Wave 2: `fitness_get_recent_workouts`, `fitness_get_workout` (MCP-02, MCP-03, MCP-05, MCP-06)
+- [ ] 06-05-PLAN.md — Wave 2: `roll_up_muscles` plus `fitness_get_weekly_volume`, `fitness_get_muscle_group_volume`, `fitness_get_training_frequency` (MCP-02, MCP-03, MCP-05, MCP-06)
+- [ ] 06-06-PLAN.md — Wave 2: `fitness_get_exercise_progression`, `fitness_get_plateaus`, `fitness_get_personal_records` with the D-01/D-02 name resolution (MCP-02, MCP-03, MCP-05, MCP-06)
+- [ ] 06-07-PLAN.md — Wave 2: `fitness_compare_periods` (explicit dates, D-06) and the two anchored-on-today body tools (D-07) (MCP-02, MCP-03, MCP-05, MCP-06)
+- [ ] 06-08-PLAN.md — Wave 3: `fitness_get_training_summary` — the one-call composed picture (MCP-02, MCP-03, MCP-05, MCP-06)
+- [ ] 06-09-PLAN.md — Wave 4: register all twelve tools with `ToolAnnotations(read_only_hint=True)`; `test_mcp_tool_schemas.py`; `test_mcp_isolation.py` static guards (MCP-02, MCP-03, MCP-05, MCP-06)
+- [ ] 06-10-PLAN.md — Wave 5: `test_mcp_tool_budget.py` (D-13 byte budgets on the full `CallToolResult`) and `test_mcp_readonly.py` (PostgreSQL refuses the write) (MCP-03, MCP-05)
+- [ ] 06-11-PLAN.md — Wave 5: per-tool integration coverage, D-02 disambiguation, composed-summary proof, and the DSN-leak test parametrized over all thirteen tools (MCP-02, MCP-06)
+
+*This phase adds **zero** dependencies and creates **no** migration — it composes shipped Phase 4/5 analytics. Two facts drive the plan shape. First, `MuscleGroupVolumeResult` over a 52-week window measures 128 KB structured / ~348 KB on the wire, so `fitness_get_muscle_group_volume` rolls up to 19 rows over the window (Open Question 1, resolved by the user in favour of option (a)); the reshape is documented at the model that performs it and is the ONE exception to "compose, don't reshape". Second, `mcp 2.0.0` returns any escaping exception's `str()` to Claude verbatim and structlog never sees that channel, so `@safe_tool` is mandatory on all twelve tools and is enforced statically as well as behaviourally.*
 
 ### Phase 7: Production Hardening & Coaching Layer
 
@@ -199,7 +215,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Hevy Integration & Normalization               | 0/12           | Planned     | -         |
 | 4. Volume & Frequency Analytics                   | 0/9            | Planned     | -         |
 | 5. Progression, Records & Recomposition Analytics | 0/TBD          | Not started | -         |
-| 6. MCP Tools                                      | 0/TBD          | Not started | -         |
+| 6. MCP Tools                                      | 0/11           | Planned     | -         |
 | 7. Production Hardening & Coaching Layer          | 0/TBD          | Not started | -         |
 
 
