@@ -40,6 +40,13 @@ same question PROG-03 asks over a different window. numpy would do the regressio
 is BANNED (CLAUDE.md: ~50 MB, cold-start cost and float-comparison flakiness, for four sums).
 PostgreSQL's `regr_slope` is banned too: it returns `double precision` even for `numeric` inputs
 (verified), which asyncpg hands back as a Python float straight into a Decimal comparison.
+
+**A plateau and a DETRAINED exercise look identical without both numbers.** On the live account
+over a 12-week window, Leg Extension's recent performance is 68.2% of its historical best, Rear
+Delt Reverse Fly 73.8%, Bicep Curl 80.2%. "No new PR" is true both for someone grinding at 99% of
+their ceiling and for someone who deloaded to 68% of it, and labelling the second one "plateaued"
+is actively misleading. That is why `PlateauResult` carries `recent_performance_kg` beside
+`historical_best_kg` and never a bare boolean.
 """
 
 import datetime as dt
@@ -61,6 +68,7 @@ from app.analytics.schemas import (
     ExerciseProgressionResult,
     ExerciseTrend,
     ExerciseTrendsResult,
+    PlateauConfidence,
     ProgressionPoint,
     TrendVerdict,
 )
@@ -479,4 +487,143 @@ async def get_exercise_trends(
         freshness=await build_freshness(
             session, user_id=user_id, resources=FRESHNESS_RESOURCES_MUSCLE
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PROG-03: plateau detection. Built on the SAME D-04 series above -- a second "best set" rule here
+# is how the plateau verdict and the progression series would disagree about the same day.
+# ---------------------------------------------------------------------------
+
+# D-06. Four qualifying sessions AND three elapsed weeks -- whichever requires MORE evidence.
+# Session count alone is too permissive for a high-frequency exercise: 4 sessions of a bench
+# press trained 3x/week is 9-13 days, far below blueprint 21's own "3-6 weeks" floor and squarely
+# inside the day-to-day fluctuation range it warns against. On live data the calendar floor blocks
+# only 2 of 97 templates -- it is nearly inert today and costs nothing, and it is the guard that
+# holds if the user's training frequency ever changes.
+PLATEAU_MIN_QUALIFYING_SESSIONS = 4
+PLATEAU_MIN_ELAPSED_DAYS = 21
+
+# D-07. A 2% tolerance band, not a bare `>` against the strict historical maximum. ONE constant,
+# named exactly as CONTEXT.md specifies, following `INSUFFICIENT_DATA_SESSION_THRESHOLD`'s form.
+# Without the band, a lifter clearly trending up but bouncing within 1% of their peak -- sleep,
+# RPE variance, normal session-to-session noise -- is flagged as "no progress" purely on the
+# exact-max test. That is precisely the false positive blueprint 21 warns about.
+PLATEAU_IMPROVEMENT_TOLERANCE = Decimal("0.02")
+
+# D-19. D-06 fixes the MINIMUM evidence and says nothing about the MAXIMUM lookback, and "no new
+# PR since X" is unbounded by construction: an exercise abandoned after a peak stays plateaued
+# forever. Run over all 17 months of live history the scan flags 44 of 97 templates with durations
+# up to 402 days, including "Triceps Rope Pushdown: plateaued 402 days" for an exercise last
+# trained 2026-05-22. Literally true under D-06, and useless as coaching. At 12 weeks: 18 of 29
+# flagged at 27-75 days.
+DEFAULT_PLATEAU_LOOKBACK_WEEKS = 12
+
+_E1RM_MEAN_QUANTUM = Decimal("0.001")
+_ONE = Decimal(1)
+
+
+@dataclass(frozen=True, slots=True)
+class PlateauScan:
+    """The pure result of one streak scan. Frozen: nothing folds into it.
+
+    Separate from ``PlateauResult`` because the Pydantic model also carries the echoed-back
+    window and thresholds, which the scan itself has no opinion about.
+    """
+
+    plateaued: bool
+    streak_start: dt.date | None
+    qualifying_sessions: int
+    recent_performance_kg: Decimal | None
+    historical_best_kg: Decimal | None
+    confidence: PlateauConfidence
+
+
+def _plateau_confidence(qualifying_sessions: int) -> PlateauConfidence:
+    """Derived from the D-06 threshold rather than invented: 4-5 low, 6-9 medium, 10+ high.
+
+    Below D-06's floor the verdict is not "plateau" at all, so the confidence is LOW and
+    ``plateaued`` is False -- a high-confidence non-plateau is not a thing this function reports.
+    """
+    if qualifying_sessions >= 10:
+        return PlateauConfidence.HIGH
+    if qualifying_sessions >= 6:
+        return PlateauConfidence.MEDIUM
+    return PlateauConfidence.LOW
+
+
+def scan_plateau(
+    series: Sequence[SessionBest], *, historical_best: Decimal | None, as_of: dt.date
+) -> PlateauScan:
+    """D-06 / D-07 / D-07a / D-07b as a forward state machine over the D-04 series.
+
+    Pure and synchronous -- no session, no I/O -- so the tolerance band, the skip semantics and
+    both floors are testable with no container.
+
+    ``series`` MUST be ascending by ``local_day``. A streak read out of order is a WRONG answer,
+    not a flaky one, which is why ``qualifying_set_rows`` orders by ``(template, local_day,
+    workout_id, set_index)`` in SQL rather than leaving it to the caller.
+
+    A session BREAKS the streak iff ``e1rm > running_best * (1 + PLATEAU_IMPROVEMENT_TOLERANCE)``.
+    The breaking session then STARTS the new streak -- it is the most recent evidence of progress,
+    so the clock runs from it.
+
+    D-07a: sessions with ``best_e1rm_kg is None`` are SKIPPED entirely. They neither extend nor
+    break. On live data 376 of 2,239 exercise-sessions (16.8%) have no qualifying set, so without
+    this a deload week or a high-rep accessory day silently inflates every streak -- reading
+    "rep-scheme change" as "training stalled".
+
+    ``historical_best`` SEEDS ``running_best`` and is computed over all history strictly BEFORE
+    the lookback. Seeding from ``None`` instead makes the first in-window session "improve over
+    nothing", which manufactures a fake break at the window edge: on live data that moved 6
+    exercises from a correct full-window plateau to a shorter, later streak start, and the
+    reported duration then changes when the caller widens the lookback even though the training
+    did not.
+
+    ``as_of`` is the day the duration is measured TO -- the user's local today, not the last
+    session. "You have not PR'd in 40 days" is the useful sentence; "your streak spanned 26 days"
+    is not.
+    """
+    running_best = historical_best
+    streak_start: dt.date | None = None
+    streak_values: list[Decimal] = []
+
+    for best in series:
+        e1rm = best.best_e1rm_kg
+        if e1rm is None:
+            continue  # D-07a
+        breaks = running_best is not None and e1rm > running_best * (
+            _ONE + PLATEAU_IMPROVEMENT_TOLERANCE
+        )
+        if breaks:
+            streak_start = best.local_day
+            streak_values = [e1rm]
+        else:
+            if streak_start is None:
+                streak_start = best.local_day
+            streak_values.append(e1rm)
+        # The running best always includes in-window sessions, so a breaking session raises the
+        # bar for everything after it. Using only the pre-window history instead would let one
+        # big session be beaten repeatedly by smaller ones.
+        running_best = e1rm if running_best is None else max(running_best, e1rm)
+
+    qualifying = len(streak_values)
+    elapsed_days = 0 if streak_start is None else (as_of - streak_start).days
+    plateaued = (
+        qualifying >= PLATEAU_MIN_QUALIFYING_SESSIONS and elapsed_days >= PLATEAU_MIN_ELAPSED_DAYS
+    )
+    recent = (
+        None
+        if not streak_values
+        else (sum(streak_values, Decimal(0)) / Decimal(len(streak_values))).quantize(
+            _E1RM_MEAN_QUANTUM
+        )
+    )
+    return PlateauScan(
+        plateaued=plateaued,
+        streak_start=streak_start,
+        qualifying_sessions=qualifying,
+        recent_performance_kg=recent,
+        historical_best_kg=running_best,
+        confidence=_plateau_confidence(qualifying),
     )
