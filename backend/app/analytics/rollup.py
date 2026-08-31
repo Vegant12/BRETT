@@ -64,7 +64,7 @@ WARMUP_SET_TYPE = "warmup"
 # -- COUNTS as a hard set, exactly like any other non-warmup set. It contributes nothing to reps
 # or tonnage because those columns are NULL for it.
 #
-# ONE constant, checked in ONE place (`_hard_set_predicates`), so flipping this decision later is
+# ONE constant, checked in ONE place (`hard_set_predicates`), so flipping this decision later is
 # a one-line change. Do NOT scatter a modality list through the query or the fold: 24 live sets
 # are affected and the flip must not require finding every site.
 COUNT_DURATION_ONLY_SETS = True
@@ -175,12 +175,16 @@ class SetRollupRow:
     tonnage_kg: Decimal | None
 
 
-def _hard_set_predicates() -> list[Any]:
+def hard_set_predicates() -> list[Any]:
     """Which sets count as hard sets. VOL-01 plus U-02, in one place.
 
     Returns predicates rather than a single expression so the caller composes them into the
     same WHERE list as the user and window filters -- keeping every predicate visible in one
     statement instead of buried in a nested boolean.
+
+    Public because `app/db/repositories/workouts.py` composes the same rule into the per-workout
+    projection `fitness_get_recent_workouts` returns; two definitions of 'hard set' would let one
+    workout report different set counts through two different tools.
     """
     predicates: list[Any] = [WorkoutSet.set_type != WARMUP_SET_TYPE]
     if not COUNT_DURATION_ONLY_SETS:
@@ -240,7 +244,7 @@ async def weekly_set_rows(
             # instead was measured as a Seq Scan removing 299 of 327 rows.
             Workout.start_time >= window.utc_start,
             Workout.start_time < window.utc_end,
-            *_hard_set_predicates(),
+            *hard_set_predicates(),
         )
         # The grain is (week, workout, template), not (week, template). The coarser one is 16%
         # fewer rows and makes per-muscle session counts impossible to compute at all.
@@ -346,7 +350,7 @@ async def qualifying_set_rows(
         # EXCLUSION of warmup, never an allow-list of 'normal'. D-08 keeps 823 live dropset sets
         # and the declared-but-never-sent `failure` type fully PR-eligible; an allow-list would
         # drop both silently. One definition of the warm-up rule, reused -- never re-spelled.
-        *_hard_set_predicates(),
+        *hard_set_predicates(),
     ]
     if template_external_ids is not None:
         predicates.append(

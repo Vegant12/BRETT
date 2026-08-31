@@ -532,7 +532,7 @@ async def test_qualifying_set_rows_returns_set_grain(
 async def test_warmup_excluded_dropset_and_failure_kept(
     session: AsyncSession, golden_workout: GoldenBuilder
 ) -> None:
-    """D-08: PR eligibility is an EXCLUSION of ``warmup``, reusing ``_hard_set_predicates``.
+    """D-08: PR eligibility is an EXCLUSION of ``warmup``, reusing ``hard_set_predicates``.
 
     ``failure`` is declared in ``workout.py`` and has never been sent by Hevy, which is exactly
     why it is seeded here: an allow-list of ``normal`` passes every test written against today's

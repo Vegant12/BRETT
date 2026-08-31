@@ -9,7 +9,7 @@ to happen.
 live sets, 12% of all hard sets) and the declared-but-never-sent `failure` type fully eligible for
 every record type: a to-failure set is a real, hard effort, and rep PRs in particular happen ON a
 to-failure set by design. This module therefore does NOT re-check `set_type` --
-`rollup._hard_set_predicates()` is the one definition, and an allow-list of `'normal'` here would
+`rollup.hard_set_predicates()` is the one definition, and an allow-list of `'normal'` here would
 silently delete a tenth of the data.
 
 **D-02's 12-rep cap gates the ESTIMATE, never the observation.** The rep PR and the max-weight PR
