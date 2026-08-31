@@ -16,12 +16,12 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 - [x] Deployed to Google Cloud Run over HTTPS, connected as a Claude custom remote MCP connector (Desktop/Web/Mobile) — Validated in Phase 2: Deploy & Connector Auth Spike (2026-08-29); verified end-to-end via Claude Desktop against the live `/mcp` endpoint
 - [x] Hevy client isolated in `integrations/hevy/`, built against current official Hevy API docs; Hevy sync service (initial full sync with pagination, incremental sync via workout events, idempotent, handles deletions/errors/rate limits without corrupting data); Hevy data model (workouts, workout_exercises, sets); exercise normalization layer mapping exercise names to canonical muscle groups (primary/secondary), manually overridable — Validated in Phase 3: Hevy Integration & Normalization
 - [x] Analytics layer (deterministic, testable, lives outside MCP handlers), volume/frequency slice: weekly training volume (hard sets, reps, modality-aware tonnage), per-muscle-group volume with direct/indirect weighting and query-time override support, training frequency (overall + per muscle group), plus the freshness/coverage metadata envelope (DQ-01, DQ-02) every analytics response carries — Validated in Phase 4: Volume & Frequency Analytics (2026-08-30)
+- [x] Analytics layer, progression/records/recomposition slice: exercise progression time series with gated estimated-1RM, trend classification (improving/stable/declining/unclear), plateau detection reporting its window and threshold, personal record detection (max weight, max reps at a weight, estimated-1RM, session volume) excluding warm-up sets, per-week-normalized two-period comparison, body weight trend (7/14/30-day rolling averages + smoothed weekly rate of change), and a recomposition status verdict framed as decision-support — Validated in Phase 5: Progression, Records & Recomposition Analytics (2026-08-31)
 
 ### Active
 
 - [ ] Body measurements: manual entry model (weight minimum viable; body fat %, waist, chest, arm, thigh optional)
 - [ ] Nutrition: manual entry model (calories, protein, carbs, fat) — no scraping/auto-import in v1
-- [ ] Analytics layer, remaining slice: exercise progression, progressive-overload/plateau detection, personal record detection, weight trend (7/14/30-day averages), recomposition status classification (explicitly framed as decision-support, not medical/diagnostic)
 - [ ] Remote MCP server exposing purpose-built, read-only tools (fitness_get_recent_workouts, fitness_get_training_summary, fitness_get_weekly_volume, fitness_get_muscle_group_volume, fitness_get_exercise_progression, fitness_get_personal_records, fitness_get_plateaus, fitness_get_training_frequency, fitness_get_body_weight_trend, fitness_compare_periods, etc.) returning compact structured JSON
 - [ ] MCP authentication via strong bearer token (env secret) + HTTPS + rate limiting; no secrets ever returned in tool responses
 - [ ] Data freshness surfaced per source (last_synced_at) so Claude knows when data may be stale
@@ -84,4 +84,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-30 — Phase 4: Volume & Frequency Analytics complete*
+*Last updated: 2026-08-31 — Phase 5: Progression, Records & Recomposition Analytics complete*
