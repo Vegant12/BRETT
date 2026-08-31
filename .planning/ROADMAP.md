@@ -174,9 +174,9 @@ Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
 
 Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
 
-- [ ] 06-01-PLAN.md — Wave 1: `DEFAULT_USER_ID` promoted to `app/config.py`; `mcp/tools/_common.py` (read-only session, Monday-anchored `weeks` window, name lookup, `@safe_tool`, ten cap constants); fast window tests (MCP-02, MCP-03, MCP-05, MCP-06)
-- [ ] 06-02-PLAN.md — Wave 1: `mcp/tools/schemas.py` — `_McpModel` plus the twelve tool response wrappers, the workout projections, the muscle rollup and the training-summary shape (MCP-02, MCP-03, MCP-06)
-- [ ] 06-03-PLAN.md — Wave 1: `hard_set_predicates` made public; read-only `db/repositories/workouts.py`; `committed_history` / `worst_case_history` conftest fixtures (MCP-02, MCP-03, MCP-05)
+- [x] 06-01-PLAN.md — Wave 1: `DEFAULT_USER_ID` promoted to `app/config.py`; `mcp/tools/_common.py` (read-only session, Monday-anchored `weeks` window, name lookup, `@safe_tool`, ten cap constants); fast window tests (MCP-02, MCP-03, MCP-05, MCP-06)
+- [x] 06-02-PLAN.md — Wave 1: `mcp/tools/schemas.py` — `_McpModel` plus the twelve tool response wrappers, the workout projections, the muscle rollup and the training-summary shape (MCP-02, MCP-03, MCP-06)
+- [x] 06-03-PLAN.md — Wave 1: `hard_set_predicates` made public; read-only `db/repositories/workouts.py`; `committed_history` / `worst_case_history` conftest fixtures (MCP-02, MCP-03, MCP-05)
 - [ ] 06-04-PLAN.md — Wave 2: `fitness_get_recent_workouts`, `fitness_get_workout` (MCP-02, MCP-03, MCP-05, MCP-06)
 - [ ] 06-05-PLAN.md — Wave 2: `roll_up_muscles` plus `fitness_get_weekly_volume`, `fitness_get_muscle_group_volume`, `fitness_get_training_frequency` (MCP-02, MCP-03, MCP-05, MCP-06)
 - [ ] 06-06-PLAN.md — Wave 2: `fitness_get_exercise_progression`, `fitness_get_plateaus`, `fitness_get_personal_records` with the D-01/D-02 name resolution (MCP-02, MCP-03, MCP-05, MCP-06)
