@@ -50,6 +50,22 @@ _WRITE_IMPORT = re.compile(
     r"^\s*from\s+sqlalchemy\s+import\s+.*\b(?:insert|update|delete)\b", re.MULTILINE
 )
 
+# C-2: `Decimal`, never `float`. Anchored on the CONSTRUCTOR and the ANNOTATION positions, never
+# the bare word -- `estimates.py`, `schemas.py` and `rollup.py` all use the words "float" and
+# "binary floating point" in prose explaining why they do not use one, and a substring check
+# would fail on the sentence documenting the rule (the trap recorded at
+# `test_hevy_isolation.py:88-93`). A leaked float is how `regr_slope`'s `double precision` or
+# `statistics.linear_regression` would enter, and it turns an exact Decimal comparison into a
+# test that needs `pytest.approx`.
+_FLOAT_USE = re.compile(r"(?<![\w.])float\s*\(|:\s*float\b|->\s*float\b|\[\s*float\s*[],]")
+
+# Pitfall 1, the structural half of the defence (the docstring in `estimates.py` is the other
+# half, and neither alone is enough). `weight_kg * (1 + reps / 30)` in PostgreSQL uses INTEGER
+# division: `SELECT 10 * (1 + 8/30)` returns `10`, the bare weight. The guard is keyed on the
+# divisor rather than on the word "Epley", because the wrong version would never be labelled.
+# `estimates.py` is the ONE module allowed to divide by 30, and it does so in Python.
+_DIVIDE_BY_THIRTY = re.compile(r"/\s*30\b|Decimal\s*\(\s*30\s*\)|_THIRTY")
+
 
 def _analytics_modules() -> list[Path]:
     """Every committed module under `app/analytics/`.
@@ -68,7 +84,10 @@ def test_the_walk_actually_finds_files() -> None:
     """
     modules = _analytics_modules()
 
-    assert len(modules) >= 2, f"the walk found only {len(modules)} modules under {ANALYTICS}"
+    # As of Phase 5 the package holds `__init__`, `schemas`, `metadata`, `rollup`, `volume` and
+    # `frequency` at minimum. The floor rises with the package on purpose: a floor of 2 stayed
+    # satisfied by a walk that had silently lost most of what it was supposed to be checking.
+    assert len(modules) >= 6, f"the walk found only {len(modules)} modules under {ANALYTICS}"
 
 
 def test_analytics_does_not_import_integrations() -> None:
@@ -159,3 +178,47 @@ def test_analytics_never_writes() -> None:
             f"MCP-05 violated: {path.relative_to(REPO_ROOT)} imports a write construct from "
             f"sqlalchemy. A read path has no use for insert/update/delete"
         )
+
+
+def test_analytics_declares_no_float() -> None:
+    """C-2: exact `Decimal` end to end, statically.
+
+    A leaked float does not announce itself. It makes two arithmetically identical totals
+    compare unequal, which surfaces as a flaky equality assertion somewhere far from the cause,
+    and the usual "fix" is to reach for a tolerance -- at which point the analytics no longer
+    have exact answers and nobody notices when they drift further.
+
+    Anchored on the constructor and annotation positions rather than the bare word, because
+    `estimates.py`, `schemas.py` and `rollup.py` all use "float" and "binary floating point" in
+    prose explaining why they avoid one.
+    """
+    for path in _analytics_modules():
+        source = path.read_text(encoding="utf-8")
+        assert not _FLOAT_USE.search(source), (
+            f"C-2 violated: {path.relative_to(REPO_ROOT)} constructs or annotates a float. "
+            "Binary floating point makes two arithmetically identical totals compare unequal, "
+            "and it is how `regr_slope`'s double precision or `statistics.linear_regression` "
+            "enters the analytics package. Use Decimal."
+        )
+
+
+def test_epley_is_computed_only_in_estimates() -> None:
+    """Pitfall 1: the e1RM divisor may appear in exactly one module, and never inside SQL.
+
+    Keyed on the DIVISOR, not on the word "Epley" -- a copy of the formula pushed down into a
+    SQL expression would never be labelled, and that is precisely the copy this has to catch.
+    The failure is silent by construction: PostgreSQL integer division makes the "estimate"
+    equal the bare weight lifted, a number of the right magnitude in the right units on which
+    every downstream `>` and `max` still works.
+    """
+    offenders = [
+        path.relative_to(REPO_ROOT)
+        for path in _analytics_modules()
+        if path.name != "estimates.py"
+        and _DIVIDE_BY_THIRTY.search(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        f"the Epley divisor appears outside estimates.py: {offenders}. In PostgreSQL "
+        "`weight * (1 + reps/30)` is integer division and returns the BARE WEIGHT -- verified, "
+        "`SELECT 10 * (1 + 8/30)` returns 10. Call `estimates.estimate_1rm` instead."
+    )
