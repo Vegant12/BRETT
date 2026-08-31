@@ -18,23 +18,32 @@ session-scoped container clean whether the test passes or fails.
 """
 
 import datetime as dt
+import inspect
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analytics import schemas
 from app.analytics.metadata import (
+    FRESHNESS_RESOURCES_ALL,
+    FRESHNESS_RESOURCES_BODY,
     FRESHNESS_RESOURCES_MUSCLE,
     INSUFFICIENT_DATA_SESSION_THRESHOLD,
+    MEASURED_DAY_FLOORS,
     build_coverage,
     build_freshness,
+    build_measurement_coverage,
+    earliest_measurement_at,
     is_insufficient,
+    is_measurement_insufficient,
 )
-from app.analytics.schemas import FreshnessMetadata
+from app.analytics.schemas import FreshnessMetadata, RecompositionStatus, _AnalyticsModel
 from app.core.time import local_range_bounds
 from app.db.repositories.sync_state import (
     PROVIDER_HEVY,
+    RESOURCE_BODY_MEASUREMENTS,
     RESOURCE_EXERCISE_TEMPLATES,
     RESOURCE_WORKOUTS,
     complete_sync,
@@ -374,3 +383,303 @@ async def test_coverage_does_not_count_another_users_workouts(
     )
     assert mine.insufficient_data is True
     assert theirs.insufficient_data is False
+
+
+# Phase 5 (05-03): D-15's day-grained coverage floors, and the leak guard widened from one model
+# to every analytics return type.
+
+# The 18 return models Phase 5 adds. Named by hand ON PURPOSE, so the dynamic walk below has
+# something to be checked AGAINST: a walk that silently found nothing would make every guard in
+# this section vacuously true -- the same trap `test_analytics_isolation.py` guards against with
+# `test_the_walk_actually_finds_files`.
+_PHASE_5_MODELS = frozenset(
+    {
+        "MeasurementCoverage",
+        "ProgressionPoint",
+        "ExerciseProgressionResult",
+        "ExerciseTrend",
+        "ExerciseTrendsResult",
+        "PlateauResult",
+        "PlateauReport",
+        "PersonalRecord",
+        "RepsAtWeightRecord",
+        "PersonalRecordsResult",
+        "ComparisonRate",
+        "ComparisonLevel",
+        "MuscleGroupComparison",
+        "PeriodSummary",
+        "PeriodComparisonResult",
+        "BodyWeightTrendResult",
+        "AggregateProgression",
+        "RecompositionResult",
+    }
+)
+
+# MCP-06 / DQ-01. The first four are `sync_state`'s internals, which `build_freshness`'s own
+# comment already forbids; the rest are credential-shaped names that must never become a field on
+# something Claude can read. Asserted over the WHOLE package rather than per model, because a
+# per-model list is a list somebody forgets to extend.
+_FORBIDDEN_FIELD_NAMES = frozenset(
+    {
+        "last_error",
+        "status",
+        "cursor_page",
+        "cursor_timestamp",
+        "api_key",
+        "database_url",
+        "token",
+        "password",
+        "dsn",
+    }
+)
+
+# The ONE deliberate collision, exempted by name and immediately re-pinned by TYPE below.
+# `RecompositionResult.status` is blueprint 26's seven-value recomposition classification; the
+# forbidden `status` is `sync_state`'s RUN status ("idle"/"running"/"error"). Same word, opposite
+# provenance. The exemption is narrow and the annotation assertion is what stops it from later
+# being widened into a hole a sync status could travel through.
+_FORBIDDEN_NAME_EXEMPTIONS: dict[str, frozenset[str]] = {
+    "RecompositionResult": frozenset({"status"}),
+}
+
+
+def _analytics_return_models() -> dict[str, type[_AnalyticsModel]]:
+    """Every concrete `_AnalyticsModel` subclass declared in `app.analytics.schemas`.
+
+    Discovered from the module namespace rather than from a hand-maintained list, so a model
+    added by a later Phase 5 plan is covered by the guards below the moment it exists, without
+    anybody remembering to register it here.
+    """
+    return {
+        name: obj
+        for name, obj in vars(schemas).items()
+        if isinstance(obj, type) and issubclass(obj, _AnalyticsModel) and obj is not _AnalyticsModel
+    }
+
+
+def test_measured_day_floors_both_sides_of_every_boundary() -> None:
+    """D-15: three windows, three INDEPENDENT floors, both sides of each pinned.
+
+    Pinning only the True side would leave `<` and `<=` indistinguishable, so an off-by-one would
+    ship green and flag a perfectly well-measured week as untrustworthy -- or, worse, the reverse.
+
+    The floors are per window because a 30-day average can be trustworthy while the 7-day one is
+    not. A single shared threshold would make `insufficient_data` mean "the sparsest window was
+    sparse", which is not a fact about the average it is attached to.
+    """
+    assert dict(MEASURED_DAY_FLOORS) == {7: 3, 14: 5, 30: 10}
+
+    assert is_measurement_insufficient(window_days=7, measured_days=2) is True, "7-day floor is 3"
+    assert is_measurement_insufficient(window_days=7, measured_days=3) is False, "7-day floor is 3"
+    assert is_measurement_insufficient(window_days=14, measured_days=4) is True, "14-day floor is 5"
+    assert is_measurement_insufficient(window_days=14, measured_days=5) is False, (
+        "14-day floor is 5"
+    )
+    assert is_measurement_insufficient(window_days=30, measured_days=9) is True, (
+        "30-day floor is 10"
+    )
+    assert is_measurement_insufficient(window_days=30, measured_days=10) is False, (
+        "30-day floor is 10"
+    )
+
+    with pytest.raises(TypeError):
+        MEASURED_DAY_FLOORS[7] = 1  # type: ignore[index]
+
+
+def test_unsupported_measurement_window_raises() -> None:
+    """T-05-18: an unchosen window is a caller bug, and the complaint carries no value.
+
+    A permissive default would silently accept a 21-day window whose floor nobody picked and
+    report `insufficient_data=False` for it. Raising is the only answer that cannot be misread.
+    """
+    with pytest.raises(ValueError) as exc:
+        is_measurement_insufficient(window_days=21, measured_days=5)
+
+    assert str(exc.value) == "unsupported measurement window length"
+    assert not any(ch.isdigit() for ch in str(exc.value)), (
+        "error text will be logged; it must carry no value (FOUND-05, ASVS V7)"
+    )
+
+
+def test_build_measurement_coverage_is_synchronous() -> None:
+    """The divergence from `build_coverage` is deliberate, so it is pinned rather than assumed."""
+    assert not inspect.iscoroutinefunction(build_measurement_coverage), (
+        "BODY-01 fetches once and folds five ways; an async builder per window turns one query "
+        "into five"
+    )
+
+    coverage = build_measurement_coverage(
+        window_days=30, measured_days=10, earliest_measurement_at=dt.date(2026, 3, 1)
+    )
+    assert coverage.window_days == 30
+    assert coverage.measured_days_in_window == 10
+    assert coverage.insufficient_data is False
+    assert coverage.earliest_measurement_at == dt.date(2026, 3, 1)
+
+
+def test_the_model_walk_covers_every_phase_5_return_model() -> None:
+    """A guard on the guards: the two leak tests below iterate whatever this walk returns.
+
+    If the walk were ever wrong -- a moved module, a renamed base class -- it returns nothing and
+    both security assertions pass while checking nothing at all. Naming Phase 5's 18 models
+    explicitly is what turns that silent pass into a failure.
+
+    The floor rises with the package on purpose, matching `test_analytics_isolation.py`'s
+    convention: an exact count would break every time a later plan legitimately adds a model,
+    and it would buy nothing -- the walk is over the module namespace, so no model can escape it.
+    """
+    discovered = set(_analytics_return_models())
+
+    assert _PHASE_5_MODELS <= discovered, (
+        f"the walk missed Phase 5 models: {sorted(_PHASE_5_MODELS - discovered)}"
+    )
+    # 10 pre-existing Phase 4 models plus Phase 5's 18.
+    assert len(discovered) >= 28, f"the walk found only {len(discovered)} analytics return models"
+
+
+def test_no_new_model_declares_a_forbidden_field() -> None:
+    """T-05-16, structurally and over the whole package -- and never skippable.
+
+    `extra="forbid"` stops a bookkeeping field being smuggled in at construction time; it happily
+    accepts one ADDED to the model. This is the other direction, and it must keep running when
+    Docker does not, for the reason this module's docstring gives: a security guarantee that can
+    be skipped is a security guarantee that will be.
+    """
+    for name, model in sorted(_analytics_return_models().items()):
+        exempt = _FORBIDDEN_NAME_EXEMPTIONS.get(name, frozenset())
+        offenders = (set(model.model_fields) & _FORBIDDEN_FIELD_NAMES) - exempt
+        assert not offenders, (
+            f"MCP-06: sync internals and credentials must never reach a Claude-readable "
+            f"response -- {name} declares {sorted(offenders)}"
+        )
+
+    # The exemption is re-pinned by TYPE so it cannot later be widened into a hole a sync run
+    # status could travel through under the same field name.
+    assert schemas.RecompositionResult.model_fields["status"].annotation is RecompositionStatus, (
+        "the `status` exemption is granted to BODY-02's recomposition classification ONLY. A "
+        "different type behind that name is sync_state's run status arriving by the back door"
+    )
+
+
+def test_every_new_model_hides_input_in_errors() -> None:
+    """T-05-15. Asserted over every subclass, so a future model cannot opt out by omission.
+
+    Phase 5's models carry body weight, the most sensitive number in this project. A model that
+    declared its own `model_config` and dropped `hide_input_in_errors` would look completely
+    ordinary in review and would only be discovered by finding a weigh-in in a log file.
+    """
+    models = _analytics_return_models()
+    assert models, "the walk found no models -- every assertion below would be vacuous"
+
+    for name, model in sorted(models.items()):
+        config = model.model_config
+        assert config.get("hide_input_in_errors") is True, (
+            f"ASVS V8: a ValidationError would otherwise render a body weight into a log line "
+            f"-- {name}"
+        )
+        assert config.get("frozen") is True, (
+            f"a result object a caller can mutate is a result object two callers will disagree "
+            f"about -- {name}"
+        )
+        assert config.get("extra") == "forbid", (
+            f"an unexpected field here is a bug in this repo and must fail loudly rather than "
+            f"be dropped -- {name}"
+        )
+
+
+# Body-measurement freshness and the all-time earliest weigh-in (BODY-01, BODY-02).
+
+# A third distinct timestamp, so a builder that read one row and reported it three times would be
+# unmistakable rather than a coincidence.
+_SYNCED_BODY_AT = dt.datetime(2026, 8, 30, 6, 21, 47, tzinfo=dt.UTC)
+
+_FIRST_WEIGH_IN = dt.date(2026, 3, 1)
+_LATER_WEIGH_IN = dt.date(2026, 8, 1)
+_OTHER_TENANT_WEIGH_IN = dt.date(2025, 1, 1)
+
+
+@pytest.mark.integration
+async def test_body_freshness_reports_the_body_measurements_resource(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """DQ-01 extended to the third sync resource, and to BODY-02's three-way answer.
+
+    `FRESHNESS_RESOURCES_ALL` exists because BODY-02 reads both sides: a stale `exercise_templates`
+    sync silently changes every e1RM eligibility decision (D-03 gates on `exercise_type`), which
+    changes the progression signal, with no error anywhere. Reporting only the body sync's
+    freshness there would hide exactly the staleness that moves the answer.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await complete_sync(
+        session,
+        user_id=ANALYTICS_SECOND_USER_ID,
+        provider=PROVIDER_HEVY,
+        resource=RESOURCE_BODY_MEASUREMENTS,
+        last_synced_at=_SYNCED_BODY_AT,
+    )
+    await complete_sync(
+        session,
+        user_id=ANALYTICS_SECOND_USER_ID,
+        provider=PROVIDER_HEVY,
+        resource=RESOURCE_WORKOUTS,
+        last_synced_at=_SYNCED_WORKOUTS_AT,
+    )
+    await session.flush()
+
+    body = await build_freshness(
+        session, user_id=ANALYTICS_SECOND_USER_ID, resources=FRESHNESS_RESOURCES_BODY
+    )
+
+    assert body.resources == {RESOURCE_BODY_MEASUREMENTS: _SYNCED_BODY_AT}
+
+    everything = await build_freshness(
+        session, user_id=ANALYTICS_SECOND_USER_ID, resources=FRESHNESS_RESOURCES_ALL
+    )
+
+    assert set(everything.resources) == {
+        RESOURCE_WORKOUTS,
+        RESOURCE_EXERCISE_TEMPLATES,
+        RESOURCE_BODY_MEASUREMENTS,
+    }
+    assert everything.resources[RESOURCE_BODY_MEASUREMENTS] == _SYNCED_BODY_AT
+    assert everything.resources[RESOURCE_WORKOUTS] == _SYNCED_WORKOUTS_AT
+    assert everything.resources[RESOURCE_EXERCISE_TEMPLATES] is None, (
+        "a never-synced resource reports None rather than being omitted -- a missing key is "
+        "indistinguishable from 'the resource does not exist'"
+    )
+
+
+@pytest.mark.integration
+async def test_earliest_measurement_at_is_all_time_and_tenant_scoped(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """The body-weight analogue of `earliest_data_at`, with the same two failure modes.
+
+    All-time rather than window-scoped, because that is what separates "you did not weigh in
+    during that window" from "your synced history does not reach back that far". And the second
+    user is seeded EARLIER than the first, so a missing `user_id` predicate cannot pass by
+    accident -- an unscoped `MIN` would return their date, not this user's.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.body_measurement(measured_on=_FIRST_WEIGH_IN, weight_kg=Decimal("66.10"))
+    await golden_workout.body_measurement(measured_on=_LATER_WEIGH_IN, weight_kg=Decimal("65.40"))
+    await golden_workout.body_measurement(
+        measured_on=_OTHER_TENANT_WEIGH_IN,
+        weight_kg=Decimal("70.00"),
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+
+    mine = await earliest_measurement_at(session, user_id=DEFAULT_USER_ID)
+    theirs = await earliest_measurement_at(session, user_id=ANALYTICS_SECOND_USER_ID)
+
+    # Guard against a vacuous pass: if the fixture wrote nothing, both would be None and equal.
+    assert theirs == _OTHER_TENANT_WEIGH_IN
+    assert mine == _FIRST_WEIGH_IN, (
+        "another user's weigh-in leaked into this user's earliest date (ASVS V4)"
+    )
+
+    assert isinstance(mine, dt.date)
+    assert not isinstance(mine, dt.datetime), (
+        "`measured_on` is a calendar Date; a datetime here means somebody invented a time of day "
+        "for a weigh-in"
+    )
