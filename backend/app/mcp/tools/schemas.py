@@ -46,9 +46,13 @@ from app.analytics.schemas import (
     PeriodSummary,
     PersonalRecordsResult,
     PlateauResult,
+    ProgressionSignal,
     RecompositionResult,
+    RecompositionStatus,
+    TrendVerdict,
     WeeklyVolumeResult,
 )
+from app.normalization.muscles import CanonicalMuscleGroup
 
 
 class _McpModel(BaseModel):
@@ -183,3 +187,181 @@ class RecompositionResponse(_McpModel):
 
     data_available: bool
     recomposition: RecompositionResult | None
+
+
+class WorkoutSummary(_McpModel):
+    """D-09: one workout, no per-exercise and no per-set breakdown.
+
+    This omission is what keeps the list compact regardless of how many workouts are requested --
+    ``fitness_get_workout_detail`` exists to expand exactly one of these on demand.
+
+    ``workout_id`` is the HEVY EXTERNAL ID (``workouts.external_id``), never the internal
+    ``workouts.id`` surrogate (D-12, T-06-08).
+    """
+
+    workout_id: str
+    local_day: dt.date
+    title: str
+    duration_minutes: int
+    exercise_count: int
+    hard_sets: int
+    tonnage_sets: int
+    tonnage_kg: Decimal | None
+
+
+class RecentWorkoutsResponse(_McpModel):
+    """D-09. ``limit`` is echoed back so a short list reads as "that is all there is" rather than
+    as "the tool cut it off"."""
+
+    data_available: bool
+    limit: int
+    workouts: list[WorkoutSummary]
+    freshness: FreshnessMetadata | None
+
+
+class WorkoutSetDetail(_McpModel):
+    """One logged set, exactly as recorded. ``set_type`` is carried on EVERY set because this
+    projection includes warm-ups and the reader must be able to tell them apart."""
+
+    set_index: int
+    set_type: str
+    weight_kg: Decimal | None
+    reps: int | None
+    distance_meters: Decimal | None
+    duration_seconds: int | None
+    rpe: Decimal | None
+
+
+class WorkoutExerciseDetail(_McpModel):
+    """One exercise within a workout. ``supersets_id`` is ``None`` unless Hevy grouped it."""
+
+    exercise_index: int
+    title: str
+    exercise_template_external_id: str
+    supersets_id: int | None
+    sets: list[WorkoutSetDetail]
+
+
+class WorkoutDetail(_McpModel):
+    """D-11: the full breakdown for exactly ONE workout.
+
+    ``sets`` includes WARM-UPS, unlike every volume figure in this phase -- this is the raw record
+    of what happened, not an analytics rollup -- and ``set_type`` is carried on every set so the
+    reader can tell them apart. Never sum these sets into a "hard sets" figure; that number comes
+    from ``app/analytics/`` and only from there.
+    """
+
+    workout_id: str
+    local_day: dt.date
+    title: str
+    duration_minutes: int
+    exercises: list[WorkoutExerciseDetail]
+    sets_truncated: bool
+    total_sets: int
+
+
+class WorkoutDetailResponse(_McpModel):
+    """``found=False`` with ``workout=None`` means no workout carries that id for this user -- an
+    ordinary SUCCESSFUL result, not an error. Raising here would put the requested id into the
+    SDK's error text; reporting it as a field keeps ``is_error`` false."""
+
+    data_available: bool
+    requested_workout_id: str
+    found: bool
+    workout: WorkoutDetail | None
+    freshness: FreshnessMetadata | None
+
+
+class MuscleGroupRollup(_McpModel):
+    """One muscle group's whole-window totals. THE ONE DELIBERATE RESHAPE IN THIS PHASE.
+
+    CONTEXT.md's rule is "compose these, do not reshape them". This model breaks it exactly once,
+    on purpose, for a measured reason: ``MuscleGroupVolumeResult``'s shape is weeks x 19 muscle
+    groups, so D-04's 52-week cap bounds it at 988 rows -- 128,290 bytes of structured JSON and
+    ~347,707 bytes on the wire. Rolled up over the window it is 19 rows and ~7,851 bytes at ANY
+    window. The per-week TOTAL trend is still available from ``fitness_get_weekly_volume``, and
+    muscle-level period-over-period movement from ``fitness_compare_periods``; what is given up
+    is the per-week x per-muscle grid, which is not what "which muscles are undertrained?" asks.
+
+    ``direct_sets``/``indirect_sets``/``weighted_sets`` are SUMS over the window's weeks -- set
+    counts are additive. ``sessions``/``sessions_per_week`` are NOT: they come from
+    ``get_training_frequency``, which de-duplicates workouts across the whole window. Summing
+    per-week session counts inflated 14 of 16 muscle groups by up to 4.0x on real data
+    (``analytics/frequency.py`` module docstring).
+
+    Never sum these ACROSS muscle groups either: one template maps to up to 9 muscle groups, so a
+    cross-muscle total is several times the truth and it looks plausible.
+    """
+
+    muscle_group: CanonicalMuscleGroup
+    direct_sets: int
+    indirect_sets: int
+    weighted_sets: Decimal
+    sessions: int
+    sessions_per_week: Decimal
+    insufficient_data: bool
+
+
+class MuscleGroupVolumeResponse(_McpModel):
+    """VOL-02 for MCP. ``muscles`` ALWAYS has 19 rows, one per canonical muscle group, sorted by
+    ``muscle_group.value`` -- an untrained group is a ZERO ROW, never an absence.
+
+    A zero row is the most diagnostically interesting one for "which muscles are undertrained?",
+    which is exactly why it must not be omitted. An absent group would read as "no data" when the
+    fact is "no training".
+    """
+
+    data_available: bool
+    window_start: dt.date | None
+    window_end: dt.date | None
+    weeks: int | None
+    muscles: list[MuscleGroupRollup]
+    coverage: CoverageMetadata | None
+    freshness: FreshnessMetadata | None
+
+
+class SummaryVolumeWeek(_McpModel):
+    """One week of VOL-01 inside the summary. ``tonnage_sets`` is dropped relative to
+    ``WeeklyVolumeWeek``; ``fitness_get_weekly_volume`` is where the full row lives."""
+
+    week_start: dt.date
+    sessions: int
+    hard_sets: int
+    total_reps: int | None
+    tonnage_kg: Decimal | None
+
+
+class TrainingSummaryResponse(_McpModel):
+    """D-08: the one call that answers PROJECT.md's two Core Value questions.
+
+    Deliberately EXCLUDES personal records and plateaus -- those keep their own tools rather than
+    duplicating data into the one tool every conversation opens with. Deliberately excludes the
+    per-exercise frequency list and the per-week x per-muscle grid: composing the four analytics
+    results verbatim measures ~24 KB structured / ~57 KB wire at a 4-week window; this shape is
+    ~3,963 / ~9,502.
+
+    ``recomposition_disclaimer`` is carried through VERBATIM from
+    ``RecompositionResult.disclaimer``. That field's own docstring calls it "a REQUIRED FIELD,
+    not documentation" precisely so a Phase 6 serialization change cannot drop it; dropping it
+    here is exactly the failure it anticipates (T-06-09).
+
+    ``progression_signal`` beside ``recomposition_status`` for the same reason BODY-02 pairs
+    them: "likely_muscle_gain" with a "negative" signal is a real and important disagreement, and
+    a single label hides it.
+    """
+
+    data_available: bool
+    window_start: dt.date | None
+    window_end: dt.date | None
+    weeks: int | None
+    sessions_per_week: Decimal | None
+    volume_by_week: list[SummaryVolumeWeek]
+    muscles: list[MuscleGroupRollup]
+    recomposition_status: RecompositionStatus | None
+    recomposition_disclaimer: str | None
+    progression_signal: ProgressionSignal | None
+    progression_verdict: TrendVerdict | None
+    weight_trend_rate_percent_per_week: Decimal | None
+    average_7d_kg: Decimal | None
+    coverage: CoverageMetadata | None
+    freshness: FreshnessMetadata | None
