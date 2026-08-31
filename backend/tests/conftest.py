@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from testcontainers.community.postgres import PostgresContainer
 
+from app.db.models.body import BodyMeasurement
 from app.db.models.exercise import ExerciseMuscle, ExerciseTemplate
 from app.db.models.user import User
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
@@ -383,6 +384,45 @@ class GoldenBuilder:
             )
         await self._session.flush()
         return external_id
+
+    async def body_measurement(
+        self,
+        *,
+        measured_on: dt.date,
+        weight_kg: Decimal | None,
+        source: str = "hevy",
+        user_id: uuid.UUID = DEFAULT_USER_ID,
+    ) -> None:
+        """One ``body_measurements`` row. Same flush-and-rollback contract as every other method.
+
+        ``weight_kg`` is a ``Decimal``, never a ``float``: these average into rolling 7/14/30-day
+        figures, and binary floating point would make two arithmetically identical averages
+        compare unequal.
+
+        ``source`` is a PARAMETER with a ``'hevy'`` default, not a constant, because D-14's
+        tie-break test has to write both a ``'hevy'`` and a ``'manual'`` row for the SAME
+        ``measured_on`` -- which the natural key ``(user_id, source, measured_on)`` permits and
+        which is the entire reason D-14 exists. Only ``'hevy'`` rows exist in production today.
+
+        ``measured_on`` is a calendar ``dt.date`` and is stored as one. ``body.py``'s module
+        docstring is explicit that inventing a time of day for a weigh-in would be wrong, so
+        there is no timezone conversion anywhere in this method.
+
+        No external id: body-measurement rows are keyed on the natural key, so cross-test
+        isolation comes from ``ANALYTICS_SECOND_USER_ID`` for the tenant cases and from the
+        ``golden_workout`` fixture's ``finally: await session.rollback()`` for everything else.
+        """
+        await self._session.execute(
+            insert(BodyMeasurement).values(
+                id=uuid.uuid4(),
+                user_id=user_id,
+                source=source,
+                external_id=None,
+                measured_on=measured_on,
+                weight_kg=weight_kg,
+            )
+        )
+        await self._session.flush()
 
     async def override(
         self,
