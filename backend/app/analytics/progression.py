@@ -25,11 +25,26 @@ template on the live account spans reps 5 to 12 with a standard deviation of 1.9
 multiplier ranges 1.167 to 1.400 across that span. D-04's max-per-day absorbs most of it; D-07's
 2% tolerance and D-05's 4-week minimum absorb the rest. Do not "fix" a 3% week-to-week wobble --
 it is rep-scheme noise, and per-rep-range normalization is AN-V1X territory.
+
+**PROG-02 and PROG-03 will disagree on real data, and both will be right.** On the live account
+Overhead Press is `improving` at +1.51%/week over 11 weeks AND plateaued over its last 4 qualifying
+sessions since 2026-08-01. They answer different questions over different windows -- "is the trend
+up across the whole window" versus "has the ceiling moved recently". That is why both return types
+carry their window as a FIELD: a verdict without its window is a contradiction waiting to be
+narrated. The shared derivation of the dead-band (D-07's 2% over D-05's 4 weeks) is the structural
+half of the fix; the explicit windows are the reporting half.
+
+**The trend is a least-squares slope over the week's BEST e1RM, not its mean.** The mean is
+dragged down by a deliberately light day, and PROG-02 is asking "is your ceiling rising" -- the
+same question PROG-03 asks over a different window. numpy would do the regression in one call and
+is BANNED (CLAUDE.md: ~50 MB, cold-start cost and float-comparison flakiness, for four sums).
+PostgreSQL's `regr_slope` is banned too: it returns `double precision` even for `numeric` inputs
+(verified), which asyncpg hands back as a Python float straight into a Decimal comparison.
 """
 
 import datetime as dt
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -42,7 +57,12 @@ from app.analytics.metadata import (
     build_freshness,
 )
 from app.analytics.rollup import QualifyingSetRow, qualifying_set_rows, resolve_window
-from app.analytics.schemas import ExerciseProgressionResult, ProgressionPoint
+from app.analytics.schemas import (
+    ExerciseProgressionResult,
+    ProgressionPoint,
+    TrendVerdict,
+)
+from app.core.time import snap_local_week_range
 
 # The leading slot of the comparison key: an ESTIMATED set always outranks an unestimated one,
 # whatever their magnitudes. `Decimal` rather than `int` so the whole key is one numeric type and
@@ -261,3 +281,122 @@ async def get_exercise_progression(
             session, user_id=user_id, resources=FRESHNESS_RESOURCES_MUSCLE
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# PROG-02: the improving / stable / declining / unclear verdict. Built on the SAME D-04 series
+# above -- one definition of "the lifter got stronger", not a second one that would eventually
+# disagree with the series Claude reads next to it.
+# ---------------------------------------------------------------------------
+
+# D-05: fewer than four distinct TRAINING WEEKS for this exercise -> `unclear`, never a guess.
+# Blueprint 20's "do not classify progression based on a single workout", scaled to a number.
+MIN_TREND_WEEKS = 4
+
+# D-18. DERIVED, not invented: D-07 tolerates a 2% e1RM band before calling a session an
+# improvement, and D-05 sets 4 weeks as the minimum meaningful window. 2% / 4 weeks = 0.5%/week.
+# Sharing one underlying number means PROG-02 and PROG-03 cannot contradict each other by
+# construction -- an exercise cannot read as "improving" at a rate PROG-03's tolerance would
+# refuse to call an improvement.
+#
+# UNITS: this is compared against `rate_percent_per_week`, which is `100 * slope / mean` and is
+# therefore in PERCENT. CONTEXT.md's D-18 writes the same band in FRACTION form as
+# Decimal("0.005"); the two are the same decision in different units. Writing 0.005 here would be
+# a band of 0.005%/week -- a hundred times too tight -- and every exercise on the live account
+# would classify as improving or declining. Do not "correct" this to match CONTEXT.md's literal.
+#
+# Live-data validation at 0.5: 9 improving / 9 stable / 10 declining across 28 classified
+# exercises. The band lands between real clusters rather than splitting one.
+TREND_STABLE_BAND_PERCENT_PER_WEEK = Decimal("0.5")
+
+_SLOPE_QUANTUM = Decimal("0.0001")
+_PERCENT_QUANTUM = Decimal("0.01")
+
+
+def weekly_e1rm_points(
+    bests: Mapping[tuple[str, dt.date], SessionBest], *, window_start: dt.date
+) -> dict[str, list[tuple[int, Decimal]]]:
+    """Collapse the D-04 series into per-template ``(week offset, best e1RM that week)`` points.
+
+    PUBLIC and pure so PROG-03 and BODY-02 read the same weekly ceiling PROG-02 classifies, and
+    so the slope tests run in the fast suite with no container.
+
+    ``x`` is the week OFFSET from the window's own week, computed with
+    ``snap_local_week_range(day, day)[0]`` rather than inline weekday arithmetic -- a second copy
+    of the Monday rule is how this module would eventually disagree with ``volume.py`` about which
+    week a Sunday-evening workout belongs to. Offsets are the TRUE offsets, never a compressed
+    index over the weeks that happen to have data: a three-week training gap must WIDEN the x-gap,
+    because compressing it makes a stalled month look like continuous progress.
+
+    ``y`` is the week's MAXIMUM ``best_e1rm_kg``, never its mean. Days with ``best_e1rm_kg is
+    None`` (the D-02 rep gate or the D-03 modality gate) contribute nothing and are skipped
+    entirely -- they neither raise nor lower the ceiling, which is the same skip semantics D-07a
+    applies to the plateau streak.
+    """
+    window_monday = snap_local_week_range(window_start, window_start)[0]
+    points: dict[str, dict[int, Decimal]] = {}
+    for (template_external_id, local_day), best in bests.items():
+        if best.best_e1rm_kg is None:
+            continue
+        offset = (snap_local_week_range(local_day, local_day)[0] - window_monday).days // 7
+        week_bests = points.setdefault(template_external_id, {})
+        current = week_bests.get(offset)
+        if current is None or best.best_e1rm_kg > current:
+            week_bests[offset] = best.best_e1rm_kg
+    # Sorted by offset: the slope is order-independent arithmetically, but a deterministic order
+    # is a repo-wide rule and it makes a failing assertion readable.
+    return {
+        template_external_id: sorted(week_bests.items())
+        for template_external_id, week_bests in points.items()
+    }
+
+
+def _weekly_slope(points: Sequence[tuple[int, Decimal]]) -> Decimal | None:
+    """Ordinary least squares, closed form. EXACT until the final division.
+
+    Four sums and one division. ``x`` are ints and ``y`` are ``Decimal``, and Decimal ``+``, ``-``
+    and ``*`` are exact, so the numerator and denominator are both exact. The DENOMINATOR depends
+    only on which week offsets are present, so it is an integer for every window -- which is what
+    lets a test assert an exact expected slope with ``==`` and no tolerance.
+
+    ``None`` for fewer than two points, and ``None`` when every point shares one week offset:
+    a single week has no slope, and returning zero would read as "stable" rather than "unknown".
+    """
+    n = len(points)
+    if n < 2:
+        return None
+    sum_x = sum(x for x, _ in points)
+    sum_y = sum((y for _, y in points), Decimal(0))
+    sum_xy = sum((Decimal(x) * y for x, y in points), Decimal(0))
+    sum_xx = sum(x * x for x, _ in points)
+    denominator = Decimal(n * sum_xx - sum_x * sum_x)
+    if denominator == 0:
+        return None
+    return ((Decimal(n) * sum_xy - Decimal(sum_x) * sum_y) / denominator).quantize(_SLOPE_QUANTUM)
+
+
+def classify_trend(
+    points: Sequence[tuple[int, Decimal]],
+) -> tuple[TrendVerdict, Decimal | None]:
+    """D-05 plus the D-18 dead-band. Returns the verdict AND the rate that produced it.
+
+    Normalizing by the window MEAN, not by the first point, is what makes one band comparable
+    across a 7 kg cable extension and a 160 kg leg press. Normalizing by the first point would
+    make the verdict depend on which week the window happened to start in -- a caller could flip
+    a verdict by moving the start date one week, with no change in training.
+
+    The band is INCLUSIVE at its edge: exactly +0.5%/week reads as improving, not stable. An
+    arbitrary choice, made once and stated, so both sides of the boundary are testable.
+    """
+    if len({x for x, _ in points}) < MIN_TREND_WEEKS:
+        return TrendVerdict.UNCLEAR, None
+    slope = _weekly_slope(points)
+    mean = sum((y for _, y in points), Decimal(0)) / Decimal(len(points))
+    if slope is None or mean == 0:
+        return TrendVerdict.UNCLEAR, None
+    rate = (Decimal(100) * slope / mean).quantize(_PERCENT_QUANTUM)
+    if rate >= TREND_STABLE_BAND_PERCENT_PER_WEEK:
+        return TrendVerdict.IMPROVING, rate
+    if rate <= -TREND_STABLE_BAND_PERCENT_PER_WEEK:
+        return TrendVerdict.DECLINING, rate
+    return TrendVerdict.STABLE, rate
