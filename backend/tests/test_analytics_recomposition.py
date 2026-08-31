@@ -21,8 +21,10 @@ through, and `net_score` is quantized on purpose.
 """
 
 import datetime as dt
+import inspect
 from decimal import Decimal
 
+from app import analytics as analytics_package
 from app.analytics.recomposition import (
     INTERPRETATION_DISCLAIMER,
     RECOMP_MIN_CLASSIFIED_EXERCISES,
@@ -34,6 +36,7 @@ from app.analytics.recomposition import (
     _WeightBucket,
     aggregate_progression,
     classify_recomposition,
+    get_recomposition_status,
 )
 from app.analytics.schemas import ProgressionSignal, RecompositionStatus, TrendVerdict
 
@@ -270,3 +273,41 @@ def test_below_three_classified_is_insufficient() -> None:
     assert at_floor.classified_exercises == RECOMP_MIN_CLASSIFIED_EXERCISES
     assert at_floor.signal is _PS.NEUTRAL
     assert at_floor.net_score == Decimal("0.0000")
+
+
+def test_recomposition_status_takes_no_date_range() -> None:
+    """The signature IS part of the contract, and it is checkable without a container.
+
+    A caller-supplied end date would let a stale anchor produce a confident-looking verdict from
+    a window that has since been superseded -- the same argument ``get_body_weight_trend`` makes
+    for taking no range. ``user_id`` keyword-only with NO default is ASVS V4: forgetting it must
+    be a ``TypeError``, never a cross-tenant read a single-user suite cannot see.
+    """
+    parameters = inspect.signature(get_recomposition_status).parameters
+
+    assert list(parameters) == ["session", "user_id"], (
+        "a date parameter appeared on BODY-02; 'where does my recomposition stand' is always "
+        "anchored on today"
+    )
+    assert parameters["user_id"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["user_id"].default is inspect.Parameter.empty
+
+
+def test_package_docstring_names_every_requirement() -> None:
+    """`app/analytics/__init__.py` is the package's own index, and it goes stale silently.
+
+    Static, and deliberately in the fast suite: the docstring is also what
+    `test_analytics_isolation.py` reads as TEXT, so it is load-bearing rather than decorative.
+    """
+    doc = analytics_package.__doc__ or ""
+
+    for requirement_id in (
+        "VOL-01..03",
+        "PROG-01..04",
+        "CMP-01",
+        "BODY-01",
+        "BODY-02",
+        "DQ-01",
+        "DQ-02",
+    ):
+        assert requirement_id in doc, f"{requirement_id} is missing from the package docstring"
