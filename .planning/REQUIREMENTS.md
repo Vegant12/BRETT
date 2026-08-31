@@ -41,10 +41,10 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 ### Analytics — Progression & Records
 
-- [ ] **PROG-01**: System calculates an exercise's progression time series (weight, reps, sets, and an estimated 1RM only where the exercise's modality and rep range make the estimate meaningful — otherwise returns null with a reason)
+- [x] **PROG-01**: System calculates an exercise's progression time series (weight, reps, sets, and an estimated 1RM only where the exercise's modality and rep range make the estimate meaningful — otherwise returns null with a reason)
 - [ ] **PROG-02**: System classifies each tracked exercise's recent trend as improving, stable, declining, or unclear, based on multiple sessions rather than a single workout
 - [ ] **PROG-03**: System detects plateaus using a configurable multi-week window, returning the window and threshold used alongside the result
-- [ ] **PROG-04**: System detects personal records (max weight, max reps at a weight, estimated-1RM PR, volume PR, rep PR) with the date of each, excluding warm-up sets
+- [x] **PROG-04**: System detects personal records (max weight, max reps at a weight, estimated-1RM PR, volume PR, rep PR) with the date of each, excluding warm-up sets
 - [ ] **CMP-01**: System can compare two time periods (e.g. last 4 weeks vs previous 4 weeks) with values normalized per week so unequal-length windows don't produce misleading deltas
 
 ### Body Composition & Recomposition
