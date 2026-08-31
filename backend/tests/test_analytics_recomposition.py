@@ -22,7 +22,13 @@ through, and `net_score` is quantized on purpose.
 
 import datetime as dt
 import inspect
+import uuid
+from collections.abc import Sequence
 from decimal import Decimal
+
+import pytest
+import time_machine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import analytics as analytics_package
 from app.analytics.recomposition import (
@@ -39,6 +45,13 @@ from app.analytics.recomposition import (
     get_recomposition_status,
 )
 from app.analytics.schemas import ProgressionSignal, RecompositionStatus, TrendVerdict
+from tests.conftest import (
+    ANALYTICS_SECOND_USER_ID,
+    DEFAULT_USER_ID,
+    GoldenBuilder,
+    GoldenExercise,
+    GoldenSet,
+)
 
 # 02:00 UTC is 09:00 in Asia/Jakarta -- the UTC day and the local day AGREE, so these tests
 # isolate the classification rule rather than the anchor rule (05-06 already pins the anchor).
@@ -311,3 +324,363 @@ def test_package_docstring_names_every_requirement() -> None:
         "DQ-02",
     ):
         assert requirement_id in doc, f"{requirement_id} is missing from the package docstring"
+
+
+# ---------------------------------------------------------------------------
+# The composed function. Container-backed, and every one of these runs under the frozen clock:
+# `get_recomposition_status` takes no date range, so `_RECOMP_NOW` is the ONLY thing that decides
+# which rows any of these fixtures land in.
+# ---------------------------------------------------------------------------
+
+# Weigh-in offsets, in days BEFORE the anchor, named for the window each one fills. Offsets rather
+# than date literals so a reader can check membership against the window definition directly.
+_WINDOW_CURRENT = (0, 1, 2, 3)  # the current 7-day average, [anchor-6, anchor]
+_WINDOW_PRIOR = (7, 8, 9)  # D-17's raw week-over-week delta, [anchor-13, anchor-7]
+_WINDOW_D16_ANCHOR = (28, 29, 30, 31)  # D-16's four-weeks-ago endpoint, [anchor-34, anchor-28]
+
+# Four consecutive Mondays at 09:00 Jakarta, all inside the 12-week lookback
+# [2026-06-08, 2026-08-30]. Four distinct week offsets is exactly D-05's minimum, so every
+# template seeded across these weeks is classifiable rather than `unclear`.
+_TRAINING_WEEKS = (
+    dt.datetime(2026, 8, 3, 2, 0, tzinfo=dt.UTC),
+    dt.datetime(2026, 8, 10, 2, 0, tzinfo=dt.UTC),
+    dt.datetime(2026, 8, 17, 2, 0, tzinfo=dt.UTC),
+    dt.datetime(2026, 8, 24, 2, 0, tzinfo=dt.UTC),
+)
+
+# 100 -> 106 kg x 5 is +1.94%/week off a mean e1RM of 120.167 -- comfortably outside D-18's
+# +-0.5%/week band, so no verdict here can pass by landing on a boundary.
+_IMPROVING_WEIGHTS = (
+    Decimal("100.000"),
+    Decimal("102.000"),
+    Decimal("104.000"),
+    Decimal("106.000"),
+)
+_DECLINING_WEIGHTS = tuple(reversed(_IMPROVING_WEIGHTS))
+
+# Fixture ids for this module. The `RECOMP-` prefix is distinct from every other prefix under
+# `backend/tests/`, so a leaked row is attributable to this module and to no other.
+_PRESS = "RECOMP-press"
+_ROW = "RECOMP-row"
+_SQUAT = "RECOMP-squat"
+_THREE_LIFTS = (_PRESS, _ROW, _SQUAT)
+_TWO_LIFTS = (_PRESS, _ROW)
+_VOLUME_FILLER = "RECOMP-highrep"
+
+
+async def _seed_weigh_ins(
+    golden_workout: GoldenBuilder,
+    *,
+    offsets: Sequence[int],
+    weight: str,
+    user_id: uuid.UUID = DEFAULT_USER_ID,
+) -> None:
+    """The same weight on every listed day, expressed as days before the anchor."""
+    for offset in offsets:
+        await golden_workout.body_measurement(
+            measured_on=_ANCHOR - dt.timedelta(days=offset),
+            weight_kg=Decimal(weight),
+            user_id=user_id,
+        )
+
+
+async def _seed_stable_weight(
+    golden_workout: GoldenBuilder, *, weight: str = "65.00", user_id: uuid.UUID = DEFAULT_USER_ID
+) -> None:
+    """Both D-16 endpoints at the SAME average, so the smoothed rate is exactly 0.00%/week."""
+    await _seed_weigh_ins(golden_workout, offsets=_WINDOW_CURRENT, weight=weight, user_id=user_id)
+    await _seed_weigh_ins(
+        golden_workout, offsets=_WINDOW_D16_ANCHOR, weight=weight, user_id=user_id
+    )
+
+
+async def _seed_on_target_gain(golden_workout: GoldenBuilder) -> None:
+    """65.000 -> 65.500 over four weeks: +0.125 kg/week, which is +0.19%/week of bodyweight.
+
+    Inside D-11's +0.25 ceiling and above the +0.10 stable band, so this is the on-target-gain
+    row and it is not near either edge.
+    """
+    await _seed_weigh_ins(golden_workout, offsets=_WINDOW_CURRENT, weight="65.50")
+    await _seed_weigh_ins(golden_workout, offsets=_WINDOW_D16_ANCHOR, weight="65.00")
+
+
+async def _seed_training(
+    golden_workout: GoldenBuilder,
+    *,
+    templates: Sequence[str],
+    weights: Sequence[Decimal],
+    user_id: uuid.UUID = DEFAULT_USER_ID,
+) -> None:
+    """One workout per training week, carrying one working set for each template.
+
+    ``strict=True`` on the zip: a caller passing five weights against four weeks would otherwise
+    silently drop one and change the verdict the test is asserting on.
+    """
+    for external_id in templates:
+        await golden_workout.template(external_id=external_id, user_id=user_id)
+    for start_time, weight in zip(_TRAINING_WEEKS, weights, strict=True):
+        await golden_workout.workout(
+            start_time=start_time,
+            exercises=[
+                GoldenExercise(
+                    template_external_id=external_id,
+                    sets=(GoldenSet(weight_kg=weight, reps=5),),
+                )
+                for external_id in templates
+            ],
+            user_id=user_id,
+        )
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_null_weight_rate_is_insufficient_regardless_of_progression(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """THE load-bearing test, and the live-data case today.
+
+    The specific wrong behaviour it catches is a fallback to D-17's raw single-week delta. That
+    delta is deliberately present and non-null here, and it is deliberately non-zero: an
+    implementation that reached for it would classify +0.500 kg on a 65.5 kg bodyweight and flip
+    this verdict from `insufficient_data` to a confident-looking weight label.
+    """
+    await _seed_weigh_ins(golden_workout, offsets=_WINDOW_CURRENT, weight="65.50")
+    await _seed_weigh_ins(golden_workout, offsets=_WINDOW_PRIOR, weight="65.00")
+    await _seed_training(golden_workout, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.weight_trend.trend_rate_percent_per_week is None
+    assert result.weight_trend.latest_week_delta_kg == Decimal("0.500"), (
+        "the raw delta must be present for this test to mean anything -- it is the wrong input "
+        "the classifier is being given the chance to reach for"
+    )
+    assert result.progression_signal.signal is _PS.POSITIVE
+    assert result.progression_signal.classified_exercises == 3
+    assert result.status is _RS.INSUFFICIENT_DATA, (
+        "a null SMOOTHED rate collapses the verdict however good the training data is; falling "
+        "back to D-17's single-week delta reads +0.72%/week off glycogen noise on live data"
+    )
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_stable_weight_with_improving_lifts_is_recomp_progressing(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Textbook recomposition: the scale is flat while the ceiling rises."""
+    await _seed_stable_weight(golden_workout)
+    await _seed_training(golden_workout, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.weight_trend.trend_rate_percent_per_week == Decimal("0.00")
+    assert result.progression_signal.classified_exercises == 3
+    assert result.progression_signal.improving == 3
+    assert result.progression_signal.net_score == Decimal("1.0000")
+    assert result.progression_signal.signal is _PS.POSITIVE
+    assert result.status is _RS.LIKELY_RECOMP_PROGRESSING
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_stable_weight_with_declining_lifts_is_weight_stable(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """The same flat scale, the opposite strength trend -- and NOT a recomposition claim.
+
+    `likely_recomp_progressing` here would assert muscle gain from a stalled scale and falling
+    lifts, which is the single most over-claimed reading this module could produce.
+    """
+    await _seed_stable_weight(golden_workout)
+    await _seed_training(golden_workout, templates=_THREE_LIFTS, weights=_DECLINING_WEIGHTS)
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.weight_trend.trend_rate_percent_per_week == Decimal("0.00")
+    assert result.progression_signal.declining == 3
+    assert result.progression_signal.net_score == Decimal("-1.0000")
+    assert result.progression_signal.signal is _PS.NEGATIVE
+    assert result.status is _RS.WEIGHT_STABLE
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_on_target_gain_with_declining_lifts_still_reports_muscle_gain_and_the_signal(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-20's deliberate compromise, and the reason `progression_signal` is a REQUIRED field."""
+    await _seed_on_target_gain(golden_workout)
+    await _seed_training(golden_workout, templates=_THREE_LIFTS, weights=_DECLINING_WEIGHTS)
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.weight_trend.trend_rate_percent_per_week == Decimal("0.19")
+    assert result.status is _RS.LIKELY_MUSCLE_GAIN
+    assert result.progression_signal.signal is _PS.NEGATIVE, (
+        "the enum has no 'gaining on target but lifts flat' member; the nuance must survive in "
+        "progression_signal so Claude can qualify the label"
+    )
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_disclaimer_is_populated_on_every_response(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Including on the insufficient path, which is the response most likely to be quoted alone.
+
+    Both halves in one test, and in this order, because the interesting failure is a disclaimer
+    populated only on the happy path -- which a test that looked at one response could not see.
+    """
+    await _seed_weigh_ins(golden_workout, offsets=_WINDOW_CURRENT, weight="65.00")
+    await _seed_training(golden_workout, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    insufficient = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert insufficient.status is _RS.INSUFFICIENT_DATA
+    assert insufficient.disclaimer == INTERPRETATION_DISCLAIMER
+    assert insufficient.disclaimer != ""
+
+    # Filling D-16's anchor window is all it takes to move off the insufficient path.
+    await _seed_weigh_ins(golden_workout, offsets=_WINDOW_D16_ANCHOR, weight="65.00")
+
+    populated = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert populated.status is _RS.LIKELY_RECOMP_PROGRESSING
+    assert populated.disclaimer == INTERPRETATION_DISCLAIMER
+    assert populated.disclaimer != ""
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_fewer_than_three_classified_falls_back_to_a_weight_only_label(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Two classifiable exercises: the SCORE is withheld, the weight verdict still stands."""
+    await _seed_stable_weight(golden_workout)
+    await _seed_training(golden_workout, templates=_TWO_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.progression_signal.classified_exercises == 2
+    assert result.progression_signal.signal is _PS.INSUFFICIENT
+    assert result.progression_signal.net_score is None
+    assert result.status is _RS.WEIGHT_STABLE, (
+        "a weight-only verdict is still a valid answer; only a null weight rate collapses the "
+        "whole response"
+    )
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_recomposition_freshness_names_all_three_resources(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """DQ-01 / T-05-77: this answer reads both sides, so it is only as fresh as the stalest.
+
+    `exercise_templates` is the one a reader is most likely to think is irrelevant here, and it
+    is the one that matters most: `exercise_type` is the D-03 e1RM gate, so a stale template sync
+    silently changes the progression signal with no error anywhere in the stack.
+    """
+    await _seed_stable_weight(golden_workout)
+    await _seed_training(golden_workout, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert set(result.freshness.resources) == {
+        "workouts",
+        "exercise_templates",
+        "body_measurements",
+    }
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_training_volume_is_reported_but_never_classified(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Volume is context. Changing it must move the reported figures and NOT the label.
+
+    The filler is a 15-rep template, so D-02's rep gate leaves it with no estimate at all: it
+    lands in `unclear`, is excluded from D-20's denominator, and changes nothing but the volume.
+    """
+    await _seed_stable_weight(golden_workout)
+    await _seed_training(golden_workout, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    before = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    await golden_workout.template(external_id=_VOLUME_FILLER)
+    await golden_workout.workout(
+        start_time=_TRAINING_WEEKS[1],
+        exercises=[
+            GoldenExercise(
+                template_external_id=_VOLUME_FILLER,
+                sets=tuple(GoldenSet(weight_kg=Decimal("40.000"), reps=15) for _ in range(10)),
+            )
+        ],
+    )
+
+    after = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert after.training_volume.weeks != before.training_volume.weeks, (
+        "the filler did not move the reported volume, so this test cannot show that volume is "
+        "excluded from the label"
+    )
+    assert after.status is before.status
+    assert after.status is _RS.LIKELY_RECOMP_PROGRESSING
+    assert after.progression_signal.classified_exercises == 3
+    assert after.progression_signal.unclear == 1
+    assert after.progression_signal.net_score == before.progression_signal.net_score
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_second_users_data_does_not_change_the_verdict(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """ASVS V4 / T-05-75. The second user is bulking fast and lifting heavier, on the same dates.
+
+    Both sides of the verdict are attacked at once: a leaked weigh-in would push the rate from
+    0.00%/week into the too-fast-gain row, and a leaked set would land on the SAME template ids
+    (Hevy's built-in template ids are global) at nearly double the load.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await _seed_stable_weight(golden_workout)
+    await _seed_training(golden_workout, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    await _seed_weigh_ins(
+        golden_workout,
+        offsets=_WINDOW_CURRENT,
+        weight="70.00",
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+    await _seed_weigh_ins(
+        golden_workout,
+        offsets=_WINDOW_D16_ANCHOR,
+        weight="65.00",
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+    await _seed_training(
+        golden_workout,
+        templates=_THREE_LIFTS,
+        weights=(
+            Decimal("200.000"),
+            Decimal("220.000"),
+            Decimal("240.000"),
+            Decimal("260.000"),
+        ),
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.weight_trend.trend_rate_percent_per_week == Decimal("0.00"), (
+        "another user's weigh-ins or sets leaked into this verdict (ASVS V4)"
+    )
+    assert result.status is _RS.LIKELY_RECOMP_PROGRESSING, (
+        "another user's weigh-ins or sets leaked into this verdict (ASVS V4)"
+    )
+    # Anti-vacuous guard: this user really was classified, rather than reaching the expected
+    # label through an empty progression signal.
+    assert result.progression_signal.classified_exercises >= 1
