@@ -1643,6 +1643,44 @@ async def test_not_plateaued_reports_null_duration(
 
 @pytest.mark.integration
 @time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_an_oversized_lookback_is_clamped_rather_than_rejected(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """T-05-66: a lookback past the five-year cap ANSWERS, and reads at most five years.
+
+    400 weeks is a 2,800-day window and ``build_window`` refuses anything above
+    ``MAX_ANALYTICS_WINDOW_DAYS``. Without the explicit clamp on the fetch start this call raises
+    "requested analytics window exceeds the maximum span" -- a plateau question turned into an
+    error by a number the caller was allowed to pass. Clamping loses only history older than five
+    years, which cannot be anyone's current ceiling.
+
+    The echoed ``lookback_start`` is deliberately the UNCLAMPED window the caller asked about: the
+    clamp bounds what is READ, not what was requested, and a silently narrowed echo would make the
+    response claim a window it never evaluated.
+    """
+    await golden_workout.template(external_id=_PLATEAU, title="Plateau Press")
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[(_PRE_LOOKBACK, Decimal("105.000")), *_flat_weeks("100.000")],
+    )
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID, lookback_weeks=400)
+
+    assert result.lookback_weeks == 400
+    assert result.lookback_start == dt.date(2018, 12, 31)
+    assert result.lookback_end == _PLATEAU_END
+    # Every session now falls INSIDE the lookback, so nothing seeds the running best and the
+    # 105 kg session starts the streak rather than sitting above it.
+    row = result.exercises[0]
+    assert row.qualifying_sessions_in_streak == 5
+    assert row.historical_best_kg == Decimal("122.500")
+    # The clamped fetch still reaches back past every fixture workout, so the coverage count is
+    # the whole account rather than a window the clamp silently truncated.
+    assert result.coverage.sessions_in_window == 5
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
 async def test_lookback_weeks_must_be_positive(session: AsyncSession) -> None:
     """T-05-67 / T-05-68: a caller bug RAISES, and the message carries no value.
 
