@@ -30,6 +30,7 @@ month as continuous progress and every value assertion above would still pass.
 
 import datetime as dt
 import uuid
+from collections.abc import Sequence
 from decimal import Decimal
 
 import pytest
@@ -43,6 +44,7 @@ from app.analytics.progression import (
     best_set_per_day,
     classify_trend,
     get_exercise_progression,
+    get_exercise_trends,
     weekly_e1rm_points,
 )
 from app.analytics.rollup import QualifyingSetRow
@@ -845,3 +847,266 @@ async def test_freshness_names_workouts_and_exercise_templates(
     }
     # Two genuinely distinct values, not one row read twice.
     assert len(set(result.freshness.resources.values())) == 2
+
+
+# ---------------------------------------------------------------------------
+# PROG-02's public function. Container-backed for the same reason PROG-01's is: the local-day
+# conversion, the tenant-scoped template outerjoin and the coverage/freshness envelope have no
+# meaning without a database.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_weekly_trend(
+    golden_workout: GoldenBuilder,
+    *,
+    weights: Sequence[Decimal],
+    template_external_id: str = _TREND,
+    reps: int = 5,
+    user_id: uuid.UUID = DEFAULT_USER_ID,
+) -> None:
+    """One workout per consecutive week, one working set each, at the weights given.
+
+    ``strict=True`` on the zip: a caller passing five weights against four weeks would otherwise
+    silently drop one and change the verdict the test is asserting on.
+    """
+    for start_time, weight in zip(_TREND_WEEKS, weights, strict=True):
+        await golden_workout.workout(
+            start_time=start_time,
+            exercises=[
+                _bench_exercise(
+                    GoldenSet(weight_kg=weight, reps=reps),
+                    template_external_id=template_external_id,
+                )
+            ],
+            user_id=user_id,
+        )
+
+
+@pytest.mark.integration
+async def test_improving_verdict_over_four_weeks(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Four training weeks is the smallest arrangement D-05 will commit to, and it commits.
+
+    100 -> 106 kg x 5 across four weeks is +1.94%/week off a mean e1RM of 120.167 -- comfortably
+    outside D-18's +-0.5%/week band, so this cannot pass by landing on a boundary.
+    """
+    await golden_workout.template(external_id=_TREND, title="Trend Press")
+    await _seed_weekly_trend(
+        golden_workout,
+        weights=[Decimal("100.000"), Decimal("102.000"), Decimal("104.000"), Decimal("106.000")],
+    )
+
+    result = await get_exercise_trends(
+        session, user_id=DEFAULT_USER_ID, start_day=_START, end_day=_END
+    )
+
+    assert len(result.exercises) == 1
+    trend = result.exercises[0]
+    assert trend.exercise_template_external_id == _TREND
+    assert trend.title == "Trend Press"
+    assert trend.verdict is TrendVerdict.IMPROVING
+    assert trend.weeks_with_data == 4
+    assert trend.rate_percent_per_week == Decimal("1.94")
+
+
+@pytest.mark.integration
+async def test_three_training_weeks_is_unclear(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """One week short of D-05's minimum, and the rate is withheld along with the verdict.
+
+    The same series that reads `improving` over four weeks reads `unclear` over three. Reporting
+    a rate here would let a caller re-derive a verdict the requirement declined to give.
+    """
+    await golden_workout.template(external_id=_TREND, title="Trend Press")
+    for start_time, weight in zip(
+        _TREND_WEEKS[:3],
+        (Decimal("100.000"), Decimal("102.000"), Decimal("104.000")),
+        strict=True,
+    ):
+        await golden_workout.workout(
+            start_time=start_time,
+            exercises=[
+                _bench_exercise(GoldenSet(weight_kg=weight, reps=5), template_external_id=_TREND)
+            ],
+        )
+
+    result = await get_exercise_trends(
+        session, user_id=DEFAULT_USER_ID, start_day=_START, end_day=_END
+    )
+
+    assert len(result.exercises) == 1
+    trend = result.exercises[0]
+    assert trend.verdict is TrendVerdict.UNCLEAR, (
+        "D-05: committing to a verdict from three weeks is the single-workout failure "
+        "blueprint 20 warns about"
+    )
+    assert trend.rate_percent_per_week is None
+    assert trend.weeks_with_data == 3
+
+
+@pytest.mark.integration
+async def test_exercise_with_no_usable_estimate_is_reported_as_unclear(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Four TRAINING weeks, zero usable estimates -- and the exercise is still reported.
+
+    D-02's rep-range gate removes every estimate, so there is nothing to regress. The exercise
+    must not vanish from the response: `weeks_with_data == 0` beside `unclear` is what tells
+    Claude "trained but unmeasurable", which a missing row cannot say.
+    """
+    await golden_workout.template(external_id=_HIGH_REP, title="Cable Fly")
+    await _seed_weekly_trend(
+        golden_workout,
+        weights=[Decimal("80.000")] * 4,
+        template_external_id=_HIGH_REP,
+        reps=15,
+    )
+
+    result = await get_exercise_trends(
+        session, user_id=DEFAULT_USER_ID, start_day=_START, end_day=_END
+    )
+
+    assert [row.exercise_template_external_id for row in result.exercises] == [_HIGH_REP], (
+        "an omitted exercise and a stable one are different facts, and BODY-02's denominator "
+        "depends on the distinction"
+    )
+    trend = result.exercises[0]
+    assert trend.weeks_with_data == 0, (
+        "weeks_with_data counts weeks that produced an ESTIMATE; reporting 4 training weeks here "
+        "would make `unclear` look like a bug"
+    )
+    assert trend.verdict is TrendVerdict.UNCLEAR
+    assert trend.rate_percent_per_week is None
+
+
+@pytest.mark.integration
+async def test_exercises_are_sorted_and_window_is_unsnapped(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Ascending by external id, and the raw requested range IS the window.
+
+    The templates are written c, a, b so insertion order and sorted order differ -- dict-iteration
+    order would pass a `== sorted(ids)` assertion by accident otherwise. The window is the
+    Wed-to-Tue `_UNALIGNED_*` pair rather than the week-aligned `_START`/`_END`, because those two
+    happen to be a Monday and a Sunday and a snapping implementation would agree with them
+    exactly.
+    """
+    for external_id in (_TREND_C, _TREND_A, _TREND_B):
+        await golden_workout.template(external_id=external_id)
+    await golden_workout.workout(
+        start_time=_DAY_2,
+        exercises=[
+            _bench_exercise(
+                GoldenSet(weight_kg=Decimal("60.000"), reps=8),
+                template_external_id=external_id,
+            )
+            for external_id in (_TREND_C, _TREND_A, _TREND_B)
+        ],
+    )
+
+    result = await get_exercise_trends(
+        session, user_id=DEFAULT_USER_ID, start_day=_UNALIGNED_START, end_day=_UNALIGNED_END
+    )
+
+    external_ids = [row.exercise_template_external_id for row in result.exercises]
+    assert external_ids == [_TREND_A, _TREND_B, _TREND_C], (
+        "the response fell through to dict-iteration order; Phase 6 will diff these between runs"
+    )
+    assert external_ids == sorted(external_ids)
+    assert (result.window_start, result.window_end) == (_UNALIGNED_START, _UNALIGNED_END), (
+        "the window was snapped outward to whole weeks; PROG-02 answers the range it was asked "
+        "about"
+    )
+
+
+@pytest.mark.integration
+async def test_second_users_sets_do_not_change_a_verdict(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """ASVS V4 / T-05-47: a leaked set does not just add a row, it changes the ANSWER.
+
+    Both users train the SAME external id -- Hevy's built-in template ids are global. This user
+    is flat at 100 kg for four weeks (`stable`); the other climbs 100 -> 160 kg. A missing tenant
+    predicate would fold both series into one exercise and read as `improving`, which is a wrong
+    coaching verdict rather than merely an extra row.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_SHARED, title="Mine")
+    await golden_workout.template(
+        external_id=_SHARED, title="Theirs", user_id=ANALYTICS_SECOND_USER_ID
+    )
+    await _seed_weekly_trend(
+        golden_workout, weights=[Decimal("100.000")] * 4, template_external_id=_SHARED
+    )
+    await _seed_weekly_trend(
+        golden_workout,
+        weights=[
+            Decimal("100.000"),
+            Decimal("120.000"),
+            Decimal("140.000"),
+            Decimal("160.000"),
+        ],
+        template_external_id=_SHARED,
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+
+    result = await get_exercise_trends(
+        session, user_id=DEFAULT_USER_ID, start_day=_START, end_day=_END
+    )
+
+    # Guard against a vacuous pass: this user really did train, and the row is theirs.
+    assert len(result.exercises) == 1
+    trend = result.exercises[0]
+    assert trend.title == "Mine"
+    assert trend.verdict is TrendVerdict.STABLE, (
+        "another user's sets leaked into this user's trend (ASVS V4)"
+    )
+    assert trend.rate_percent_per_week == Decimal("0.00")
+    assert trend.weeks_with_data == 4
+
+
+@pytest.mark.integration
+async def test_trend_freshness_names_both_resources(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """DQ-01: a stale template sync silently changes every verdict in the response.
+
+    ``exercise_type`` is the D-03 e1RM gate and comes from the templates table, so PROG-02 is only
+    as fresh as the STALER of its two sources. Written against the second user because
+    ``sync_state`` rows for the default user are the Hevy sync suite's territory and the container
+    is session-scoped and shared.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_TREND, user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.workout(
+        start_time=_DAY_1,
+        exercises=[
+            _bench_exercise(
+                GoldenSet(weight_kg=Decimal("100.000"), reps=5), template_external_id=_TREND
+            )
+        ],
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+    for resource, synced_at in (
+        (RESOURCE_WORKOUTS, _SYNCED_WORKOUTS_AT),
+        (RESOURCE_EXERCISE_TEMPLATES, _SYNCED_TEMPLATES_AT),
+    ):
+        await complete_sync(
+            session,
+            user_id=ANALYTICS_SECOND_USER_ID,
+            provider=PROVIDER_HEVY,
+            resource=resource,
+            last_synced_at=synced_at,
+        )
+
+    result = await get_exercise_trends(
+        session, user_id=ANALYTICS_SECOND_USER_ID, start_day=_START, end_day=_END
+    )
+
+    assert set(result.freshness.resources) == {RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES}
+    assert result.freshness.resources == {
+        RESOURCE_WORKOUTS: _SYNCED_WORKOUTS_AT,
+        RESOURCE_EXERCISE_TEMPLATES: _SYNCED_TEMPLATES_AT,
+    }
