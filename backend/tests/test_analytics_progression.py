@@ -26,6 +26,20 @@ which is a band a hundred times too tight and classifies all 28 live exercises a
 declining, leaving `stable` unreachable. Its partner is `test_week_offsets_are_not_compressed`:
 without it, an implementation that enumerated only the weeks with data would report a stalled
 month as continuous progress and every value assertion above would still pass.
+
+For PROG-03, THE load-bearing test is `test_historical_best_is_seeded_from_before_the_lookback`.
+The specific wrong number it catches is a streak start that moves when the caller widens the
+lookback but the training did not change: seeding the running best from None makes the first
+in-window session "improve over nothing", which on live data moved 6 exercises from a correct
+full-window plateau to a shorter, later streak.
+
+Its partner is `test_null_estimate_session_neither_extends_nor_breaks`: without it, a deload week
+inflates every streak by one session and the verdict flips from "not yet" to "plateaued" for an
+exercise that simply changed rep scheme -- 376 of 2,239 live exercise-sessions are in that
+category.
+
+All PROG-03 tests freeze the clock: `plateau_duration_days` is measured to NOW, so an unfrozen
+test rots within days and the failure looks like an algorithm bug.
 """
 
 import datetime as dt
@@ -39,16 +53,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.analytics.estimates import NoEstimateReason
 from app.analytics.progression import (
     MIN_TREND_WEEKS,
+    PLATEAU_IMPROVEMENT_TOLERANCE,
+    PLATEAU_MIN_ELAPSED_DAYS,
+    PLATEAU_MIN_QUALIFYING_SESSIONS,
     SessionBest,
     _weekly_slope,
     best_set_per_day,
     classify_trend,
     get_exercise_progression,
     get_exercise_trends,
+    scan_plateau,
     weekly_e1rm_points,
 )
 from app.analytics.rollup import QualifyingSetRow
-from app.analytics.schemas import TrendVerdict
+from app.analytics.schemas import PlateauConfidence, TrendVerdict
 from app.db.repositories.sync_state import (
     PROVIDER_HEVY,
     RESOURCE_EXERCISE_TEMPLATES,
@@ -73,6 +91,8 @@ _HIGH_REP = "PROG-highrep"
 _UNSYNCED = "PROG-never-synced"
 _SHARED = "PROG-shared"
 _TREND = "PROG-trend"
+_PLATEAU = "PROG-plateau"
+_ABANDONED = "PROG-abandoned"
 
 # Three ids whose SORTED order is deliberately not their insertion order, so
 # `test_exercises_are_sorted_and_window_is_unsnapped` cannot pass on dict-iteration order.
@@ -112,6 +132,18 @@ _EMPTY_END = dt.date(2026, 7, 31)
 _LOCAL_DAY_1 = dt.date(2026, 8, 3)
 _LOCAL_DAY_2 = dt.date(2026, 8, 10)
 _LOCAL_DAY_3 = dt.date(2026, 8, 17)
+
+# 02:00 UTC is 09:00 in Asia/Jakarta -- the UTC day and the local day AGREE here, so the plateau
+# tests isolate the streak rule rather than the anchor rule (which 05-06 already pins).
+_PLATEAU_NOW = "2026-08-30T02:00:00+00:00"
+
+# The local day `_PLATEAU_NOW` belongs to, and the 12-week lookback start it implies. Both spelled
+# out rather than derived: recomputing them with the same arithmetic the code under test uses
+# would make an off-by-one agree with itself. `[2026-06-08, 2026-08-30]` inclusive is 84 days,
+# which is exactly twelve weeks -- an 85-day span would be twelve weeks plus a day.
+_PLATEAU_END = dt.date(2026, 8, 30)
+_PLATEAU_START_12W = dt.date(2026, 6, 8)
+_PLATEAU_START_24W = dt.date(2026, 3, 16)
 
 # Two workout ids on ONE local day. Hand-built rather than random so a failure message names a
 # stable value, and distinct so "which workout did the selected set come from" is answerable.
@@ -1110,3 +1142,253 @@ async def test_trend_freshness_names_both_resources(
         RESOURCE_WORKOUTS: _SYNCED_WORKOUTS_AT,
         RESOURCE_EXERCISE_TEMPLATES: _SYNCED_TEMPLATES_AT,
     }
+
+
+# ---------------------------------------------------------------------------
+# PROG-03's streak scan. NO integration marker, for `best_set_per_day`'s reason: D-06's two
+# floors, D-07's tolerance band and D-07a's skip are business rules, and a business rule that
+# needs Docker to be checked is a business rule nobody checks on the commit that breaks it.
+# ---------------------------------------------------------------------------
+
+# An arbitrary Monday well inside the 12-week lookback these tests never actually resolve --
+# `scan_plateau` is pure and takes `as_of` from the caller, so no clock is involved here.
+_SCAN_BASE = dt.date(2026, 6, 1)
+
+# The historical ceiling every scan test seeds from, and the two probes either side of D-07's
+# band. 100.000 x 1.02 = 102.000 exactly, so 101.500 is inside and 102.500 is outside with no
+# rounding anywhere near the boundary.
+_SCAN_CEILING = Decimal("100.000")
+_INSIDE_TOLERANCE = Decimal("101.500")
+_OUTSIDE_TOLERANCE = Decimal("102.500")
+
+# Every flat session sits BELOW the ceiling, so a scan that ignored the seed entirely would still
+# have to explain why the first one did not start a fresh streak.
+_FLAT = Decimal("99.000")
+
+
+def _scan_series(*, sessions: int, spacing_days: int, e1rm: Decimal = _FLAT) -> list[SessionBest]:
+    """``sessions`` folded days, ``spacing_days`` apart, all at the same estimate.
+
+    Ascending by ``local_day``, because ``scan_plateau`` documents that as a precondition its
+    caller (``qualifying_set_rows``' SQL ordering) guarantees.
+    """
+    return [
+        _session_best(
+            local_day=_SCAN_BASE + dt.timedelta(days=spacing_days * index), best_e1rm_kg=e1rm
+        )
+        for index in range(sessions)
+    ]
+
+
+def test_both_d06_floors_are_required() -> None:
+    """D-06 needs BOTH four qualifying sessions AND three elapsed weeks, not whichever fires.
+
+    Three arrangements, each failing a different way. A suite carrying only the first would pass
+    against a session-count-only implementation and against a calendar-only one alike.
+    """
+    spanning = scan_plateau(
+        _scan_series(sessions=PLATEAU_MIN_QUALIFYING_SESSIONS, spacing_days=7),
+        historical_best=_SCAN_CEILING,
+        as_of=_SCAN_BASE + dt.timedelta(days=28),
+    )
+
+    assert spanning.plateaued is True
+    assert spanning.qualifying_sessions == PLATEAU_MIN_QUALIFYING_SESSIONS
+    assert spanning.confidence is PlateauConfidence.LOW
+    assert spanning.streak_start == _SCAN_BASE
+
+    # Four sessions, thirteen days. The session floor is satisfied and the calendar floor is not.
+    cramped = scan_plateau(
+        _scan_series(sessions=PLATEAU_MIN_QUALIFYING_SESSIONS, spacing_days=4),
+        historical_best=_SCAN_CEILING,
+        as_of=_SCAN_BASE + dt.timedelta(days=13),
+    )
+
+    assert cramped.qualifying_sessions == PLATEAU_MIN_QUALIFYING_SESSIONS
+    assert cramped.plateaued is False, (
+        "4 sessions of an exercise trained 3x/week is 9-13 days, inside the day-to-day "
+        "fluctuation range blueprint 21 warns against"
+    )
+
+    # Three sessions, forty days. The calendar floor is satisfied and the session floor is not.
+    thin = scan_plateau(
+        _scan_series(sessions=PLATEAU_MIN_QUALIFYING_SESSIONS - 1, spacing_days=20),
+        historical_best=_SCAN_CEILING,
+        as_of=_SCAN_BASE + dt.timedelta(days=40),
+    )
+
+    assert thin.qualifying_sessions == PLATEAU_MIN_QUALIFYING_SESSIONS - 1
+    assert thin.plateaued is False, (
+        "three sessions spread over forty days clears the calendar floor and still is not four "
+        "sessions; D-06 takes whichever demands MORE evidence"
+    )
+    assert thin.confidence is PlateauConfidence.LOW
+
+
+def test_tolerance_band_both_sides() -> None:
+    """D-07's 2% band, pinned on BOTH sides of the exact boundary.
+
+    100.000 x 1.02 is exactly 102.000, so +1.5% must extend the streak and +2.5% must break it.
+    A suite asserting only the breaking side passes against a bare ``>`` on the strict maximum.
+    """
+    assert PLATEAU_IMPROVEMENT_TOLERANCE == Decimal("0.02")
+
+    inside = scan_plateau(
+        [
+            _session_best(local_day=_SCAN_BASE, best_e1rm_kg=_FLAT),
+            _session_best(
+                local_day=_SCAN_BASE + dt.timedelta(days=7), best_e1rm_kg=_INSIDE_TOLERANCE
+            ),
+        ],
+        historical_best=_SCAN_CEILING,
+        as_of=_SCAN_BASE + dt.timedelta(days=7),
+    )
+
+    assert inside.qualifying_sessions == 2
+    assert inside.streak_start == _SCAN_BASE, (
+        "a bare > against the strict max flags a lifter bouncing within 1% of their peak as "
+        "'no progress'"
+    )
+
+    outside = scan_plateau(
+        [
+            _session_best(local_day=_SCAN_BASE, best_e1rm_kg=_FLAT),
+            _session_best(
+                local_day=_SCAN_BASE + dt.timedelta(days=7), best_e1rm_kg=_OUTSIDE_TOLERANCE
+            ),
+        ],
+        historical_best=_SCAN_CEILING,
+        as_of=_SCAN_BASE + dt.timedelta(days=7),
+    )
+
+    assert outside.qualifying_sessions == 1
+    assert outside.streak_start == _SCAN_BASE + dt.timedelta(days=7), (
+        "the breaking session is the most recent evidence of progress, so the clock restarts FROM "
+        "it rather than from the session after it"
+    )
+    # The running best absorbs the break, so everything after it is measured against the new bar.
+    assert outside.historical_best_kg == _OUTSIDE_TOLERANCE
+
+
+def test_null_estimate_session_neither_extends_nor_breaks() -> None:
+    """D-07a: a session with no trusted estimate is SKIPPED entirely.
+
+    Without the skip a deload week inflates every streak by one session and the verdict flips
+    from "not yet" to "plateaued" for an exercise that merely changed rep scheme -- 376 of 2,239
+    live exercise-sessions (16.8%) have no qualifying set at all.
+    """
+    series = [
+        _session_best(local_day=_SCAN_BASE, best_e1rm_kg=_FLAT),
+        _session_best(local_day=_SCAN_BASE + dt.timedelta(days=7), best_e1rm_kg=None),
+        _session_best(local_day=_SCAN_BASE + dt.timedelta(days=14), best_e1rm_kg=_FLAT),
+        _session_best(local_day=_SCAN_BASE + dt.timedelta(days=21), best_e1rm_kg=_FLAT),
+        _session_best(local_day=_SCAN_BASE + dt.timedelta(days=28), best_e1rm_kg=_FLAT),
+    ]
+
+    scan = scan_plateau(
+        series, historical_best=_SCAN_CEILING, as_of=_SCAN_BASE + dt.timedelta(days=28)
+    )
+
+    assert scan.qualifying_sessions == PLATEAU_MIN_QUALIFYING_SESSIONS, (
+        "the null-estimate session was counted; five folded days with four usable estimates is a "
+        "streak of four"
+    )
+    assert scan.streak_start == _SCAN_BASE, (
+        "the null-estimate session reset the streak; it must neither extend nor break"
+    )
+    assert scan.plateaued is True
+
+
+def test_no_history_first_session_starts_rather_than_breaks() -> None:
+    """With no seed, the first qualifying session STARTS the streak.
+
+    An improvement over nothing is not an improvement. Treating a ``None`` seed as a zero ceiling
+    would make every first in-window session a break, which is precisely the fake window-edge
+    break the pre-lookback seed exists to prevent.
+    """
+    scan = scan_plateau(
+        [_session_best(local_day=_SCAN_BASE, best_e1rm_kg=_SCAN_CEILING)],
+        historical_best=None,
+        as_of=_SCAN_BASE,
+    )
+
+    assert scan.qualifying_sessions == 1, "an improvement over nothing is not an improvement"
+    assert scan.streak_start == _SCAN_BASE
+    assert scan.historical_best_kg == _SCAN_CEILING
+    assert scan.plateaued is False
+
+
+def test_confidence_ladder() -> None:
+    """D-07b's ladder, derived from D-06's floor rather than invented: 4-5 low, 6-9 mid, 10+ high.
+
+    The three-session case is the one that matters most: below D-06's floor the verdict is not a
+    plateau at all, so a HIGH-confidence non-plateau must be unreachable.
+    """
+    ladder = {
+        3: PlateauConfidence.LOW,
+        4: PlateauConfidence.LOW,
+        6: PlateauConfidence.MEDIUM,
+        10: PlateauConfidence.HIGH,
+    }
+
+    for sessions, confidence in ladder.items():
+        scan = scan_plateau(
+            _scan_series(sessions=sessions, spacing_days=7),
+            historical_best=_SCAN_CEILING,
+            # Always at least PLATEAU_MIN_ELAPSED_DAYS past the streak start, so the calendar
+            # floor never confounds the session-count ladder this test is about.
+            as_of=_SCAN_BASE + dt.timedelta(days=7 * sessions + PLATEAU_MIN_ELAPSED_DAYS),
+        )
+
+        assert scan.qualifying_sessions == sessions
+        assert scan.confidence is confidence, (
+            f"{sessions} qualifying sessions must read as {confidence.value}"
+        )
+        assert scan.plateaued is (sessions >= PLATEAU_MIN_QUALIFYING_SESSIONS)
+
+
+def test_recent_performance_and_historical_best_are_both_reported() -> None:
+    """D-07b: the PAIR of numbers, because a plateau and a DETRAINED exercise look identical alone.
+
+    On the live account Leg Extension's recent performance is 68.2% of its historical best. "No
+    new PR" is true both for someone grinding at 99% of their ceiling and for someone who deloaded
+    to 68% of it, and only the pair distinguishes them.
+    """
+    scan = scan_plateau(
+        _scan_series(sessions=4, spacing_days=7, e1rm=Decimal("68.000")),
+        historical_best=_SCAN_CEILING,
+        as_of=_SCAN_BASE + dt.timedelta(days=28),
+    )
+
+    assert scan.recent_performance_kg == Decimal("68.000")
+    assert scan.historical_best_kg == _SCAN_CEILING
+    assert scan.recent_performance_kg is not None
+    assert scan.historical_best_kg is not None
+    assert scan.recent_performance_kg / scan.historical_best_kg < Decimal("0.85"), (
+        "a lifter at 68% of their all-time best is DETRAINED, not plateaued, and only the pair of "
+        "numbers makes the two distinguishable"
+    )
+
+
+def test_duration_is_measured_to_as_of_not_the_last_session() -> None:
+    """The clock runs to ``as_of``, never to the last session in the streak.
+
+    "You have not PR'd in 40 days" is the useful sentence; "your streak spanned 26 days" is not.
+    Four sessions two days apart span six days -- below the calendar floor -- yet twenty days
+    later the same streak has been running long enough to count.
+    """
+    series = _scan_series(sessions=PLATEAU_MIN_QUALIFYING_SESSIONS, spacing_days=2)
+
+    at_the_last_session = scan_plateau(
+        series, historical_best=_SCAN_CEILING, as_of=_SCAN_BASE + dt.timedelta(days=6)
+    )
+    twenty_days_later = scan_plateau(
+        series, historical_best=_SCAN_CEILING, as_of=_SCAN_BASE + dt.timedelta(days=26)
+    )
+
+    assert at_the_last_session.streak_start == twenty_days_later.streak_start == _SCAN_BASE
+    assert at_the_last_session.plateaued is False
+    assert twenty_days_later.plateaued is True, (
+        "the elapsed span was measured to the last session instead of to as_of; the streak has "
+        "not been broken in the twenty days since"
+    )
