@@ -19,6 +19,13 @@ makes for `sessions_per_week` and `test_analytics_estimates.py` makes for the Ep
 
 Never an approximate-comparison helper anywhere in this file. Reaching for a tolerance here is
 the warning sign that a binary floating-point value leaked into an exact-`Decimal` pipeline.
+
+For PROG-02, THE load-bearing test is `test_dead_band_both_sides`. The specific wrong constant it
+catches is Decimal("0.005") -- CONTEXT.md's D-18 fraction form pasted into a percent comparison,
+which is a band a hundred times too tight and classifies all 28 live exercises as improving or
+declining, leaving `stable` unreachable. Its partner is `test_week_offsets_are_not_compressed`:
+without it, an implementation that enumerated only the weeks with data would report a stalled
+month as continuous progress and every value assertion above would still pass.
 """
 
 import datetime as dt
@@ -29,8 +36,17 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics.estimates import NoEstimateReason
-from app.analytics.progression import best_set_per_day, get_exercise_progression
+from app.analytics.progression import (
+    MIN_TREND_WEEKS,
+    SessionBest,
+    _weekly_slope,
+    best_set_per_day,
+    classify_trend,
+    get_exercise_progression,
+    weekly_e1rm_points,
+)
 from app.analytics.rollup import QualifyingSetRow
+from app.analytics.schemas import TrendVerdict
 from app.db.repositories.sync_state import (
     PROVIDER_HEVY,
     RESOURCE_EXERCISE_TEMPLATES,
@@ -54,6 +70,13 @@ _PULLUP = "PROG-pullup"
 _HIGH_REP = "PROG-highrep"
 _UNSYNCED = "PROG-never-synced"
 _SHARED = "PROG-shared"
+_TREND = "PROG-trend"
+
+# Three ids whose SORTED order is deliberately not their insertion order, so
+# `test_exercises_are_sorted_and_window_is_unsnapped` cannot pass on dict-iteration order.
+_TREND_A = "PROG-trend-a"
+_TREND_B = "PROG-trend-b"
+_TREND_C = "PROG-trend-c"
 
 # Asia/Jakarta is UTC+7, so 02:00Z is 09:00 local on the SAME day -- comfortably inside the local
 # day each constant is named for and never at risk of sliding into its neighbour.
@@ -62,6 +85,11 @@ _END = dt.date(2026, 8, 30)
 _DAY_1 = dt.datetime(2026, 8, 3, 2, 0, tzinfo=dt.UTC)
 _DAY_2 = dt.datetime(2026, 8, 10, 2, 0, tzinfo=dt.UTC)
 _DAY_3 = dt.datetime(2026, 8, 17, 2, 0, tzinfo=dt.UTC)
+_DAY_4 = dt.datetime(2026, 8, 24, 2, 0, tzinfo=dt.UTC)
+
+# Four consecutive Mondays inside `_START`.._END`, which is exactly `MIN_TREND_WEEKS` distinct
+# training weeks -- the smallest arrangement D-05 will commit to a verdict on.
+_TREND_WEEKS = (_DAY_1, _DAY_2, _DAY_3, _DAY_4)
 
 # Deliberately NOT week-aligned: Wednesday to Tuesday. `_START`/`_END` happen to be a Monday and
 # a Sunday, so an implementation that snapped outward to whole weeks would agree with them
@@ -257,6 +285,210 @@ def test_two_workouts_same_local_day_fold_into_one_entry() -> None:
     assert best.total_reps == 15
     assert best.workout_id == _EVENING_WORKOUT, (
         "workout_id must identify the workout carrying the SELECTED set, not the first one seen"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PROG-02's arithmetic. NO integration marker, for `best_set_per_day`'s reason: the slope, the
+# D-18 dead-band and the D-05 gate are business rules, and a business rule that needs Docker to
+# be checked is a business rule nobody checks on the commit that breaks it.
+# ---------------------------------------------------------------------------
+
+# +1 kg of e1RM per week from a base of 100. Slope exactly 1, so a float leak shows up as a
+# trailing-digit mismatch rather than as a plausible-looking number.
+_RISING = [
+    (0, Decimal("100")),
+    (1, Decimal("101")),
+    (2, Decimal("102")),
+    (3, Decimal("103")),
+]
+
+# Mean exactly 100 and slope exactly 0.5000, so `rate_percent_per_week` lands exactly ON D-18's
+# +0.5%/week edge. The band is INCLUSIVE there, so this reads as improving.
+_AT_BAND = [
+    (0, Decimal("99.25")),
+    (1, Decimal("99.75")),
+    (2, Decimal("100.25")),
+    (3, Decimal("100.75")),
+]
+
+# Mean exactly 100 and slope exactly 0.4900 -- one hundredth of a percent inside the band.
+_INSIDE_BAND = [
+    (0, Decimal("99.265")),
+    (1, Decimal("99.755")),
+    (2, Decimal("100.245")),
+    (3, Decimal("100.735")),
+]
+
+# The same two series read backwards, so the negative edge is pinned by construction rather than
+# by a second hand-computed arrangement that could drift from its mirror.
+_AT_BAND_DECLINING = [(x, y) for x, (_, y) in enumerate(reversed(_AT_BAND))]
+_INSIDE_BAND_DECLINING = [(x, y) for x, (_, y) in enumerate(reversed(_INSIDE_BAND))]
+
+
+def _session_best(
+    *,
+    local_day: dt.date,
+    best_e1rm_kg: Decimal | None,
+    template_external_id: str = _BENCH,
+) -> SessionBest:
+    """One folded day at exactly the grain ``best_set_per_day`` returns.
+
+    Hand-built for the same reason ``_row`` is: ``weekly_e1rm_points`` is pure, and routing these
+    through Postgres would only re-test the aggregate ``test_analytics_rollup.py`` already covers.
+    """
+    return SessionBest(
+        local_day=local_day,
+        template_external_id=template_external_id,
+        workout_id=_MORNING_WORKOUT,
+        best_e1rm_kg=best_e1rm_kg,
+    )
+
+
+def test_slope_is_exact_decimal() -> None:
+    """The OLS slope is closed-form exact ``Decimal``, asserted with ``==`` and no tolerance.
+
+    Four sums and one division, and the denominator depends only on which week offsets are
+    present -- an integer for every window -- which is what makes an exact expected value
+    assertable at all.
+    """
+    assert _weekly_slope(_RISING) == Decimal("1.0000"), (
+        "a float leaked in -- regr_slope returns double precision even for numeric inputs, and "
+        "statistics.linear_regression returns floats"
+    )
+
+    assert _weekly_slope([(0, Decimal("100"))]) is None, (
+        "one point has no slope; returning zero would read as 'stable' rather than 'unknown'"
+    )
+    assert _weekly_slope([(2, Decimal("100")), (2, Decimal("110"))]) is None, (
+        "every point sharing one week offset makes the denominator zero -- a single week is not "
+        "a trend, and it must not raise ZeroDivisionError either"
+    )
+
+
+def test_dead_band_both_sides() -> None:
+    """D-18's +-0.5%/week band, pinned at BOTH edges and on BOTH signs.
+
+    THE load-bearing PROG-02 test. The wrong constant it catches is ``Decimal("0.005")`` --
+    CONTEXT.md writes D-18 in FRACTION units, and this comparison is in PERCENT units. Pasting
+    the fraction here makes the band a hundred times too tight, so every one of the 28 live
+    classified exercises reads as improving or declining and ``stable`` becomes unreachable. A
+    suite without both edges cannot see that: the improving and declining assertions still pass.
+
+    The edge is INCLUSIVE: exactly +0.5%/week is improving, not stable. An arbitrary choice,
+    made once and stated, which is why both sides of it are asserted.
+    """
+    assert classify_trend(_AT_BAND) == (TrendVerdict.IMPROVING, Decimal("0.50"))
+    assert classify_trend(_INSIDE_BAND) == (TrendVerdict.STABLE, Decimal("0.49"))
+    assert classify_trend(_AT_BAND_DECLINING) == (TrendVerdict.DECLINING, Decimal("-0.50"))
+    assert classify_trend(_INSIDE_BAND_DECLINING) == (TrendVerdict.STABLE, Decimal("-0.49"))
+
+
+def test_min_weeks_gate_both_sides() -> None:
+    """D-05: fewer than four distinct training weeks is ``unclear``, however steep the series.
+
+    Built from ``MIN_TREND_WEEKS`` rather than from a literal 4, so raising the minimum moves
+    this test with it instead of leaving it silently asserting the old threshold.
+    """
+    steep = [(week, Decimal(100 + 20 * week)) for week in range(MIN_TREND_WEEKS)]
+
+    assert classify_trend(steep[:-1]) == (TrendVerdict.UNCLEAR, None), (
+        "a +20%/week series still cannot be classified from three weeks -- blueprint 20's "
+        "'do not classify progression based on a single workout', scaled to a number"
+    )
+
+    verdict, rate = classify_trend(steep)
+    assert verdict is TrendVerdict.IMPROVING
+    assert rate == Decimal("15.38")
+
+
+def test_rate_is_scale_invariant() -> None:
+    """Doubling every e1RM leaves the rate unchanged, because the normalizer is the window MEAN.
+
+    One band has to be comparable across a 7 kg cable extension and a 160 kg leg press, and the
+    mean is what makes it so.
+    """
+    doubled = [(x, y * Decimal(2)) for x, y in _AT_BAND]
+
+    assert classify_trend(doubled) == (TrendVerdict.IMPROVING, Decimal("0.50")), (
+        "normalized by the first point instead of the window mean; the verdict would then depend "
+        "on which week the window started in"
+    )
+
+
+def test_week_offsets_are_not_compressed() -> None:
+    """A training gap WIDENS the x-axis gap; it is never compressed to consecutive weeks.
+
+    Without this, an implementation that enumerated only the weeks that happen to have data
+    would pass every value assertion above while reporting a stalled month as continuous
+    progress -- +0.99%/week where the truth is +0.56%/week.
+    """
+    bests = {
+        (_BENCH, local_day): _session_best(local_day=local_day, best_e1rm_kg=e1rm)
+        for local_day, e1rm in (
+            (dt.date(2026, 8, 3), Decimal("100")),
+            (dt.date(2026, 8, 10), Decimal("101")),
+            (dt.date(2026, 8, 17), Decimal("102")),
+            # Three weeks later, not one: weeks 3 and 4 hold no training at all.
+            (dt.date(2026, 9, 7), Decimal("103")),
+        )
+    }
+
+    points = weekly_e1rm_points(bests, window_start=_START)
+
+    assert [x for x, _ in points[_BENCH]] == [0, 1, 2, 5], (
+        "the week offsets were compressed to a dense index over the weeks that had data; the "
+        "gap must stay visible on the x-axis"
+    )
+
+    gapped = classify_trend(points[_BENCH])
+    compressed = classify_trend([(x, y) for x, (_, y) in enumerate(points[_BENCH])])
+
+    assert gapped == (TrendVerdict.IMPROVING, Decimal("0.56"))
+    assert compressed == (TrendVerdict.IMPROVING, Decimal("0.99"))
+    assert gapped != compressed
+
+
+def test_weekly_points_take_the_week_maximum_and_skip_nulls() -> None:
+    """``y`` is the week's MAXIMUM e1RM, and a null-estimate day contributes no point at all.
+
+    The mean would be dragged down by a deliberately light day, and PROG-02 asks whether the
+    CEILING is rising. Both dict orders are checked because a last-wins or first-wins bug agrees
+    with the maximum in exactly one of them.
+    """
+    ascending = {
+        (_BENCH, dt.date(2026, 8, 3)): _session_best(
+            local_day=dt.date(2026, 8, 3), best_e1rm_kg=Decimal("100")
+        ),
+        (_BENCH, dt.date(2026, 8, 5)): _session_best(
+            local_day=dt.date(2026, 8, 5), best_e1rm_kg=Decimal("110")
+        ),
+    }
+    descending = {
+        (_BENCH, dt.date(2026, 8, 3)): _session_best(
+            local_day=dt.date(2026, 8, 3), best_e1rm_kg=Decimal("110")
+        ),
+        (_BENCH, dt.date(2026, 8, 5)): _session_best(
+            local_day=dt.date(2026, 8, 5), best_e1rm_kg=Decimal("100")
+        ),
+    }
+
+    assert weekly_e1rm_points(ascending, window_start=_START)[_BENCH] == [(0, Decimal("110"))]
+    assert weekly_e1rm_points(descending, window_start=_START)[_BENCH] == [(0, Decimal("110"))], (
+        "the later day overwrote the higher one; two days in one week collapse to the week's "
+        "MAXIMUM, not to whichever was folded last"
+    )
+
+    # D-07a's skip semantics: an ungated day neither raises nor lowers the ceiling, and it must
+    # not manufacture a week offset that would then count toward D-05's four-week minimum.
+    with_a_null = dict(ascending)
+    with_a_null[(_BENCH, dt.date(2026, 8, 10))] = _session_best(
+        local_day=dt.date(2026, 8, 10), best_e1rm_kg=None
+    )
+
+    assert weekly_e1rm_points(with_a_null, window_start=_START)[_BENCH] == [(0, Decimal("110"))], (
+        "a day with no usable estimate created a week offset; weeks_with_data counts weeks that "
+        "produced an ESTIMATE, not weeks trained"
     )
 
 
