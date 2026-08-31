@@ -60,11 +60,11 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 ### MCP Server
 
 - [x] **MCP-01**: A remote MCP server is deployed and reachable over HTTPS, independent of any specific device's local configuration
-- [ ] **MCP-02**: MCP server exposes purpose-built, read-only tools covering: recent workouts, a composed training summary, weekly volume, muscle-group volume, exercise progression, personal records, plateaus, training frequency, body-weight trend, recomposition status, and period comparison
+- [x] **MCP-02**: MCP server exposes purpose-built, read-only tools covering: recent workouts, a composed training summary, weekly volume, muscle-group volume, exercise progression, personal records, plateaus, training frequency, body-weight trend, recomposition status, and period comparison
 - [ ] **MCP-03**: MCP tools return compact, structured JSON — never raw database access or unbounded result sets
 - [x] **MCP-04**: MCP server authenticates requests and rejects unauthenticated ones; the authentication mechanism is verified working end-to-end from an actual Claude client (not just a local test client) before being considered done
 - [ ] **MCP-05**: No MCP tool can modify, delete, or write any data — the server is read-only in v1
-- [ ] **MCP-06**: No API keys, database credentials, or internal secrets are ever returned in an MCP tool response
+- [x] **MCP-06**: No API keys, database credentials, or internal secrets are ever returned in an MCP tool response
 
 ### Deployment & Coaching
 
