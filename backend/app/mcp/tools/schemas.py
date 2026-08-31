@@ -193,7 +193,7 @@ class WorkoutSummary(_McpModel):
     """D-09: one workout, no per-exercise and no per-set breakdown.
 
     This omission is what keeps the list compact regardless of how many workouts are requested --
-    ``fitness_get_workout_detail`` exists to expand exactly one of these on demand.
+    ``fitness_get_workout`` exists to expand exactly one of these on demand.
 
     ``workout_id`` is the HEVY EXTERNAL ID (``workouts.external_id``), never the internal
     ``workouts.id`` surrogate (D-12, T-06-08).
