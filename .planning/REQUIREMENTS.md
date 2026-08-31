@@ -43,14 +43,14 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 - [x] **PROG-01**: System calculates an exercise's progression time series (weight, reps, sets, and an estimated 1RM only where the exercise's modality and rep range make the estimate meaningful — otherwise returns null with a reason)
 - [x] **PROG-02**: System classifies each tracked exercise's recent trend as improving, stable, declining, or unclear, based on multiple sessions rather than a single workout
-- [ ] **PROG-03**: System detects plateaus using a configurable multi-week window, returning the window and threshold used alongside the result
+- [x] **PROG-03**: System detects plateaus using a configurable multi-week window, returning the window and threshold used alongside the result
 - [x] **PROG-04**: System detects personal records (max weight, max reps at a weight, estimated-1RM PR, volume PR, rep PR) with the date of each, excluding warm-up sets
 - [x] **CMP-01**: System can compare two time periods (e.g. last 4 weeks vs previous 4 weeks) with values normalized per week so unequal-length windows don't produce misleading deltas
 
 ### Body Composition & Recomposition
 
 - [x] **BODY-01**: System calculates rolling body-weight averages (7/14/30-day) and weekly rate of change from synced measurements
-- [ ] **BODY-02**: System classifies overall recomposition status (e.g. progressing, muscle gain, fat loss, weight stable, too fast/slow, insufficient data) from combined weight trend, training volume, and progression data, explicitly framed as decision support rather than a medical or diagnostic claim
+- [x] **BODY-02**: System classifies overall recomposition status (e.g. progressing, muscle gain, fat loss, weight stable, too fast/slow, insufficient data) from combined weight trend, training volume, and progression data, explicitly framed as decision support rather than a medical or diagnostic claim
 
 ### Data Quality & Trust
 
