@@ -37,21 +37,29 @@ import structlog
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
+from app.analytics.frequency import get_training_frequency
 from app.analytics.schemas import (
     MuscleGroupFrequency,
     MuscleGroupVolumeResult,
     TrainingFrequencyResult,
 )
-from app.analytics.volume import get_weekly_volume
+from app.analytics.volume import get_muscle_group_volume, get_weekly_volume
 from app.mcp.context import AppContext
 from app.mcp.tools._common import (
+    MAX_FREQUENCY_EXERCISES,
     MAX_WEEKS,
     read_only_session,
     resolve_user_id,
     safe_tool,
+    truncate,
     window_from_weeks,
 )
-from app.mcp.tools.schemas import MuscleGroupRollup, WeeklyVolumeResponse
+from app.mcp.tools.schemas import (
+    MuscleGroupRollup,
+    MuscleGroupVolumeResponse,
+    TrainingFrequencyResponse,
+    WeeklyVolumeResponse,
+)
 from app.normalization.muscles import CanonicalMuscleGroup
 
 log = structlog.get_logger()
@@ -150,3 +158,122 @@ async def fitness_get_weekly_volume(
             session, user_id=user, start_day=start_day, end_day=end_day
         )
     return WeeklyVolumeResponse(data_available=True, volume=volume)
+
+
+def _degraded_muscle() -> MuscleGroupVolumeResponse:
+    return MuscleGroupVolumeResponse(
+        data_available=False,
+        window_start=None,
+        window_end=None,
+        weeks=None,
+        muscles=[],
+        coverage=None,
+        freshness=None,
+    )
+
+
+@safe_tool(degraded=_degraded_muscle)
+async def fitness_get_muscle_group_volume(
+    ctx: Context[AppContext],
+    weeks: Annotated[
+        int,
+        Field(ge=1, le=MAX_WEEKS, description="Whole weeks back from today, ending today. Max 52."),
+    ] = 12,
+) -> MuscleGroupVolumeResponse:
+    """Per-muscle-group training volume over the last N weeks: direct sets, indirect sets, the
+    weighted total, and how often each group was trained. Always returns all 19 canonical muscle
+    groups, including the ones you did not train -- a zero row is the answer to "which muscles are
+    undertrained?".
+
+    This tool ROLLS UP over the window rather than returning a week-by-week grid, and that is a
+    deliberate exception to how every other tool here composes its analytics result. The grid is
+    weeks x 19, so a 52-week request measures 128,290 bytes of structured JSON and ~347,707 bytes
+    on the wire; the rollup is ~7,851 bytes at any window. Week-by-week TOTAL volume is available
+    from `fitness_get_weekly_volume`, and muscle-level movement between two blocks from
+    `fitness_compare_periods`.
+    """
+    user = resolve_user_id(ctx)
+    async with read_only_session(ctx) as session:
+        start_day, end_day = await window_from_weeks(session, user_id=user, weeks=weeks)
+        # The SAME range for both calls. The volume one snaps outward to whole weeks and the
+        # frequency one does not -- see the module docstring for why composing them is correct.
+        volume = await get_muscle_group_volume(
+            session, user_id=user, start_day=start_day, end_day=end_day
+        )
+        frequency = await get_training_frequency(
+            session, user_id=user, start_day=start_day, end_day=end_day
+        )
+    muscles = roll_up_muscles(volume, frequency)
+    return MuscleGroupVolumeResponse(
+        data_available=True,
+        window_start=start_day,
+        window_end=end_day,
+        weeks=weeks,
+        muscles=muscles,
+        # Both taken from the VOLUME result, never the frequency one. Its freshness covers
+        # `workouts` AND `exercise_templates` (FRESHNESS_RESOURCES_MUSCLE), because the muscle
+        # map comes from the templates -- a stale template sync silently changes every
+        # per-muscle number in this response, with no error anywhere.
+        coverage=volume.coverage,
+        freshness=volume.freshness,
+    )
+
+
+def _degraded_frequency() -> TrainingFrequencyResponse:
+    return TrainingFrequencyResponse(
+        data_available=False,
+        window_start=None,
+        window_end=None,
+        sessions_per_week=None,
+        muscle_groups=[],
+        exercises=[],
+        exercises_truncated=False,
+        total_exercises=0,
+        coverage=None,
+        freshness=None,
+    )
+
+
+@safe_tool(degraded=_degraded_frequency)
+async def fitness_get_training_frequency(
+    ctx: Context[AppContext],
+    weeks: Annotated[
+        int,
+        Field(ge=1, le=MAX_WEEKS, description="Whole weeks back from today, ending today. Max 52."),
+    ] = 12,
+) -> TrainingFrequencyResponse:
+    """How often you train: sessions per week overall, per muscle group, and per exercise, over
+    the last N weeks. The per-exercise list is capped at the 30 most-trained exercises; when it is
+    capped, `exercises_truncated` is true and `total_exercises` reports how many there really are.
+    """
+    user = resolve_user_id(ctx)
+    async with read_only_session(ctx) as session:
+        start_day, end_day = await window_from_weeks(session, user_id=user, weeks=weeks)
+        result = await get_training_frequency(
+            session, user_id=user, start_day=start_day, end_day=end_day
+        )
+    # The analytics result sorts `exercises` by external id, which is arbitrary with respect to
+    # how much each was trained. Re-sorting here is what makes the cap MEAN something: without
+    # it, MAX_FREQUENCY_EXERCISES would keep 30 alphabetically-lucky ids and drop the lifts the
+    # user actually trains. The external id breaks ties so the ordering stays deterministic.
+    sorted_exercises = sorted(
+        result.exercises,
+        key=lambda row: (-row.sessions, row.exercise_template_external_id),
+    )
+    exercises, exercises_truncated, total_exercises = truncate(
+        sorted_exercises, MAX_FREQUENCY_EXERCISES
+    )
+    return TrainingFrequencyResponse(
+        data_available=True,
+        window_start=start_day,
+        window_end=end_day,
+        sessions_per_week=result.sessions_per_week,
+        # Passed through UNTRUNCATED and with no flag: already bounded at 19 by the canonical
+        # taxonomy, and a bound that comes from the shape needs no declaration.
+        muscle_groups=result.muscle_groups,
+        exercises=exercises,
+        exercises_truncated=exercises_truncated,
+        total_exercises=total_exercises,
+        coverage=result.coverage,
+        freshness=result.freshness,
+    )
