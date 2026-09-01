@@ -92,6 +92,19 @@ class Settings(BaseSettings):
         validation_alias="MCP_ALLOWED_HOSTS",
     )
 
+    # Rate limiting (ROADMAP Phase 7 criterion #2). NOT secrets: these are
+    # operational tuning numbers that must stay readable in logs, so they are
+    # deliberately kept OUT of `_SECRET_FIELDS`.
+    #
+    # The bucket is per PROCESS and `scripts/deploy-cloud-run.sh` sets
+    # `--max="${BRETT_MAX_INSTANCES:-2}"`, so the effective ceiling across the
+    # service is up to 2x these numbers. Deliberately generous: a single
+    # coaching turn can fan out to several tool calls, and a 429 mid-turn is
+    # worse than an unthrottled minute for a single-user connector
+    # (07-RESEARCH.md Pitfalls 9 and 10, Open Question 2).
+    rate_limit_per_minute: int = 30
+    rate_limit_burst: int = 30
+
     @field_validator("database_url")
     @classmethod
     def _validate_db_url(cls, v: SecretStr) -> SecretStr:

@@ -28,6 +28,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "MCP_RESOURCE_URL",
         "MCP_JWKS_URI",
         "MCP_ALLOWED_HOSTS",
+        "RATE_LIMIT_PER_MINUTE",
+        "RATE_LIMIT_BURST",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
