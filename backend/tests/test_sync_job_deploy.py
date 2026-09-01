@@ -84,7 +84,16 @@ _FORBIDDEN_SCALING_FLAGS = ("--min=", "--max=")
 # The invocation this whole plan exists to schedule. `app.cli` is the link from the
 # deploy script to backend/app/cli.py; without it the job runs the buildpack's web
 # entrypoint and serves HTTP nobody calls instead of syncing.
-_JOB_COMMAND_ARGS = "--args=-m,app.cli,sync-hevy"
+_JOB_COMMAND_ARGS = "--args=python,-m,app.cli,sync-hevy"
+
+# The entrypoint MUST stay the CNB launcher. A buildpack image's PATH, virtualenv and
+# layer environment are applied by /cnb/lifecycle/launcher, which is the image's real
+# entrypoint. Naming a bare interpreter as the command replaces the launcher, none of
+# that environment is applied, and Cloud Run reports only `Application exec likely
+# failed` with no application output -- a failure that names neither the interpreter nor
+# the cause. Confirmed live on 2026-09-01 (plan 07-07): `--command=python` failed exactly
+# that way, and the identical argv through the launcher ran.
+_JOB_COMMAND = "--command=/cnb/lifecycle/launcher"
 
 _JOB_DEFAULT = re.compile(r'JOB="\$\{BRETT_SYNC_JOB:-([a-z0-9-]+)\}"')
 _RUN_URI_ASSIGNMENT = re.compile(r'RUN_URI="([^"]*)"')
@@ -216,6 +225,12 @@ def test_job_script_carries_every_required_flag() -> None:
         f"{_JOB_COMMAND_ARGS!r}. The Procfile declares only a `web` process, so "
         f"without this override the job starts uvicorn and serves HTTP nobody calls "
         f"instead of running backend/app/cli.py's sync-hevy command"
+    )
+    assert _JOB_COMMAND in script, (
+        f"DEPLOY-03 violated: scripts/deploy-sync-job.sh no longer passes "
+        f"{_JOB_COMMAND!r}. The buildpack image's PATH and uv virtualenv are applied by "
+        f"the CNB launcher; naming an interpreter directly replaces it, and the job then "
+        f"dies with `Application exec likely failed` and no application output"
     )
 
 

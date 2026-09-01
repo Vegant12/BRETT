@@ -37,6 +37,16 @@ TASK_TIMEOUT="${BRETT_SYNC_TASK_TIMEOUT:-1800s}"
 # Procfile declares only a web process); PYTHONPATH=backend from the env file makes
 # `app` importable.
 #
+# The command is the CNB launcher, NOT `python` directly. A buildpack image's PATH,
+# virtualenv and layer environment are applied by /cnb/lifecycle/launcher, which is the
+# image's real entrypoint; overriding the entrypoint with a bare interpreter name
+# replaces the launcher and none of that environment is ever applied. Cloud Run then
+# reports only `Application exec likely failed` with no application output at all,
+# which names neither the interpreter nor the cause. Verified live on 2026-09-01:
+# `--command=python` produced exactly that, and routing the identical argv through the
+# launcher started the interpreter, resolved the uv virtualenv at
+# /layers/google.python.uv/uv-dependencies/.venv and reached the database.
+#
 # Deliberately absent, and asserted absent by the test module named above: the
 # service-only public-ingress flag (a job has no ingress to open), the inline
 # environment flag (it wipes everything --env-vars-file supplies), the Cloud SQL and
@@ -45,18 +55,26 @@ TASK_TIMEOUT="${BRETT_SYNC_TASK_TIMEOUT:-1800s}"
 #
 # The MCP connector credential is deliberately NOT bound: the CLI never constructs a
 # token verifier, so a compromised sync task cannot read or mint it (T-07-19).
+#
+# No build-time environment is passed. `gcloud run deploy` (a SERVICE) accepts
+# --set-build-env-vars and scripts/deploy-cloud-run.sh uses it for UV_FROZEN/UV_NO_DEV;
+# `gcloud run jobs deploy` accepts no such flag on either the GA or the beta track in
+# SDK 578.0.0, and rejects it outright. Nothing is lost that matters: `[tool.uv]
+# default-groups = []` in pyproject.toml is what actually keeps the 32 dev packages out
+# of the image, and its own comment says so -- checked in and testable, unlike a
+# build-time environment variable. Only UV_FROZEN's "fail instead of re-resolving a
+# drifted lockfile" guarantee is unavailable here; see docs/runbook-sync-schedule.md.
 exec gcloud run jobs deploy "$JOB" \
   --project="$PROJECT_ID" \
   --region="$REGION" \
   --source="$REPO_ROOT" \
   --service-account="$RUNTIME_SA" \
-  --command=python \
-  --args=-m,app.cli,sync-hevy \
+  --command=/cnb/lifecycle/launcher \
+  --args=python,-m,app.cli,sync-hevy \
   --tasks=1 \
   --max-retries="$MAX_RETRIES" \
   --task-timeout="$TASK_TIMEOUT" \
   --memory=512Mi \
   --env-vars-file="$REPO_ROOT/deploy/sync-job.env.yaml" \
   --set-secrets="DATABASE_URL=brett-database-url:latest,HEVY_API_KEY=brett-hevy-api-key:latest" \
-  --set-build-env-vars="UV_FROZEN=1,UV_NO_DEV=1" \
   --quiet
