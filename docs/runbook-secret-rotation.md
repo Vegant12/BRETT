@@ -252,9 +252,22 @@ a destroyed version removes the only rollback if the new one turns out to be wro
 
 ## Verification record — 2026-09-01
 
-Service `brett`, project `brett-fitness`, region `us-central1`.
+Service `brett`, project `brett-fitness`, region `us-central1`, gcloud SDK 578.0.0, deploying
+account `hovegant12@gmail.com`.
 `BASE = https://brett-cglno6k2xq-uc.a.run.app` (read from `status.url`; both this host and the
 deterministic `brett-792870654598.us-central1.run.app` are in `MCP_ALLOWED_HOSTS`).
+
+Revision and secret timeline, so "the static window" is a bounded interval and not a vague one:
+
+| When | Revision | `MCP_AUTH_MODE` | `brett-mcp-auth-secret` |
+|---|---|---|---|
+| Before | `brett-00007-xz7` | `authkit` | v1 enabled |
+| Version added | `brett-00007-xz7` (unchanged — adding a version does nothing until a deploy) | `authkit` | v1 enabled, **v2 enabled** |
+| Static window opens | **`brett-00008-rlg`** | **`static`** | v1 enabled, v2 enabled (`:latest` → v2) |
+| Static window closes | **`brett-00009-fsm`** | `authkit` | v1 enabled, v2 enabled |
+| After | `brett-00009-fsm` | `authkit` | **v1 disabled**, v2 enabled, none destroyed |
+
+Two production deploys, one static window spanning exactly the interval between them.
 
 | Row | Check | Expected | Observed | Pass/Fail |
 |---|---|---|---|---|
@@ -263,17 +276,62 @@ deterministic `brett-792870654598.us-central1.run.app` are in `MCP_ALLOWED_HOSTS
 | 3 | new version added, enabled | version 2 | version `2` `enabled` at `2026-09-01T12:17:26`; version `1` still `enabled`; `access 2 \| wc -c` → `64`, i.e. no trailing newline | **PASS** |
 | 4 | fast suite green after the flip edit | 0 failures | `401 passed, 286 deselected in 1.64s`, exit 0 | **PASS** |
 | 5 | static-mode deploy: new revision ready, 100% traffic | revision ≠ `brett-00007-xz7` | `brett-00008-rlg` deployed, `latestRevision: true`, `percent: 100`; live env re-read shows `MCP_AUTH_MODE = static` | **PASS** |
-| 6 | old token to `/mcp` (`Bearer $OLD_TOKEN`, value not recorded) | `401` | *(pending — Task 2)* | *(pending)* |
-| 7 | new token to `/mcp` (`Bearer $NEW_TOKEN`, value not recorded) | `200`, 13 tools | *(pending — Task 2)* | *(pending)* |
-| 8 | no `Authorization` header | `401` + `resource_metadata=` | *(pending — Task 2)* | *(pending)* |
-| 9 | `GET /health` during the window | `200` | *(pending — Task 2)* | *(pending)* |
-| 10 | flip-back deploy: live mode reads `authkit` | `authkit` | *(pending — Task 2)* | *(pending)* |
-| 11 | `git diff deploy/cloud-run.env.yaml` | empty | *(pending — Task 2)* | *(pending)* |
-| 12 | new token to `/mcp` after flip-back | `401` | *(pending — Task 2)* | *(pending)* |
-| 13 | previous version state | `disabled`, none destroyed | *(pending — Task 2)* | *(pending)* |
+| 6 | old token to `/mcp` (`Bearer $OLD_TOKEN`, value not recorded) | `401` | `401` in 0.376 s; body `{"error": "invalid_token", "error_description": "Authentication required"}` | **PASS** |
+| 7 | new token to `/mcp` (`Bearer $NEW_TOKEN`, value not recorded) | `200`, 13 tools | `200` in 0.419 s; `content-type: application/json`; **13** tools, sorted names exactly `fitness_compare_periods`, `fitness_get_body_weight_trend`, `fitness_get_exercise_progression`, `fitness_get_muscle_group_volume`, `fitness_get_personal_records`, `fitness_get_plateaus`, `fitness_get_recent_workouts`, `fitness_get_recomposition_status`, `fitness_get_training_frequency`, `fitness_get_training_summary`, `fitness_get_weekly_volume`, `fitness_get_workout`, `fitness_ping` | **PASS** |
+| 8 | no `Authorization` header | `401` + `resource_metadata=` | `401` in 0.511 s; `www-authenticate: Bearer error="invalid_token", error_description="Authentication required", resource_metadata="https://brett-792870654598.us-central1.run.app/.well-known/oauth-protected-resource/mcp"` | **PASS** |
+| 9 | `GET /health` during the window | `200` | `200` in 1.73 s (cold, Neon waking); body exactly `{"status":"ok","database":"connected"}` | **PASS** |
+| 10 | flip-back deploy: live mode reads `authkit` | `authkit` | `brett-00009-fsm` deployed, 100% traffic; env re-read **off the service** reports `MCP_AUTH_MODE = authkit`; both secret bindings intact | **PASS** |
+| 11 | `git diff deploy/cloud-run.env.yaml` | empty | `git diff --quiet` exit `0`; and `git diff <pre-plan-commit> HEAD -- deploy/cloud-run.env.yaml` also empty, so the file is byte-identical to its pre-plan state, not merely to the last commit | **PASS** |
+| 12 | new token to `/mcp` after flip-back | `401` | `401` in 0.521 s, body byte-identical (`cmp`) to the anonymous row 8 response — the static token is out of the request path again. `GET /health` re-checked `200` | **PASS** |
+| 13 | previous version state | `disabled`, none destroyed | version `1` `disabled`, version `2` `enabled`; `... --format='value(state)' \| grep -ci destroyed` → `0`. `GET /health` after the disable → `200` | **PASS** |
 | 14 | Claude connector round-trip (human-verified) | `fitness_ping` and `fitness_get_weekly_volume` both succeed | *(pending — Task 3 checkpoint)* | *(pending)* |
 
 Row 14 is a human-verified checkpoint, not a claim inferred from code.
+
+### What row 7 actually closes
+
+`07-DEPLOY-RECORD.md` recorded the 13-tool set from source registration and from a real Claude
+client, but deliberately **not** from a `curl`, because in `authkit` mode no credential available to
+an agent can produce a `200` from `tools/list`. That was called a split, not an omission, with the
+`curl` half assigned to this rotation drill. Row 7 is that half: a third, independent line of
+evidence that the *serving* revision exposes 13 tools, obtained over an authenticated request
+rather than inferred from `add_tool` call sites.
+
+### Two corrections to the prescribed commands, found in first live use
+
+Both are recorded rather than silently fixed, because each would waste the next operator's time in
+the middle of a procedure that opens a production auth window.
+
+1. **`grep -c ENABLED` returns `0` on a healthy secret.** gcloud SDK 578.0.0 renders the version
+   state **lowercase** — `enabled`, `disabled` — under both `--format='value(state)'` and
+   `--format='table(name,state)'`. The uppercase grep matches nothing and reads as a failed
+   rotation. Use `grep -ci enabled`. Observed: `grep -c ENABLED` → `0`, `grep -ci enabled` → `2`,
+   against a version list showing two enabled versions.
+2. **The `/mcp` response is `application/json`, not `text/event-stream`.** The prescribed
+   extraction pipes through `sed -n 's/^data: //p'` to strip SSE framing; against this deployment
+   that filter emits nothing and the JSON parse fails on empty input. `content-type` on row 7 was
+   `application/json` and the body was plain JSON-RPC. Parse the body directly, or tolerate both
+   shapes:
+
+   ```bash
+   python3 -c '
+   import json,sys
+   raw=sys.stdin.read()
+   if raw.lstrip().startswith("data:"):
+       raw="\n".join(l[6:] for l in raw.splitlines() if l.startswith("data: "))
+   d=json.loads(raw); n=[t["name"] for t in d["result"]["tools"]]
+   print(len(n)); print("\n".join(sorted(n)))'
+   ```
+
+### On `BASE`, and why the two hostnames are interchangeable here
+
+`status.url` returns the **legacy hash** host `https://brett-cglno6k2xq-uc.a.run.app`, while
+`MCP_RESOURCE_URL` names the **deterministic** host `https://brett-792870654598.us-central1.run.app`.
+Every row above was issued against the former and passed, because both hosts are listed in
+`MCP_ALLOWED_HOSTS` so the DNS-rebinding guard accepts either. Note the `resource_metadata=`
+challenge still advertises the *deterministic* host — that value comes from `MCP_RESOURCE_URL` and
+is independent of which host the request arrived on, which is exactly the behaviour a connector
+needs. Use `status.url` for operator `curl`s; never retype `MCP_RESOURCE_URL` from memory.
 
 ## Known limitations
 
