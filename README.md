@@ -72,8 +72,11 @@ never a build gate. It reads only the local database, so it works without a Hevy
 variable. `PYTHONPATH=backend` is required because `backend/` is the import root (the same
 reason the `Procfile` passes `--app-dir backend`).
 
-This CLI is the verification and operations trigger. **Production scheduling is Phase 7** —
-nothing here runs the sync on a timer.
+This CLI is the verification and operations trigger, and it stays the way to force a sync by
+hand. Production sync runs as a **Cloud Run Job on a 6-hourly Cloud Scheduler trigger**
+(`0 */6 * * *`, `Asia/Jakarta`), deployed by `scripts/deploy-sync-job.sh` and scheduled once by
+`scripts/create-sync-schedule.sh`. The job runs the same `python -m app.cli sync-hevy` command
+this section documents, with `HEVY_API_KEY` and `DATABASE_URL` bound from Secret Manager.
 
 ## Tests
 
