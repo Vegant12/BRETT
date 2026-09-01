@@ -142,6 +142,81 @@ API. Two defects surfaced on first use and are fixed in the committed script:
    control-plane read-back below shows the launcher as `command` and `python` as the first
    `arg` rather than the shape plan 07-07 originally predicted.
 
+## Procedure
+
+All commands assume `export BRETT_GCP_PROJECT=brett-fitness` and an authenticated `gcloud`.
+
+### Redeploy the job after a code change
+
+```bash
+./scripts/deploy-sync-job.sh
+```
+
+Source build through Cloud Buildpacks; takes several minutes. The script is idempotent — it
+redeploys in place and does not need the schedule to be touched, because Cloud Scheduler targets
+the job by name, not by revision.
+
+**If the change included a new Alembic revision, migrate first.** The job has no pre-deploy hook
+and will fail against a stale schema exactly as described above:
+
+```bash
+cd backend
+DATABASE_URL="$(gcloud secrets versions access latest \
+    --secret=brett-database-url --project="$BRETT_GCP_PROJECT")" \
+  uv run alembic current   # compare against `alembic heads` before deploying
+```
+
+### Change the cadence
+
+Edit the default in `scripts/create-sync-schedule.sh` (`BRETT_SYNC_CRON`), or override for a
+one-off, then re-run the script — it takes the update path on an existing schedule:
+
+```bash
+BRETT_SYNC_CRON='0 */3 * * *' ./scripts/create-sync-schedule.sh
+```
+
+Keep `README.md` and this runbook in step with the committed default. Blueprint §38 bounds the
+range at every 1–6 hours; anything outside that is a decision, not a tweak.
+
+### Force a sync right now
+
+Through the scheduler (also tests the scheduler's own wiring):
+
+```bash
+gcloud scheduler jobs run brett-sync-hevy-6h \
+  --project="$BRETT_GCP_PROJECT" --location=us-central1
+```
+
+Or directly against the job, blocking until it finishes:
+
+```bash
+gcloud run jobs execute brett-sync-hevy \
+  --project="$BRETT_GCP_PROJECT" --region=us-central1 --wait
+```
+
+Then confirm — with `succeededCount`, never with the log signature:
+
+```bash
+gcloud run jobs executions list --job=brett-sync-hevy \
+  --project="$BRETT_GCP_PROJECT" --region=us-central1 --limit=1 \
+  --format='value(metadata.name,status.succeededCount,status.failedCount)'
+```
+
+### Pause the schedule (and how to remember to resume it)
+
+```bash
+gcloud scheduler jobs pause  brett-sync-hevy-6h --project="$BRETT_GCP_PROJECT" --location=us-central1
+gcloud scheduler jobs resume brett-sync-hevy-6h --project="$BRETT_GCP_PROJECT" --location=us-central1
+gcloud scheduler jobs describe brett-sync-hevy-6h --project="$BRETT_GCP_PROJECT" \
+  --location=us-central1 --format='value(state)'    # PAUSED or ENABLED
+```
+
+**A paused schedule is invisible in every other view.** The API keeps answering, `/health` stays
+green, the MCP tools keep returning data, and the Cloud Run Job still exists and still works when
+run by hand. The only symptom is `freshness.resources.workouts` drifting further into the past —
+which the coaching document instructs Claude to report before answering. If you pause this, set
+yourself a reminder; nothing else will.
+
 ## Verification record — 2026-09-01
 
 | Row | Command summary | Expected | Observed | Pass/Fail |
@@ -151,7 +226,10 @@ API. Two defects surfaced on first use and are fixed in the committed script:
 | 3 | `gcloud run jobs describe brett-sync-hevy --region=us-central1` — command/args/env/secret refs/SA | runs `python -m app.cli sync-hevy`; `DATABASE_URL` and `HEVY_API_KEY` as secret references, never literals; SA `brett-run@` | `command=["/cnb/lifecycle/launcher"]`, `args=["python","-m","app.cli","sync-hevy"]`; env `ENVIRONMENT=production`, `LOG_LEVEL=INFO`, `PYTHONPATH=backend` as literals, `DATABASE_URL`→`secretKeyRef{name: brett-database-url, key: latest}`, `HEVY_API_KEY`→`secretKeyRef{name: brett-hevy-api-key, key: latest}`; `serviceAccountName=brett-run@brett-fitness.iam.gserviceaccount.com` | **PASS** (see note) |
 | 4 | `gcloud run jobs execute brett-sync-hevy --wait`, then `executions list --limit=1 --format='value(metadata.name,status.succeededCount,status.failedCount)'` | `succeededCount` 1, no failures | `brett-sync-hevy-m8w2v  1  <empty>` | **PASS** |
 | 5 | logs show `hevy_cli_started` + `hevy_cli_stopped`, no `hevy_cli_failed` | present / present / absent | For `m8w2v`: `started=1 stopped=1 failed=0 exit(0)=1`. **This row is necessary but NOT sufficient — see the caveat below.** | **PASS** |
-| 6 | no credential-shaped string in the log window | zero matches | Across 537 log lines spanning all three executions: `postgres(ql)?://` **0**, `ep-[a-z0-9-]+\.` **0**, `neon.tech` **0**, `api[-_]?key` **0**, `authorization\|bearer` **0**, `sslmode\|channel_binding` **0**. The literal 36-character `HEVY_API_KEY` value from `.env` was counted against the captured log text programmatically (count printed, value never printed): **0 occurrences**. | **PASS** |
+| 6 | no credential-shaped string in the log window | zero matches | Across 574 log lines spanning all four executions: `postgres(ql)?://` **0**, `ep-[a-z0-9-]+\.` **0**, `neon.tech` **0**, `api[-_]?key` **0**, `authorization\|bearer` **0**, `sslmode\|channel_binding` **0**. The literal 36-character `HEVY_API_KEY` value from `.env` was counted against the captured log text programmatically (count printed, value never printed): **0 occurrences**. | **PASS** |
+| 7 | `gcloud scheduler jobs describe brett-sync-hevy-6h --location=us-central1` — cron/timezone/uri/method/SA/state | `0 */6 * * *`, `Asia/Jakarta`, URI ending `jobs/brett-sync-hevy:run`, `POST`, `brett-run@`, `ENABLED` | `0 */6 * * *` · `Asia/Jakarta` · `https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/brett-fitness/jobs/brett-sync-hevy:run` · `POST` · `brett-run@brett-fitness.iam.gserviceaccount.com` · `ENABLED`. Also `attemptDeadline: 60s`, `oauthToken.scope: …/auth/cloud-platform`. | **PASS** |
+| 8 | forced `gcloud scheduler jobs run` produces a NEW successful execution | new execution created after the forced run, `succeededCount` 1 | Forced at `11:20:21Z`; execution `brett-sync-hevy-6vl4w` created `11:23:41.953676Z` (new — the previous newest was `m8w2v` at `11:05:07Z`), settled with `succeededCount` `1`, `failedCount` empty. No `PERMISSION_DENIED`. | **PASS** |
+| 9 | re-running `create-sync-schedule.sh` takes the update path | second run exits 0, updates in place, does not duplicate | Second run exited `0` and returned the same resource `projects/brett-fitness/locations/us-central1/jobs/brett-sync-hevy-6h` with `userUpdateTime` advanced `11:19:39.311766Z` → `11:29:06.731930Z`, `schedule`/`timeZone`/`state` unchanged. `scheduler jobs list` shows exactly **one** job, so the `describe`-probe took `update`, not a second `create`. | **PASS** |
 
 **Note on row 3** — the `command`/`args` split is not what plan 07-07 predicted (`command=python`,
 `args=["-m","app.cli","sync-hevy"]`). It is the corrected form: a buildpack image must be entered
@@ -207,3 +285,45 @@ enabling; `run.googleapis.com` was already enabled from the Phase 2 deploy.
 `gcloud run jobs get-iam-policy brett-sync-hevy --region=us-central1` returns
 `roles/run.invoker  ['serviceAccount:brett-run@brett-fitness.iam.gserviceaccount.com']` — bound
 on the job, not project-wide.
+
+### The scheduler-triggered run also demonstrated incremental mode and idempotency
+
+`6vl4w` was the second successful sync against the same data, and it did not redo the first
+one's work:
+
+```
+hevy_cli_started         mode=auto  only=all
+hevy_body_sync_completed pages=13  rows=125
+hevy_sync_all_completed  mode=incremental  workouts=0  templates=463  body=125
+hevy_cli_stopped
+Container called exit(0).
+```
+
+`mode=incremental` (against `m8w2v`'s `mode=full`) with `workouts=0` is the checkpoint in
+`sync_state` doing its job — which is also the table whose absence killed the first two
+executions. The at-least-once delivery risk below is therefore not merely argued to be safe, it
+was observed to be safe.
+
+## Known limitations
+
+- **Cloud Scheduler guarantees at-least-once delivery**, so a duplicate execution is possible.
+  Safe here: the sync is idempotent and checkpoint-resumable (HEVY-08/09), `--tasks=1` and
+  `--max-retries=1` bound the fan-out, and the `6vl4w` run above is live evidence — a second
+  invocation over unchanged data upserted zero workouts.
+- **A paused or deleted schedule produces no alert.** Its only symptom is
+  `freshness.resources.workouts` drifting, which the coaching document instructs Claude to
+  report before answering. There is no monitor, no page, and no dashboard that will tell you.
+- **Schema drift is not detected before it breaks a run.** `/health` probes `SELECT 1`, which
+  succeeds against any schema, so a production database behind `alembic head` looks perfectly
+  healthy until a job queries a table that does not exist. That is exactly how this plan lost its
+  first two executions. Compare `alembic current` to `alembic heads` as part of any deploy that
+  ships a migration.
+- **`hevy_cli_started` + `hevy_cli_stopped` with no `hevy_cli_failed` is not a success signal.**
+  See the caveat above; `status.succeededCount` is authoritative. A fix for `backend/app/cli.py`
+  is proposed but deliberately not made here, in
+  `.planning/phases/07-production-hardening-coaching-layer/deferred-items.md`.
+- **Hevy's real rate limits remain unobserved** (STATE.md open concern). A 6-hourly incremental
+  sync issuing ~46 paged requests is far below any plausible limit, but that is an argument, not
+  a measurement.
+- **The 6-hourly cadence means data can be up to six hours stale**, and a workout finished just
+  after a run will not appear until the next one. Force a sync (see Procedure) when that matters.
