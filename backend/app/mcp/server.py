@@ -59,9 +59,36 @@ from app.mcp.tools.workouts import fitness_get_recent_workouts, fitness_get_work
 
 settings = get_settings()  # lru_cached -- not a second read
 
+# Delivered to clients by the `server/discover` handler as
+# `DiscoverResult.instructions` -- verified present in mcp 2.0.0 under the
+# stateless 2026-07-28 transport. Whether Claude's custom connector actually
+# injects it into the model's system prompt is UNVERIFIED (07-RESEARCH.md A4);
+# this is a cheap belt to the braces of docs/coaching-instructions.md, which is
+# the real COACH-01 artifact and does NOT depend on this string.
+#
+# Kept deliberately short: it is sent on every discovery, and the full persona,
+# decision framework and metadata rules live in the document the user pastes into
+# their Claude Project's custom instructions.
+#
+# Contains tool names and field names ONLY. It interpolates no `Settings` value,
+# so no issuer URL, resource URL, secret or hostname can leak through the
+# discovery response (T-07-13).
+_INSTRUCTIONS = (
+    "BRETT serves one user's real training data. Call a tool before making any claim "
+    "about their recent training; never estimate a number a tool can return. Start broad "
+    "questions with fitness_get_training_summary. Use fitness_get_muscle_group_volume for "
+    "'which muscles are undertrained', fitness_get_exercise_progression or "
+    "fitness_get_personal_records for a named exercise, and fitness_get_plateaus for "
+    "stalled lifts. Every response carries freshness.resources and coverage "
+    "(sessions_in_window, insufficient_data, earliest_data_at): report stale or sparse "
+    "data before answering, and give no verdict when insufficient_data is true. "
+    "data_available=false means the server could not answer, not that the user has no data."
+)
+
 mcp = MCPServer(
     name="BRETT",
     version="0.1.0",
+    instructions=_INSTRUCTIONS,
     lifespan=mcp_lifespan,
     token_verifier=build_token_verifier(settings),
     auth=AuthSettings(
