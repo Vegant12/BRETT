@@ -322,6 +322,13 @@ was observed to be safe.
   See the caveat above; `status.succeededCount` is authoritative. A fix for `backend/app/cli.py`
   is proposed but deliberately not made here, in
   `.planning/phases/07-production-hardening-coaching-layer/deferred-items.md`.
+- **The job image is built without `UV_FROZEN=1`.** `gcloud run jobs deploy` accepts no
+  `--set-build-env-vars` flag (the service-only `gcloud run deploy` does, and
+  `scripts/deploy-cloud-run.sh` uses it), so the sync job's build cannot be told to fail rather
+  than silently re-resolve a drifted `uv.lock`. Dev dependencies are still excluded — that is
+  done by `[tool.uv] default-groups = []` in `pyproject.toml`, which is checked in and
+  testable — but if `uv.lock` and `pyproject.toml` ever disagree, this build will quietly
+  resolve around it instead of stopping. The MCP service build still enforces `UV_FROZEN`.
 - **Hevy's real rate limits remain unobserved** (STATE.md open concern). A 6-hourly incremental
   sync issuing ~46 paged requests is far below any plausible limit, but that is an argument, not
   a measurement.
