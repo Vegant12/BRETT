@@ -100,6 +100,15 @@ but carry no user-specified constraints beyond what's already decided elsewhere 
   individually. `backend/tests/test_hevy_end_to_end.py` currently stops at Postgres — it does not
   exercise analytics or MCP.
 
+### Production Hevy Sync Scheduling
+- **D-10 (added post-research 2026-09-01):** Fold production Hevy sync scheduling into this
+  phase. `README.md` states "production scheduling is Phase 7," but no requirement, success
+  criterion, or the decisions above covered it — without it, "the deployment... works against
+  real data" decays daily since nothing keeps synced data fresh once the phase ships. Surfaced
+  as Open Question 1 in `07-RESEARCH.md`; user chose to fold it in rather than defer or drop.
+  Mechanism (Cloud Run Job + Cloud Scheduler vs. other) and cadence are Claude's discretion at
+  planning time — no user constraint given beyond "in scope."
+
 ### Folded Todos
 None — `.planning/todos/pending/` is empty (per STATE.md "Pending Todos: None yet").
 
