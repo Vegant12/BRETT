@@ -294,6 +294,122 @@ mitigating facts were confirmed rather than assumed:
 - Row 8 proves full recovery 90 seconds later.
 - No coaching session was in progress: the connector round-trip (Task 3) had not yet been run.
 
+## Claude client round-trip (human-verified)
+
+**This section is human-verified. It is not inferred from code, not derived from the source
+registration count, and not reproduced from a script.** The developer drove a real Claude client
+through the BRETT custom connector's WorkOS AuthKit OAuth flow and reported back what the client
+actually showed. That is the only way this evidence can exist while `MCP_AUTH_MODE=authkit` — see
+*Why the authenticated tool-list proof is not a curl row* above — and it is recorded here the same
+way `02-VERIFICATION.md` records its Truth 2: as a human observation, labelled as one.
+
+Per this file's redaction rule, **no `Authorization` header value is recorded**, and no
+training-data figures are recorded (there were none to record — see the `data_available` row).
+
+| Field | Reported | Verdict |
+|---|---|---|
+| Tool count Claude listed | **13** | **PASS** — matches the expected 13 exactly |
+| Tool names | Confirmed against the expected list | **PASS** |
+| Re-authorization required after the redeploy | **Not reported by the tester** | **not observed / not reported** |
+| `data_available` from `fitness_get_training_summary(weeks=4)` | **`false`** | **FAIL** (see below — expected, sequencing-driven) |
+| Any `429` during the conversation | **None reported** | **PASS** |
+
+### Tool count: 13, confirmed live
+
+Before this redeploy the answer would have been `fitness_ping` alone. A real client attached to the
+live connector now enumerates **13** tools, which closes the gap 07-RESEARCH.md Pitfall 1 opened and
+satisfies ROADMAP Phase 7 criterion #2 ("the deployed connector serves the **real tool set**").
+
+This is the strongest of the three independent lines of evidence listed under *Tool set*: source
+registration proves what was built, but a real client enumerating 13 tools over an authenticated
+connection proves what is **being served**. T-07-31 is discharged.
+
+### Re-authorization: not reported
+
+07-RESEARCH.md assumption A3 predicts the Phase 2 consent survives the redeploy, because
+`MCP_RESOURCE_URL` is byte-identical on the new revision (confirmed in *The deployed environment*
+above) and the RFC 9728 document is byte-identical to the one `02-DEPLOY-LOG.md` recorded (confirmed
+in row 2).
+
+**The tester did not report either way.** That is recorded as *not observed* rather than resolved in
+either direction: silence is not evidence that no prompt appeared, and it is not evidence that one
+did. A3 therefore remains **unconfirmed by this checkpoint**, with strong circumstantial support
+from the two byte-identical artifacts. Plan 07-09's rotation drill and plan 07-10's coaching UAT
+both re-attach a client and are better placed to settle it explicitly.
+
+### `data_available: false` — recorded as a FAIL, explained as a sequencing gap
+
+The plan's Task 3 acceptance criterion is unambiguous: "A `data_available: false` is a FAIL for this
+checkpoint — record what the tool reported." It is recorded as a **FAIL**, unrounded. What the tool
+reported, verbatim:
+
+```json
+{
+  "data_available": false,
+  "window_start": null,
+  "window_end": null,
+  "weeks": null,
+  "sessions_per_week": null,
+  "volume_by_week": [],
+  "muscles": [],
+  "recomposition_status": null,
+  "recomposition_disclaimer": null,
+  "progression_signal": null,
+  "progression_verdict": null,
+  "weight_trend_rate_percent_per_week": null,
+  "average_7d_kg": null,
+  "coverage": null,
+  "freshness": null
+}
+```
+
+**This FAIL is an expected, sequencing-driven gap — not a defect in this redeploy.** The tool
+behaved correctly: it was asked for a training summary from a production database into which no
+workout has ever been loaded, and it returned the documented empty-state envelope rather than
+fabricating, erroring, or leaking an exception. The distinction matters, so the reasoning is
+recorded rather than asserted:
+
+1. **Production has never had a Hevy sync run against it, and currently cannot.** The Secret Manager
+   secret `brett-hevy-api-key` **does not exist**. `07-07-PLAN.md`'s own Interfaces section states
+   this explicitly — the project holds `brett-database-url` and `brett-mcp-auth-secret` only, and
+   "**`brett-hevy-api-key` does not exist**". Without that secret there is no credential by which any
+   process could have reached the Hevy API on production's behalf. This is not merely an unrecorded
+   sync; it is a currently impossible one.
+2. **Phase 3's live sync was local-only.** The 327-workout sync ran against local Postgres.
+   `03-11-SUMMARY.md` states that "production data loading (if any) is explicitly deferred to
+   Phase 7". Production was never in scope for that sync.
+3. **Plan 07-07 is precisely the plan that closes this.** Wave 4, not yet executed, creates
+   `brett-hevy-api-key`, grants `brett-run@` the secret-scoped accessor role, and runs the first
+   production sync. `data_available: true` is downstream of that plan, not of this one.
+
+**Nothing this redeploy did could have produced `data_available: true`, and nothing it did wrong
+produced `false`.** The redeploy shipped code and configuration; it does not and cannot load data.
+
+**Re-verification is scheduled, not hand-waved:**
+
+- **Plan 07-07** (wave 4) — after the first production sync completes, re-run
+  `fitness_get_training_summary` and confirm `data_available: true` with a non-empty
+  `freshness.resources` and a populated `coverage` block.
+- **Plan 07-10** (wave 7) — the final coaching-layer UAT asks "Am I progressing?" against real
+  synced data. That plan cannot pass at all while `data_available` is `false`, so it is a hard,
+  unskippable second gate on this same fact.
+
+**Scope verdict for plan 07-06.** Every truth this plan is responsible for is proven: the live
+revision is new and serving 100%, it carries the rate limiter and `MCP_AUTH_MODE=authkit`, all eight
+anonymous rows pass, and a real Claude client sees the real 13-tool set. The single unproven truth —
+"one call returns real data" — depends on a prerequisite this plan does not own and cannot create.
+It is carried forward as an open item against 07-07, not written off.
+
+### No 429 during the conversation
+
+None reported. Consistent with the arithmetic: a coaching turn issues single-digit tool calls
+against a 30-token bucket refilling at 30/minute, so the limiter has roughly an order of magnitude
+of headroom over normal connector traffic. The limiter is live and firing (89 × `429` in row 5) yet
+invisible to legitimate use — which is exactly the intended behaviour, and the reason rows 5 and 8
+were worth running.
+
+---
+
 ## Known limitations
 
 1. **The bucket is per-process, and the service allows 2 instances.** Service-level
@@ -308,15 +424,47 @@ mitigating facts were confirmed rather than assumed:
      `scripts/deploy-cloud-run.sh --max=2` sets. It read `20` identically before this deploy, so it
      is pre-existing and was not introduced here. Recorded because a future reader grepping for
      `maxScale` will find both numbers and needs to know which one binds.
-2. **`--min=1` was silently reset to `0` by this deploy.** See the deviation section below. This is
-   the one item that needs an action before Task 3.
+2. **`--min=1` was silently reset to `0` by this deploy — since restored.** See the deviation
+   section below for the full account. The restoring command was run by the developer/orchestrator
+   after this agent's own attempt was denied by the session's permission classifier, and the result
+   was re-read from the live service before Task 3 was recorded:
+
+   ```
+   gcloud run services describe brett --project=brett-fitness --region=us-central1 \
+     --format='json(metadata.annotations)'
+   -->  "run.googleapis.com/minScale": "1"
+        "run.googleapis.com/maxScale": "2"
+   ```
+
+   `minScale` reads `1` again and `maxScale` is still `2`, so the D-06f cold-start guarantee was in
+   force for the Task 3 connector round-trip. **The underlying cause is not fixed:**
+   `scripts/deploy-cloud-run.sh` still passes `--min="${BRETT_MIN_INSTANCES:-0}"` unconditionally,
+   so the **next** redeploy will regress this again unless `BRETT_MIN_INSTANCES=1` is exported.
+   Fixing the script is out of scope for this plan (whose scope is the redeploy and its record) and
+   is carried as a follow-up.
 3. **5 of 200 requests in the second burst returned no status line at all** (200 header files
    written, 195 containing an HTTP status). These are client-side connection failures under 40-way
    concurrency from a single laptop, not service responses; 195 requests were answered
    (164 × `429` + 31 × `401`). Recorded so the tally is reconcilable rather than appearing to lose
    requests.
 4. **The authenticated 13-tool proof is not in this matrix.** By design — see *Why the authenticated
-   tool-list proof is not a curl row* above. It is split between Task 3 and plan 07-09.
+   tool-list proof is not a curl row* above. It is split between Task 3 and plan 07-09. Task 3 has
+   since delivered its half: **13 tools, confirmed by a real client.**
+5. **End-to-end data flow is NOT proven in production.** This is the single most important
+   limitation of this record, and it is stated plainly so no later reader mistakes the scope of what
+   was verified here.
+   - **Proven:** the live revision is new and serving 100% of traffic; it serves the real 13-tool
+     set to a real Claude client; WorkOS AuthKit auth rejects anonymous and malformed credentials
+     identically; the rate limiter fires `429` with `Retry-After` under load, exempts `/health` and
+     discovery, and refills.
+   - **Not proven:** that a tool call returns **real training data**.
+     `fitness_get_training_summary` returned `data_available: false` because production has never
+     been synced and, lacking the `brett-hevy-api-key` secret, currently cannot be.
+   - **Deferred to:** plan **07-07** (creates the secret, wires the sync job, runs the first
+     production sync), and re-verified again in plan **07-10** (the coaching UAT, which cannot pass
+     while `data_available` is `false`).
+   - This is a **sequencing gap, not a redeploy defect.** The full reasoning is under
+     *`data_available: false` — recorded as a FAIL, explained as a sequencing gap*.
 
 ## Deviations
 
@@ -347,13 +495,32 @@ explicit "Plan 02-07 must NOT re-ask"):
 gcloud run services update brett --project=brett-fitness --region=us-central1 --min=1
 ```
 
-**Outcome: BLOCKED.** The command was denied by this session's permission classifier. The denial was
-respected rather than worked around — the same choice `02-DEPLOY-LOG.md` records for its own denied
-secret read. **This command must be run before Task 3.** Only `--min` may appear on that command
-line: `gcloud run services update` removes any env or secret flag it does not list, which would drop
-`DATABASE_URL` and 500 the next request (T-02-18).
+**Outcome: BLOCKED at the time.** The command was denied by this session's permission classifier.
+The denial was respected rather than worked around — the same choice `02-DEPLOY-LOG.md` records for
+its own denied secret read. Only `--min` may appear on that command line: `gcloud run services
+update` removes any env or secret flag it does not list, which would drop `DATABASE_URL` and 500 the
+next request (T-02-18).
+
+**Resolution: RESTORED before Task 3.** The command was run by the developer/orchestrator rather
+than by the executing agent. Verified independently by reading the live service back:
+
+```
+"run.googleapis.com/minScale": "1"
+"run.googleapis.com/maxScale": "2"
+```
+
+So the Task 3 connector round-trip ran with the D-06f cold-start guarantee in force, and its result
+is not confounded by a scale-to-zero.
 
 Not a code change and not a plan change — restoring state this deploy incidentally cleared.
+
+**Follow-up required (out of scope here).** `scripts/deploy-cloud-run.sh` passes
+`--min="${BRETT_MIN_INSTANCES:-0}"` unconditionally, so **every** future redeploy silently regresses
+D-06f unless `BRETT_MIN_INSTANCES=1` is exported first. The durable fix is to default that variable
+to `1` in the script (or read the current value and preserve it). Deliberately **not** fixed in this
+plan: plan 07-06's scope is the redeploy and its evidence record, and changing the deploy script
+after the deploy would make this record describe a script that no longer exists. Carried as a
+deferred item in `07-06-SUMMARY.md`.
 
 ### 2. [Rule 1 — method] Row 5's prescribed sequential burst does not trip the limiter
 
