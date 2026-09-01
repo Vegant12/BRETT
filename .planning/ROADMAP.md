@@ -213,7 +213,7 @@ Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
 - [x] 07-07-PLAN.md — Wave 4: credential gate, create `brett-hevy-api-key`, deploy the Cloud Run Job, create the 6-hourly Scheduler trigger; `docs/runbook-sync-schedule.md` (DEPLOY-03, D-10)
 - [x] 07-08-PLAN.md — Wave 5: `scripts/verify-restore.sql` + coverage guard, Neon branch-from-timestamp drill, `docs/runbook-backup-restore.md` (DEPLOY-03, D-01/D-02)
 - [x] 07-09-PLAN.md — Wave 6: rotate `MCP_AUTH_SECRET` for real (flip to static, old-401/new-200 with 13 tools, flip back, disable old version); `docs/runbook-secret-rotation.md` (DEPLOY-03, D-03/D-04)
-- [ ] 07-10-PLAN.md — Wave 7: D-09 coaching UAT in a real Claude Project; `07-COACH-VERIFICATION.md` (COACH-01)
+- [x] 07-10-PLAN.md — Wave 7: D-09 coaching UAT in a real Claude Project; `07-COACH-VERIFICATION.md` (COACH-01)
 
 *Four largely independent tracks. The four wave-1 plans and 07-05 are autonomous code; 07-06
 through 07-10 are deliberately SERIALIZED live-infrastructure plans, because they mutate the same
