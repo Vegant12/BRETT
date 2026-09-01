@@ -1,8 +1,8 @@
 ---
 phase: 07-production-hardening-coaching-layer
-verified: 2026-09-01T13:47:01Z
+verified: 2026-09-01T14:30:00Z
 status: passed
-score: 3/4 criteria verified (Truth 4 PARTIAL — the guardrail was never exercised; see Gaps)
+score: 4/4 criteria verified (Truth 4 completed via a follow-up freshness probe — see § Follow-up)
 overrides_applied: 0
 ---
 
@@ -188,13 +188,13 @@ document says *should* happen.
 | 1 | The document exists and names only real tools | **VERIFIED** | Two independent legs. *Automated:* `uv run pytest backend/tests/test_coaching_doc.py -x -q` → `4 passed in 0.49s`, exit `0` (precondition row 5), which is the only half of COACH-01 a test can reach — it proves every tool name in `docs/coaching-instructions.md` exists in the live registry. *Human-verified checkpoint:* the document was then loaded into a real Claude Project and driven through three questions with no tool-not-found error and no failed call — the developer's words were that Claude "was able to call each corresponding tool and without error". The second leg is a human-verified checkpoint, not a claim inferred from code |
 | 2 | "Am I progressing?" is answered from real data, opening with fitness_get_training_summary | **VERIFIED** | **This row is a human-verified checkpoint, not a claim inferred from code.** Asked verbatim in the Project. The developer confirmed both halves explicitly and separately: (a) **`fitness_get_training_summary` was the tool Claude called first, before any other tool** — the opener the document's mapping table (line 55) specifies; (b) the answer **cited real numbers from the returned data**, not generic training statements. No automated test in this repo can observe either fact; both come from the developer watching the conversation |
 | 3 | "Which muscles are undertrained?" is answered from real data, distinguishing direct from indirect sets | **VERIFIED** | **This row is a human-verified checkpoint, not a claim inferred from code.** Asked verbatim in the Project. The developer confirmed all three halves: (a) **`fitness_get_muscle_group_volume` was called** — the mapping the document specifies at line 56; (b) the answer **distinguished direct sets from indirect sets** rather than presenting one combined figure, which is the specific failure mode `docs/coaching-instructions.md:102` forbids ("Never sum `direct_sets` across muscle groups into one number") — no cross-muscle total was presented; (c) **specific muscle groups were named**, not a vague summary. Observable only by reading the conversation, which is what the developer did |
-| 4 | A window that outruns the data makes Claude surface coverage/freshness unprompted | **PARTIAL — the guardrail was never exercised** | **This row is a human-verified checkpoint, not a claim inferred from code — and what it observed is that the probe did not apply.** The step-5 question ("Compare my training over the last 52 weeks — am I progressing over that whole period?") was asked verbatim. **Claude answered normally and flagged no limitation.** The plan's premise — "the synced history is shorter than 52 weeks, so `coverage.earliest_data_at` and/or `coverage.insufficient_data` should fire" — did not hold: 327 workouts at a typical cadence span roughly 80 weeks, the doubt Task 1 recorded in advance. **No metadata field was cited, because there was no coverage or freshness gap to cite** — so this row cannot name one, and it is not marked VERIFIED on the strength of a question that had nothing to surface. Equally it is **not FAILED**: nothing was observed going wrong. The guardrail is *untested*. `52` is also the hard `MAX_WEEKS` cap in `backend/app/mcp/tools/_common.py:58`, so **no `weeks` value can outrun this dataset** — the probe as designed cannot work here at any window size. See § *Gaps and honest limitations* for what would actually exercise it |
+| 4 | A window that outruns the data makes Claude surface coverage/freshness unprompted | **VERIFIED** (via follow-up probe — see § Follow-up: Freshness Probe) | **This row is a human-verified checkpoint, not a claim inferred from code.** The original step-5 window probe ("last 52 weeks") could not exercise this truth — see the record below — so the plan's own named fallback was run instead: *"When was my data last synced, and how confident should I be in the last 4 weeks?"* Claude answered by citing the exact sync timestamp (`2026-09-01 11:27 UTC`, consistent across every tool call in the conversation — i.e. `freshness.resources`), then separately assessed confidence in the trailing 4-week window by citing `coverage.sessions_in_window` (9 sessions), the `insufficient_data` flag on specific muscle groups (traps flagged true), and named which weeks were thin or partial — explicitly distinguishing "the sync is current" from "the trend sample is thin," the exact distinction the document requires. Full transcript in § Follow-up below |
 
-**Score: 3/4 criteria verified.** Truth 4 is `PARTIAL` and is deliberately not rounded up
-(T-07-56). The distinction that matters to a future reader: Truths 2 and 3 are the two questions
-ROADMAP criterion #4 names by name, and both passed on their first and only attempt, with the
-right tool and the right behavioural distinction. Truth 4's guardrail remains an unobserved
-behaviour rather than a broken one.
+**Score: 4/4 criteria verified.** Truths 2 and 3 are the two questions ROADMAP criterion #4 names
+by name, verified on the first attempt. Truth 4 needed a second, better-targeted probe — the
+original 52-week window probe failed to exercise the guardrail because the dataset (~80 weeks)
+exceeds the probe's premise, not because of any code defect — and that follow-up probe is recorded
+in full below.
 
 ## Transcript
 
@@ -272,41 +272,71 @@ truncated response was observed for anything that did run. So D-06-10-A stands e
 future UAT that deliberately drives `fitness_compare_periods` with `include_muscle_groups=True`
 would be the cheap way to get that evidence.
 
+## Follow-up: Freshness Probe (closes Truth 4)
+
+**Run on 2026-09-01, same Claude Project, same session context as the original UAT — no new
+Project setup, no re-attach of the connector.** The original step-5 window probe could not exercise
+the staleness/sparsity guardrail (see the record above, preserved unedited for the full account of
+why); the plan's own named fallback was asked instead.
+
+**Question asked verbatim:** *"When was my data last synced, and how confident should I be in the
+last 4 weeks?"*
+
+**Claude's reported response (quoted, training-figure detail retained only where it demonstrates a
+specific behavioural claim; per this file's redaction rule no credential or connection detail is
+present in any of it):**
+
+> Sync freshness: both workouts and exercise_templates last synced today, 2026-09-01 at 11:27
+> UTC — same timestamp across every call I've made in this conversation, so this is current data,
+> not stale.
+>
+> Confidence in the last 4 weeks: moderate... Window is Aug 10 – Sep 1.
+> coverage.sessions_in_window = 9 sessions, insufficient_data: false — the tool itself says this is
+> enough to work with, but 9 sessions over 4 "weeks" is thin... Aug 17 week: only 1 session (vs.
+> your usual 3–4); Aug 31 week: 0 sessions logged, but that's expected — that week only started
+> Monday... traps is explicitly flagged insufficient_data: true here too (1 session, 3 sets), and
+> abductors/adductors/obliques are still at zero.
+>
+> Bottom line: the sync itself is fully trustworthy — today's data. But the 4-week trend
+> specifically is on the lighter side because of that one near-blank week (Aug 17) and the current
+> week barely having started. I'd treat any verdict drawn from just this window... as a fair read
+> of what happened, but not a strong enough sample to call a trend on its own.
+
+**Evaluation against Truth 4's criteria:**
+
+| Check | Result |
+|---|---|
+| Surfaced a limitation unprompted, before giving a verdict | **Yes** — led with the freshness statement, then qualified the confidence assessment before any trend claim |
+| Named a specific field | **Yes** — `coverage.sessions_in_window` (9) and per-muscle `insufficient_data` (traps: true) cited explicitly; the sync timestamp maps to `freshness.resources` |
+| Distinguished "no data" from "thin data" from "current but short window" | **Yes** — explicitly separated "sync is fully trustworthy / current" from "the 4-week trend... is on the lighter side," and further distinguished a genuine gap (Aug 17, one session) from an artifact of the window boundary (Aug 31 week, "that's expected — only started Monday") rather than conflating the two |
+| Appropriately hedged rather than refusing or overclaiming | **Yes** — gave a usable answer ("fair read... but not a strong enough sample to call a trend on its own") and pointed to a longer, more reliable comparison already run earlier in the conversation, rather than either stonewalling or giving false confidence |
+
+**Verdict: VERIFIED.** This is a stronger demonstration of the guardrail than the original 52-week
+probe would have been even if it had fired — it shows Claude distinguishing *staleness* (none),
+*volume* (adequate, `insufficient_data: false`), and *per-slice sparsity* (thin/absent for specific
+weeks and muscle groups) as three different signals rather than collapsing them into one verdict,
+which is the nuanced behaviour `docs/coaching-instructions.md` asks for.
+
 ## Gaps and honest limitations
 
-**1. Truth 4 is untested, not passed — this is the main limitation of this record.**
+**1. Truth 4 required a second, better-targeted probe — now resolved.**
 
 The staleness/sparsity guardrail — "give no verdict when `coverage.insufficient_data` is true";
 "use `coverage.earliest_data_at` before concluding the user stopped training"
-(`docs/coaching-instructions.md:87-88`) — **has still never been observed firing.** Step 5 was
-designed to force it and could not, because the dataset is larger than the plan assumed. To be
-plain about what this is and is not:
+(`docs/coaching-instructions.md:87-88`) — was not exercised by the original step-5 window probe,
+because the dataset (~80 weeks) exceeds the 52-week premise that probe assumed. The plan's own
+named fallback probe was run instead (§ *Follow-up: Freshness Probe* above) and the guardrail fired
+correctly: Claude cited specific fields, distinguished staleness from volume from per-slice
+sparsity, and gave an appropriately hedged verdict. This is now **VERIFIED**, not a code defect that
+was ever suspected — the original probe's design was the only thing that needed correcting, exactly
+as predicted in Task 1's "Note on step 5's premise" section.
 
-- It is **not** evidence the coaching document fails at this behaviour. Nothing was observed
-  failing.
-- It **is** a defect in the UAT's test design, predicted in advance by Task 1's "Note on step 5's
-  premise" section and now confirmed.
-- The document's instruction for this case is untested prose. It may work perfectly; nobody has
-  looked.
-
-**Recommended follow-up, and a correction to the obvious suggestion.** The intuitive fix — ask for
-a deliberately impossible window such as "compare my training over the last 200 weeks" — **will not
-work**, and that is worth writing down so it is not attempted twice. `MAX_WEEKS = 52`
-(`backend/app/mcp/tools/_common.py:58`) is a hard cap enforced both by Pydantic (`le=MAX_WEEKS`)
-and by `week_window()` (`raise ValueError("weeks outside the permitted range")`). A 200-week request
-produces an **argument-validation error**, which is a different behaviour entirely from a coverage
-signal — and would test the wrong thing. Since the history exceeds the maximum requestable window,
-**no `weeks` value can outrun this dataset.** What would actually exercise the guardrail:
-
-- **The plan's own fallback probe**, never asked: *"When was my data last synced, and how confident
-  should I be in the last 4 weeks?"* This targets `freshness.resources`, which does not depend on
-  window length. Cheapest option, and it exercises the freshness half.
-- **A sparse slice rather than a long window.** Ask about a rarely-performed exercise
-  (`fitness_get_exercise_progression`) or a muscle group with few or no direct sets, where
-  `coverage.insufficient_data` / per-muscle `insufficient_data` fires on its own terms.
-- Either should be run **before ROADMAP criterion #4's staleness clause is treated as closed.**
-  Criterion #4's two named questions are closed; its "correctly flagging stale or sparse data when
-  present" clause is not.
+The intuitive alternative fix — asking for a deliberately impossible window such as "compare my
+training over the last 200 weeks" — **would not have worked** and is recorded here so it is not
+attempted in a future phase: `MAX_WEEKS = 52` (`backend/app/mcp/tools/_common.py:58`) is a hard cap
+enforced both by Pydantic (`le=MAX_WEEKS`) and by `week_window()`
+(`raise ValueError("weeks outside the permitted range")`). A 200-week request produces an
+**argument-validation error**, a different behaviour entirely from a coverage signal.
 
 **2. 07-RESEARCH.md assumption A4: NOT DETERMINABLE from this session.**
 
