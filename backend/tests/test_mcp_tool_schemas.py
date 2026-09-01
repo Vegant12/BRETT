@@ -5,7 +5,7 @@ published input and output schemas, and the `maximum` on every window argument. 
 assert what any tool returns; `test_mcp_tools.py` owns that, and `test_mcp_readonly.py` owns the
 runtime read-only enforcement that the annotations here only *claim*.
 
-**Container-free, and deliberately not marked `integration`, except for the one test that calls
+**Container-free, and deliberately not marked `integration`, except for the three tests that call
 a tool.** `tools/list` issues no query, so the `_mcp_state` fixture below builds a session factory
 over an engine that is never connected to -- the same trick `test_mcp_mount.py`'s `mcp_server`
 fixture uses, and for the same reason: a schema regression must fail the FAST suite on the commit
@@ -300,6 +300,73 @@ async def test_a_request_above_the_cap_is_rejected_before_the_body_runs(
     assert result.is_error is True, (
         "T-06-05: `weeks=999` was accepted. The `Field(le=MAX_WEEKS)` bound is missing or the "
         "cap was raised without updating EXPECTED_CAPS."
+    )
+    assert result.structured_content is None, (
+        "A validation rejection must carry no structured content -- the tool body never ran, so "
+        f"there is nothing to report. Got: {result.structured_content!r}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_malformed_argument_type_is_rejected_before_the_body_runs(
+    client: TestClient,
+) -> None:
+    """DEPLOY-03 / ASVS V5: type validation happens in the SDK, not in the tool.
+
+    `FuncMetadata.call_fn_with_arg_validation` runs before `fn` is invoked, so a string where an
+    int is published cannot be intercepted in the tool body and cannot be turned into the
+    `data_available=False` shape. It surfaces as `is_error=True` with no structured content, and
+    -- the point of the test -- no database work happens at all.
+
+    Tool arguments are MODEL-generated and therefore structurally untrusted. `weeks` is what
+    `window_from_weeks` turns into a date range, and a coerced `"four"` would be a window nobody
+    asked for rather than a rejected call.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_weekly_volume", {"weeks": "four"})
+
+    assert result.is_error is True, (
+        "DEPLOY-03 violated: fitness_get_weekly_volume accepted weeks='four'. The published "
+        "integer schema is the only thing standing between a model's typo and a query. "
+        f"Got: is_error={result.is_error}"
+    )
+    assert result.structured_content is None, (
+        "A validation rejection must carry no structured content -- the tool body never ran, so "
+        f"there is nothing to report. Got: {result.structured_content!r}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_missing_required_argument_is_rejected_before_the_body_runs(
+    client: TestClient,
+) -> None:
+    """DEPLOY-03 / ASVS V5: a required parameter with no default must stay required.
+
+    `fitness_get_exercise_progression.exercise_name` is the one tool argument in the registry
+    that carries no default, and that is deliberate: D-01 says Claude asks by NAME, so there is
+    no sensible exercise to fall back to. The regression this guards is not a crash -- it is a
+    default quietly appearing. A tool that accepted `{}` would answer a progression question
+    about whichever exercise the default named, confidently and in the right shape, and the only
+    symptom would be a coaching answer about the wrong lift.
+
+    Rejected by `FuncMetadata.call_fn_with_arg_validation` before `fn` runs, so like the two
+    cases above it surfaces as `is_error=True` with no structured content and touches no data.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_exercise_progression", {})
+
+    assert result.is_error is True, (
+        "DEPLOY-03 violated: fitness_get_exercise_progression accepted a call with no arguments. "
+        "`exercise_name` has no default, and it must not acquire one -- a defaulted exercise is "
+        f"a confident answer about the wrong lift. Got: is_error={result.is_error}"
     )
     assert result.structured_content is None, (
         "A validation rejection must carry no structured content -- the tool body never ran, so "

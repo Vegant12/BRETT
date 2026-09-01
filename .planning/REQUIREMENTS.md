@@ -70,7 +70,7 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 - [x] **DEPLOY-01**: Backend and MCP server are deployed to Google Cloud Run over HTTPS, with every credential supplied from Google Secret Manager and nothing committed
 - [x] **DEPLOY-02**: A Claude custom connector can be added pointing at the deployed MCP endpoint and successfully discovers and calls tools
-- [ ] **DEPLOY-03**: System includes automated tests covering Hevy sync (auth, pagination, incremental events, duplicate prevention, deletions, failures), analytics calculations against known workouts, and MCP tool schemas/auth/output structure
+- [x] **DEPLOY-03**: System includes automated tests covering Hevy sync (auth, pagination, incremental events, duplicate prevention, deletions, failures), analytics calculations against known workouts, and MCP tool schemas/auth/output structure
 - [ ] **COACH-01**: A separate system-prompt/instructions document defines the body-recomposition coaching behavior and decision framework for Claude to follow when using the MCP tools
 
 ## v2 Requirements
