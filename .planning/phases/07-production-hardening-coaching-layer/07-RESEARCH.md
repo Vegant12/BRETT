@@ -952,7 +952,9 @@ rate-limiter tests. Not a test-suite build.
 
 ## Open Questions
 
-1. **Does Hevy sync scheduling belong to this phase?**
+> All four questions below are RESOLVED as of planning (2026-09-01) — see per-item notes.
+
+1. **(RESOLVED — folded in, per CONTEXT.md D-10; implemented in plans 07-04/07-07) Does Hevy sync scheduling belong to this phase?**
    - What we know: `README.md` states verbatim "**Production scheduling is Phase 7** — nothing here
      runs the sync on a timer." Blueprint §38 wants a sync every 1–6h. CLAUDE.md's deployment table
      (Render-era, but the reasoning is host-independent) says an in-process scheduler is wrong and a
@@ -969,7 +971,7 @@ rate-limiter tests. Not a test-suite build.
      claim stops being wrong, or (c) accept manual sync and correct the README line. Do not let the
      planner silently pick one.
 
-2. **What rate-limit numbers?**
+2. **(RESOLVED — research's own recommendation adopted verbatim as `Settings` defaults in plan 07-01) What rate-limit numbers?**
    - What we know: one user, one connector, `--max=2` instances, all traffic from a /21. A single
      coaching turn can fan out to several tool calls; `fitness_get_training_summary` exists
      precisely to reduce that fan-out.
@@ -979,12 +981,12 @@ rate-limiter tests. Not a test-suite build.
      record the observed per-turn call count during D-09's UAT as the evidence for any later
      tightening.
 
-3. **Should the phase spend its one Neon manual snapshot?**
+3. **(RESOLVED — no; not spent, per plan 07-08) Should the phase spend its one Neon manual snapshot?**
    - What we know: Free allows exactly 1. The branch-from-timestamp drill does not need it.
    - Recommendation: **no.** Keep the snapshot slot free for a real "before a risky migration"
      moment. Document in the runbook that it exists and is unspent.
 
-4. **Do the three over-budget tools from Phase 6 (`deferred-items.md` D-06-10-A) get retuned here?**
+4. **(RESOLVED — no; not retuned, explicitly out of phase boundary, per plan 07-10) Do the three over-budget tools from Phase 6 (`deferred-items.md` D-06-10-A) get retuned here?**
    - What we know: `fitness_compare_periods` measures 59.6 KB (~20K tokens) at full cap; the
      deferred note explicitly says the tuning judgement "wants real Claude transcripts rather than a
      byte count".
