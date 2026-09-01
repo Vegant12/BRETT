@@ -200,7 +200,29 @@ Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
 3. A database backup restores into a fresh instance with no data loss, and a secret can be rotated without breaking the live connector
 4. The coaching system-prompt/instructions document exists, and with it loaded Claude answers "Am I progressing?" and "Which muscles are undertrained?" from real synced data, correctly flagging stale or sparse data when present
 
-**Plans**: TBD
+**Plans**: 10 plans
+
+Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
+
+- [ ] 07-01-PLAN.md — Wave 1: `RATE_LIMIT_*` Settings fields + env-file keys, `backend/app/middleware.py` pure-ASGI token bucket, fast bucket tests (DEPLOY-03)
+- [ ] 07-02-PLAN.md — Wave 1: `test_full_chain_end_to_end.py` (blueprint §43 composition test) + the wrong-type / missing-required parameter gaps (DEPLOY-03)
+- [ ] 07-03-PLAN.md — Wave 1: `docs/coaching-instructions.md` (D-05..D-08), `MCPServer(instructions=…)`, `test_coaching_doc.py` drift guard (COACH-01)
+- [ ] 07-04-PLAN.md — Wave 1: D-10 sync-job artifacts — `deploy-sync-job.sh`, `create-sync-schedule.sh`, `sync-job.env.yaml`, `test_sync_job_deploy.py`, README correction (DEPLOY-03)
+- [ ] 07-05-PLAN.md — Wave 2: register `RateLimitMiddleware` ahead of routing + the over-HTTP 429 / exemption / before-auth tests (DEPLOY-03)
+- [ ] 07-06-PLAN.md — Wave 3: redeploy Cloud Run with the 13-tool set and the limiter; 8-row anonymous matrix + Claude client round-trip; `07-DEPLOY-RECORD.md` (DEPLOY-03)
+- [ ] 07-07-PLAN.md — Wave 4: credential gate, create `brett-hevy-api-key`, deploy the Cloud Run Job, create the 6-hourly Scheduler trigger; `docs/runbook-sync-schedule.md` (DEPLOY-03, D-10)
+- [ ] 07-08-PLAN.md — Wave 5: `scripts/verify-restore.sql` + coverage guard, Neon branch-from-timestamp drill, `docs/runbook-backup-restore.md` (DEPLOY-03, D-01/D-02)
+- [ ] 07-09-PLAN.md — Wave 6: rotate `MCP_AUTH_SECRET` for real (flip to static, old-401/new-200 with 13 tools, flip back, disable old version); `docs/runbook-secret-rotation.md` (DEPLOY-03, D-03/D-04)
+- [ ] 07-10-PLAN.md — Wave 7: D-09 coaching UAT in a real Claude Project; `07-COACH-VERIFICATION.md` (COACH-01)
+
+*Four largely independent tracks. The four wave-1 plans and 07-05 are autonomous code; 07-06
+through 07-10 are deliberately SERIALIZED live-infrastructure plans, because they mutate the same
+production service and a concurrent redeploy, rotation or restore drill would muddy each other's
+evidence. Two research findings shape the order: the live revision `brett-00005-gcx` predates
+Phase 6 and serves only `fitness_ping`, so the redeploy (07-06) is a prerequisite for everything
+after it; and `MCP_AUTH_MODE: "authkit"` means `StaticTokenVerifier` is never constructed, so
+D-04's rotation verification is not executable without a temporary mode flip and a mandatory,
+verified flip-back (07-09). This phase adds **zero** dependencies and creates **no** migration.*
 
 ## Progress
 
@@ -216,7 +238,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Volume & Frequency Analytics                   | 0/9            | Planned     | -         |
 | 5. Progression, Records & Recomposition Analytics | 0/TBD          | Not started | -         |
 | 6. MCP Tools                                      | 0/11           | Planned     | -         |
-| 7. Production Hardening & Coaching Layer          | 0/TBD          | Not started | -         |
+| 7. Production Hardening & Coaching Layer          | 0/10           | Planned     | -         |
 
 
 
