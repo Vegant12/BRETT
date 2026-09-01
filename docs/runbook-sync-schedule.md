@@ -35,6 +35,10 @@ restarted instance and leave no run history.
 3. `brett-run@` holds `roles/run.invoker` on the job `brett-sync-hevy` — again on the job
    specifically, not project-wide.
 4. `cloudscheduler.googleapis.com` and `run.googleapis.com` are enabled.
+5. **The production database is migrated to alembic `head`.** The job reads `sync_state`,
+   `workouts`, `exercise_templates` and five other tables; against a database behind `head` it
+   dies on the first query. See "One-time: bringing the production schema to head" below —
+   this was not a theoretical precondition, it blocked the first two executions.
 
 ### One-time: creating `brett-hevy-api-key`
 
@@ -68,12 +72,130 @@ records as a real trap for `brett-mcp-auth-secret`.
 reason to read the value back — the job reads it, and a human reading it only creates a
 transcript that did not need to exist.
 
+### One-time: bringing the production schema to head
+
+**This step was not anticipated by the plan and is the reason the first two executions failed.**
+
+The Phase 2 deploy ran `alembic upgrade head` when `0002` was head, and nothing has run a
+migration against production since. The code meanwhile advanced to `0004`. Revisions `0003`
+(`workouts`, `workout_exercises`, `workout_sets`) and `0004` (`exercise_templates`,
+`exercise_muscles`, `exercise_muscle_overrides`, `body_measurements`, `sync_state`) had never
+been applied. The first sync execution therefore died on:
+
+```
+sqlalchemy.exc.ProgrammingError: <asyncpg.exceptions.UndefinedTableError>:
+relation "sync_state" does not exist
+```
+
+Nothing had detected the drift: `/health` probes `SELECT 1`, which succeeds against any schema,
+and the plan 07-06 MCP round trip confirmed the tool set without exercising data flow.
+
+Both revisions are **purely additive** — eight `create_table` calls and their indexes, no
+`drop_table`, no `alter_column`, no `op.execute`, and no change to the existing `users` table.
+Every `drop_table` in those two files sits in `downgrade()`, which was not run. That is what
+made applying them to a live production database an acceptable action rather than a risky one.
+
+Cloud Run has no pre-deploy hook and startup migrations stay forbidden (a deploy runs old and
+new revisions simultaneously by design), so the migration runs from the developer machine
+against the **direct/unpooled** Neon endpoint — the DSN already stored in `brett-database-url`
+is the unpooled one, per Neon's guidance that migrations must not run through the pooler:
+
+```bash
+cd backend
+DATABASE_URL="$(gcloud secrets versions access latest \
+    --secret=brett-database-url --project="$BRETT_GCP_PROJECT")" \
+  uv run alembic upgrade head
+```
+
+The DSN is never echoed. `alembic.ini` pins `logger_sqlalchemy` to `WARNING` and carries no
+`sqlalchemy.url` key at all (`migrations/env.py` injects it at runtime from the environment),
+so no connection string reaches stdout or stderr. `DATABASE_URL` is scoped to the single
+command rather than exported, so it does not leak into the shell environment either.
+
+Observed, 2026-09-01:
+
+```
+alembic current  ->  0002
+alembic upgrade head
+    Running upgrade 0002 -> 0003, workout tables: workouts, workout_exercises, workout_sets
+    Running upgrade 0003 -> 0004, hevy reference tables: exercise templates, muscle map,
+                                  overrides, body measurements, sync state
+alembic current  ->  0004 (head)
+```
+
+**Standing check worth adding:** compare `alembic current` against `alembic heads` before
+trusting any deployment against real data. This drift was invisible for the entire life of the
+project and surfaced only when a job read a table.
+
+### Two corrections made to `scripts/deploy-sync-job.sh` during first live use
+
+Plan 07-04 wrote and unit-tested the deploy script, but it had never been run against the real
+API. Two defects surfaced on first use and are fixed in the committed script:
+
+1. **`--set-build-env-vars` is not a valid flag for `gcloud run jobs deploy`.** It exists for
+   `gcloud run deploy` (services) but not for jobs, so the command failed at argument parsing
+   before reaching the build. Removed.
+2. **`--command=python` bypassed the buildpack entrypoint.** A Cloud Native Buildpacks image
+   must be entered through `/cnb/lifecycle/launcher`, which sets `PATH`, the virtualenv and the
+   working directory. Invoking `python` directly skipped all of that. Fixed to
+   `--command=/cnb/lifecycle/launcher --args=python,-m,app.cli,sync-hevy`, which is why the
+   control-plane read-back below shows the launcher as `command` and `python` as the first
+   `arg` rather than the shape plan 07-07 originally predicted.
+
 ## Verification record — 2026-09-01
 
 | Row | Command summary | Expected | Observed | Pass/Fail |
 |---|---|---|---|---|
 | 1 | `gcloud secrets versions list brett-hevy-api-key --format='value(name,state)'` | exactly one `enabled` version | `1  enabled` — one row | **PASS** |
 | 2 | `gcloud secrets get-iam-policy brett-hevy-api-key --format='value(bindings.role,bindings.members)'` | `secretmanager.secretAccessor` for `brett-run@` and nothing broader | `roles/secretmanager.secretAccessor  ['serviceAccount:brett-run@brett-fitness.iam.gserviceaccount.com']` — one binding, one member | **PASS** |
+| 3 | `gcloud run jobs describe brett-sync-hevy --region=us-central1` — command/args/env/secret refs/SA | runs `python -m app.cli sync-hevy`; `DATABASE_URL` and `HEVY_API_KEY` as secret references, never literals; SA `brett-run@` | `command=["/cnb/lifecycle/launcher"]`, `args=["python","-m","app.cli","sync-hevy"]`; env `ENVIRONMENT=production`, `LOG_LEVEL=INFO`, `PYTHONPATH=backend` as literals, `DATABASE_URL`→`secretKeyRef{name: brett-database-url, key: latest}`, `HEVY_API_KEY`→`secretKeyRef{name: brett-hevy-api-key, key: latest}`; `serviceAccountName=brett-run@brett-fitness.iam.gserviceaccount.com` | **PASS** (see note) |
+| 4 | `gcloud run jobs execute brett-sync-hevy --wait`, then `executions list --limit=1 --format='value(metadata.name,status.succeededCount,status.failedCount)'` | `succeededCount` 1, no failures | `brett-sync-hevy-m8w2v  1  <empty>` | **PASS** |
+| 5 | logs show `hevy_cli_started` + `hevy_cli_stopped`, no `hevy_cli_failed` | present / present / absent | For `m8w2v`: `started=1 stopped=1 failed=0 exit(0)=1`. **This row is necessary but NOT sufficient — see the caveat below.** | **PASS** |
+| 6 | no credential-shaped string in the log window | zero matches | Across 537 log lines spanning all three executions: `postgres(ql)?://` **0**, `ep-[a-z0-9-]+\.` **0**, `neon.tech` **0**, `api[-_]?key` **0**, `authorization\|bearer` **0**, `sslmode\|channel_binding` **0**. The literal 36-character `HEVY_API_KEY` value from `.env` was counted against the captured log text programmatically (count printed, value never printed): **0 occurrences**. | **PASS** |
+
+**Note on row 3** — the `command`/`args` split is not what plan 07-07 predicted (`command=python`,
+`args=["-m","app.cli","sync-hevy"]`). It is the corrected form: a buildpack image must be entered
+through `/cnb/lifecycle/launcher`. The effective command line is still exactly
+`python -m app.cli sync-hevy`, and `backend/tests/test_sync_job_deploy.py` asserts against the
+corrected script. Recorded as PASS on substance, with the discrepancy stated rather than hidden.
+
+### Caveat: `hevy_cli_started` + `hevy_cli_stopped` does not prove success
+
+`status.succeededCount` is the **authoritative** success signal. The log signature is not.
+
+`backend/app/cli.py`'s `_run_sync` catches `HevyError` and `RuntimeError` and logs
+`hevy_cli_failed` for each. Any other exception — the `sqlalchemy.exc.ProgrammingError` above,
+for instance — propagates uncaught, but the `finally` block still logs `hevy_cli_stopped`. A
+failed run therefore produces exactly the signature a successful run produces.
+
+Measured directly, all three executions of 2026-09-01:
+
+| Execution | `hevy_cli_started` | `hevy_cli_stopped` | `hevy_cli_failed` | container exit | `succeededCount` |
+|---|---|---|---|---|---|
+| `brett-sync-hevy-rmrb5` | 0 | 0 | 0 | — (deploy-shape failure, never reached the app) | — (`failedCount` 1) |
+| `brett-sync-hevy-xv7jv` | 2 | 2 | 0 | `exit(1)` ×2 | — (`failedCount` 1) |
+| `brett-sync-hevy-m8w2v` | 1 | 1 | 0 | `exit(0)` | **1** |
+
+`xv7jv` is the proof: started + stopped + no failed, and it still exited 1 twice. Verify a sync
+with `status.succeededCount`, never with the log signature alone. Logged for whoever next owns
+`backend/app/cli.py` in `.planning/phases/07-production-hardening-coaching-layer/deferred-items.md`.
+
+### The sync did real work, not just exit 0
+
+`m8w2v` logged, in order:
+
+```
+hevy_workout_sync_completed   pages=33  upserted=327  skipped=0  local_count=327
+hevy_body_sync_completed      pages=13  rows=125
+hevy_sync_all_completed       mode=full  workouts=327  templates=463  body=125
+hevy_cli_stopped
+Container called exit(0).
+```
+
+327 workouts and 463 templates match `docs/hevy-api-observations.md` exactly. Body measurements
+read 125 against the 123 recorded there — two more than when that document was written, which is
+what a real, growing dataset looks like. An execution reporting zeros here would be suspicious
+even with `succeededCount` 1.
 
 `brett-database-url` and `brett-mcp-auth-secret` were re-checked with the same command and
 return the identical single binding, so all three secrets are consistently secret-scoped
@@ -81,3 +203,7 @@ return the identical single binding, so all three secrets are consistently secre
 
 `gcloud services list --enabled | grep -c cloudscheduler.googleapis.com` returned `1` after
 enabling; `run.googleapis.com` was already enabled from the Phase 2 deploy.
+
+`gcloud run jobs get-iam-policy brett-sync-hevy --region=us-central1` returns
+`roles/run.invoker  ['serviceAccount:brett-run@brett-fitness.iam.gserviceaccount.com']` — bound
+on the job, not project-wide.
