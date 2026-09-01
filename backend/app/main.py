@@ -20,6 +20,7 @@ from app.config import get_settings
 from app.db.session import make_engine, make_sessionmaker
 from app.logging import configure_logging
 from app.mcp.server import mcp, mcp_app
+from app.middleware import RateLimitMiddleware, build_limiter
 
 settings = get_settings()  # fail-fast BEFORE anything else
 configure_logging(settings)  # then logging, so the scrubber has the secret values
@@ -61,8 +62,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="BRETT", lifespan=lifespan)
 
-# Pure-ASGI middleware, not BaseHTTPMiddleware -- the ContextVar it sets must stay
-# readable inside the exception handler below.
+# ROADMAP Phase 7 criterion #2: rate limiting applied ahead of handler work.
+# Starlette applies app-level middleware OUTSIDE the router, so this runs before
+# `app.mount("/", mcp_app)` resolves and therefore before the MCP SDK's own
+# RequireAuthMiddleware -- an unauthenticated flood is bounded too.
+#
+# Order is load-bearing and is the reason this line sits ABOVE the correlation-id
+# line rather than below it: `add_middleware` PREPENDS, so the last one added runs
+# FIRST. Registering the limiter first means the correlation id is set before the
+# limiter runs, and the `rate_limit_rejected` log line therefore carries the same
+# correlation_id as every other line for that request.
+#
+# The bucket is also published on app.state so there is exactly one live bucket
+# object with one owner; the middleware reads it per request.
+app.state.rate_limit_bucket = build_limiter(settings)
+app.add_middleware(RateLimitMiddleware, bucket=app.state.rate_limit_bucket)
+
+# Pure-ASGI middleware, never Starlette's response-materialising middleware base
+# (the `BaseHTTP...` one, whose full name this file deliberately does not spell --
+# T-07-26 guards it with a crude grep that cannot tell a warning from a use, and
+# `app/middleware.py` spells around it for the same reason). That base class runs
+# the downstream app in a separate task, so the ContextVar this sets would no
+# longer be readable inside the exception handler below.
 app.add_middleware(CorrelationIdMiddleware)
 
 # D-04: no auth dependency -- /health is open so platform health checks reach it.
