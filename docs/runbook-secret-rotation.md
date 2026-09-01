@@ -64,6 +64,11 @@ connector is unaffected even then, because Claude keeps presenting a JWT the sta
 reject; a coaching session started during the window would fail, which is why the procedure says
 not to run one.
 
+That architectural claim was checked empirically rather than left as an assertion: verification
+row 14 below records a human-driven Claude round trip (`fitness_ping`, then
+`fitness_get_weekly_volume`) taken *after* both deploys and after the old secret version was
+disabled. It succeeded. The architecture predicted no connector impact and the live client agreed.
+
 ## Preconditions
 
 1. `BRETT_GCP_PROJECT` exported (`brett-fitness`), `gcloud` authenticated as an account with
@@ -284,9 +289,22 @@ Two production deploys, one static window spanning exactly the interval between 
 | 11 | `git diff deploy/cloud-run.env.yaml` | empty | `git diff --quiet` exit `0`; and `git diff <pre-plan-commit> HEAD -- deploy/cloud-run.env.yaml` also empty, so the file is byte-identical to its pre-plan state, not merely to the last commit | **PASS** |
 | 12 | new token to `/mcp` after flip-back | `401` | `401` in 0.521 s, body byte-identical (`cmp`) to the anonymous row 8 response — the static token is out of the request path again. `GET /health` re-checked `200` | **PASS** |
 | 13 | previous version state | `disabled`, none destroyed | version `1` `disabled`, version `2` `enabled`; `... --format='value(state)' \| grep -ci destroyed` → `0`. `GET /health` after the disable → `200` | **PASS** |
-| 14 | Claude connector round-trip (human-verified) | `fitness_ping` and `fitness_get_weekly_volume` both succeed | *(pending — Task 3 checkpoint)* | *(pending)* |
+| 14 | Claude connector round-trip (human-verified) | `fitness_ping` and `fitness_get_weekly_volume` both succeed | `fitness_ping` returned `status: ok`; `fitness_get_weekly_volume` for the last 2 weeks returned `data_available: true` with real volume data; re-authorization **not reported by the tester** — see the note below on how to read that | **PASS** |
 
-Row 14 is a human-verified checkpoint, not a claim inferred from code.
+**Row 14 is a human-verified checkpoint, not a claim inferred from code.** Rows 1–13 were produced
+by an agent running `gcloud` and `curl`; row 14 could not be, because in `authkit` mode there is no
+credential an agent can present. It was performed by a human operator in a real Claude client with
+the BRETT connector attached, after both deploys had completed and the previous secret version had
+been disabled, and is recorded here verbatim from their report.
+
+On re-authorization: the tester did not report being prompted to re-authorize, and the procedure
+did not ask them to confirm its *absence*, so this record says **not reported** rather than **did
+not happen**. The distinction matters for the next operator: the expectation going in was that
+consent would survive, because `MCP_RESOURCE_URL` and the WorkOS issuer were unchanged by the
+rotation and neither deploy touched them — but an unprompted round trip is weak positive evidence
+for that expectation, not proof of it. If a future rotation *does* trigger a consent prompt, that
+is a signal something other than `MCP_AUTH_SECRET` moved, and the issuer and resource URL are the
+first two things to check.
 
 ### What row 7 actually closes
 
