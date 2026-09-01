@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.db.repositories.workouts import (
     WorkoutSummaryRow,
+    _duration_minutes,
     recent_workout_summaries,
     workout_detail,
 )
@@ -128,6 +129,19 @@ def _by_id(rows: list[WorkoutSummaryRow], external_id: str) -> WorkoutSummaryRow
     matches = [row for row in rows if row.external_id == external_id]
     assert matches, f"{external_id} missing from {[row.external_id for row in rows]}"
     return matches[0]
+
+
+def test_duration_minutes_clamps_a_negative_span_to_zero() -> None:
+    """WR-01: a corrupted row with `end_time < start_time` must report 0, never a negative int.
+
+    No DB CHECK enforces `end >= start` and nothing upstream validates it, so this pure function
+    is the last line of defense before a negative session length reaches Claude. Unit-level and
+    synchronous on purpose -- it needs no fixture and no container.
+    """
+    start = dt.datetime(2026, 8, 24, 10, 0, tzinfo=dt.UTC)
+    end = dt.datetime(2026, 8, 24, 9, 0, tzinfo=dt.UTC)
+
+    assert _duration_minutes(start, end) == 0
 
 
 @pytest.mark.integration

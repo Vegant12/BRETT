@@ -41,6 +41,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
+import structlog
 from sqlalchemy import Numeric, and_, case, cast, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +49,8 @@ from app.analytics.rollup import hard_set_predicates
 from app.core.time import local_day
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
 from app.db.repositories.sync_state import PROVIDER_HEVY
+
+log = structlog.get_logger()
 
 # Tonnage is summed in SQL and must round-trip as an exact `Decimal`. The scale matches
 # `workout_sets.weight_kg` (Numeric(7,3)); the precision is widened so a whole session's tonnage
@@ -116,8 +119,16 @@ def _duration_minutes(start: dt.datetime, end: dt.datetime) -> int:
     Both columns are `DateTime(timezone=True)` and both are NOT NULL, so this never has to
     consider a missing end time. Rounded rather than truncated: a 74-minute-40-second session
     reported as 74 would be off by more than the figure's own resolution.
+
+    Neither column carries a DB CHECK that `end >= start`, and nothing upstream validates it on
+    sync or edit. Clamp rather than let a corrupted row report a negative session length to
+    Claude.
     """
-    return round((end - start).total_seconds() / _SECONDS_PER_MINUTE)
+    seconds = (end - start).total_seconds()
+    if seconds < 0:
+        log.warning("workout_duration_negative", start=start.isoformat(), end=end.isoformat())
+        return 0
+    return round(seconds / _SECONDS_PER_MINUTE)
 
 
 async def recent_workout_summaries(
