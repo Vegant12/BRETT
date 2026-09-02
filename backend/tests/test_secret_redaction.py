@@ -39,6 +39,11 @@ REQUEST_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 # `test_hevy_header_key_name_is_redacted_by_layer_2_alone`.
 UNSEEDED_KEY = "hevy-key-9f3a-only-layer-2-can-catch-this"
 
+# HEALTH-07/T-08-14. The Health Auto Export webhook credential. Distinctive for the
+# same reason `SEEDED` is: an assertion that a value never reached the stream is only
+# meaningful when nothing else in the process could ever have emitted that string.
+INGEST_SEEDED = "ingest-secret-4c1d-must-not-be-logged"
+
 # `app.main` calls get_settings() and configure_logging() at import time, so the
 # seeded environment has to exist before the import happens. Nothing ever connects
 # to this DATABASE_URL -- these are unit tests, no container required.
@@ -94,6 +99,10 @@ def _settings(monkeypatch: pytest.MonkeyPatch, environment: str = "development")
     monkeypatch.setenv("ENVIRONMENT", environment)
     monkeypatch.setenv("DATABASE_URL", DB_URL)
     monkeypatch.setenv("HEVY_API_KEY", SEEDED)
+    # Seeded for every case in this module, not only the ingest one: `secret_values()`
+    # is the single accessor both the scrubber and the MCP-response scan consume, so a
+    # secret that is only seeded in its own test is a secret the broader scans never see.
+    monkeypatch.setenv("HEALTH_INGEST_SECRET", INGEST_SEEDED)
     return Settings(_env_file=None)
 
 
@@ -160,6 +169,33 @@ def test_secret_inside_non_denied_value_is_redacted(monkeypatch: pytest.MonkeyPa
     out = buf.getvalue()
     assert SEEDED not in out, "FOUND-05 violated: secret present in a non-denied value"
     assert "***REDACTED***" in out
+
+
+def test_health_ingest_secret_never_reaches_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HEALTH-07/T-08-14: the webhook credential is scrubbed the same way every other secret is.
+
+    Logged under a key the deny-list has never heard of, on purpose. Layer 2 could
+    only catch a key literally named for this credential, and the realistic leak is
+    not that -- it is the ingest route including the compared credential in a
+    diagnostic message, or a request payload echoed into a log value. Only Layer 3
+    closes that, and Layer 3 knows a value exists only if the field is in
+    ``_SECRET_FIELDS``. Delete it from there and this test goes red while every
+    other case in this module stays green.
+    """
+    buf = _configure(monkeypatch)
+    structlog.get_logger().info("probe", note=f"presented {INGEST_SEEDED} tail")
+
+    out = buf.getvalue()
+    assert INGEST_SEEDED not in out, (
+        f"T-08-14 violated: HEALTH_INGEST_SECRET reached the rendered log stream. Add "
+        f"'health_ingest_secret' to _SECRET_FIELDS in backend/app/config.py -- that tuple is "
+        f"the only thing that feeds Settings.secret_values() and therefore the value scrubber. "
+        f"Stream: {out}"
+    )
+    assert "***REDACTED***" in out, (
+        "T-08-14: the credential is absent from the stream but nothing was redacted either, "
+        "so the log line under test never reached the buffer at all"
+    )
 
 
 def test_secret_in_rendered_traceback_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
