@@ -3,15 +3,19 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Apple Health, Strength Tracking & Coaching Programs
 status: executing
-stopped_at: Phase 8 context gathered
-last_updated: "2026-09-02T07:20:06.508Z"
-last_activity: 2026-09-02 -- Phase 08 execution started
+stopped_at: Phase 08 plan 08-08 PAUSED at Task 3 blocking checkpoint (device export)
+last_updated: "2026-09-02T10:41:20.365Z"
+last_activity: 2026-09-02 -- Phase 08 plan 08-08 paused at its blocking checkpoint
 progress:
+  # 08-08-SUMMARY.md exists on disk but its plan is NOT complete -- it was written to carry
+  # Tasks 1-2 across a blocking checkpoint. `state record-session` derives these numbers by
+  # counting SUMMARY files and therefore reported 8/8 and 100%; hand-corrected to 7/8.
+  # Re-derive only after 08-08 Task 3 lands.
   total_phases: 6
   completed_phases: 0
   total_plans: 8
-  completed_plans: 0
-  percent: 0
+  completed_plans: 7
+  percent: 88
 ---
 
 # Project State
@@ -25,12 +29,12 @@ See: .planning/PROJECT.md (updated 2026-09-02)
 
 ## Current Position
 
-Phase: 08 (apple-health-nutrition-ingest) — EXECUTING
-Plan: 1 of 8
-Status: Executing Phase 08
-Last activity: 2026-09-02 -- Phase 08 execution started
+Phase: 08 (apple-health-nutrition-ingest) — EXECUTING, PAUSED AT A BLOCKING CHECKPOINT
+Plan: 8 of 8 (Tasks 1-2 of 3 done; Task 3 awaits a real iPhone export)
+Status: Awaiting user action — see Blockers
+Last activity: 2026-09-02 -- 08-08 Tasks 1-2 committed, deploy live, checkpoint reached
 
-Progress: [░░░░░░░░░░] 0% (v2.0)
+Progress: [█████████░] 88% (v2.0) — 7 of 8 plans complete; 08-08 is in progress, not done
 
 ## Performance Metrics
 
@@ -82,6 +86,7 @@ None yet.
 - **Phase 10 open question:** the re-derived max-weight dead-band values cannot be settled on paper — they need live-data calibration, like D-18's original.
 - **Phase 8 open question:** `weight_body_mass` vs `weight_&_body_mass` metric-name spelling is unsettled across sources; capture one real Health Auto Export payload before writing the normalizer.
 - **Deploy prerequisite for Phase 8:** Cloud Run `--memory=512Mi` is too small for JSON ingest (measured peak ~235 MB on a 10 MB body). Raise to 1Gi and add a body-size cap before the first real device sync.
+- Phase 8 plan 08-08 is PAUSED at its Task 3 blocking checkpoint. Tasks 1-2 are done: brett-health-ingest-secret exists in Secret Manager and Cloud Run revision brett-00010-kln runs at 1Gi with HEALTH_INGEST_SECRET bound. OUTSTANDING: the user must configure the Health Auto Export iOS automation and trigger one real export that includes a training day. Until then ROADMAP criterion #1 is unmet, RESEARCH Assumption A1 (does the HAE webhook spell Hevy as 'hevy'?) is still OPEN, and HEALTH-06 + NUTR-02 remain pending. If A1 is refuted, _HEVY_SOURCE_ALIASES in backend/app/integrations/health_auto_export/normalize.py needs the real spelling added and Phase 9 inherits the answer.
 
 ## Deferred Items
 
@@ -94,6 +99,6 @@ Items acknowledged and deferred at v1.0 milestone close on 2026-09-02:
 
 ## Session Continuity
 
-Last session: 2026-09-02T04:16:46.024Z
-Stopped at: Phase 8 context gathered
-Resume file: .planning/phases/08-apple-health-nutrition-ingest/08-CONTEXT.md
+Last session: 2026-09-02T10:41:20.358Z
+Stopped at: Phase 08 plan 08-08 PAUSED at Task 3 blocking checkpoint (device export)
+Resume file: .planning/phases/08-apple-health-nutrition-ingest/08-08-PLAN.md

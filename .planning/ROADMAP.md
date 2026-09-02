@@ -56,6 +56,12 @@ Plans:
 - [x] 08-06-PLAN.md — idempotent upsert + independent activity/nutrition freshness bookkeeping (wave 4)
 - [x] 08-07-PLAN.md — the webhook route, its wiring above the MCP mount, and the criterion-#4 proof (wave 5)
 - [ ] 08-08-PLAN.md — setup doc, secret creation, deploy, and the live device verification checkpoint (wave 6)
+      **IN PROGRESS, PAUSED.** Tasks 1-2 done (`4591c84`, `3b04cfc`): `docs/health-auto-export-setup.md`
+      written, `brett-health-ingest-secret` created, revision `brett-00010-kln` live at 1Gi with the
+      credential bound, live 401/health/MCP-discovery smoke tests recorded. Task 3 is a blocking
+      human-verify checkpoint needing a real Health Auto Export run from the user's iPhone.
+      `08-08-SUMMARY.md` exists but covers Tasks 1-2 only — do not read it as completion.
+      **Criteria #1, #3 (live) and #5 remain unverified; criteria #2 and #4 are met.**
 
 Notes for planning:
 - Register the ingest route **above** `app.mount("/", mcp_app)` in `main.py` — the mount is a catch-all and a route below it is dead in production (PITFALLS #1).
