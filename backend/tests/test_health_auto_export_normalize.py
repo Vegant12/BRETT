@@ -40,6 +40,7 @@ from app.integrations.health_auto_export.normalize import (
 from app.integrations.health_auto_export.registry import METRIC_REGISTRY, MetricSpec
 from app.integrations.health_auto_export.schemas import HAEPayload
 from app.logging import configure_logging
+from tests.conftest import hae_fixture
 
 # `users.timezone` today. The phone emits +0700 to match, so Pitfall N-4 is dormant -- which is
 # exactly why plan 08-05 Task 3 pins it rather than leaving it to be discovered on travel.
@@ -771,3 +772,247 @@ def test_every_datapoint_is_either_inside_a_row_or_explained_by_a_drop() -> None
     assert result.datapoints_seen == 7
     assert result.datapoints_dropped == 5
     assert result.metrics_unrecognized == 1
+
+
+# ---------------------------------------------------------------------------
+# Pitfall N-4: the local day is resolved from `users.timezone`, not from the wire date part
+# ---------------------------------------------------------------------------
+
+# A nutrition app writing a DAILY TOTAL anchors it at its own local midnight. Verbatim from a
+# real captured payload.
+MIDNIGHT_JST = "2025-08-15 00:00:00 +0900"
+
+
+def test_midnight_anchored_point_uses_local_day_not_the_payload_date() -> None:
+    """Pitfall N-4. A nutrition app writes a DAILY TOTAL anchored at its own local midnight.
+
+    `"2025-08-15 00:00:00 +0900"` read in Asia/Jakarta (+07:00) is 2025-08-14 22:00, so the row
+    belongs to 2025-08-14. That is the INTENDED answer, not a bug: `local_day` is the
+    project-wide rule (FOUND-03), and a travelling user's nutrition genuinely belongs to the
+    local day they ate it. Today the phone emits +0700 and `users.timezone` is Asia/Jakarta, so
+    the two agree and this is dormant -- it activates on travel or a mis-set timezone, which is
+    exactly when nobody would be looking. This test is the documentation.
+    """
+    result = normalize_payload(
+        _payload(
+            _metric(
+                "dietary_energy",
+                units="kcal",
+                points=[_point(qty=1857, date=MIDNIGHT_JST, source="Foodvisor")],
+            )
+        ),
+        tz=TZ,
+    )
+
+    assert result.rows[0].local_day == dt.date(2025, 8, 14), (
+        f"NUTR-02: a midnight-anchored daily total was attributed to "
+        f"{result.rows[0].local_day} instead of the local day the +07:00 user was living in. "
+        f"The visible symptom is a nutrition day reading zero next to a neighbouring day "
+        f"reading double"
+    )
+
+
+def test_the_same_instant_lands_on_the_next_day_in_a_matching_timezone() -> None:
+    """The counterpart. Identical payload, `tz` the only difference -- which is what proves the
+    parameter is genuinely read.
+
+    `core/time.py` is explicit that a module-level timezone default "would let a
+    wrong-timezone bug pass every test". A single-timezone test suite is that default in
+    disguise: it cannot tell a correct `local_day(ts, tz)` from a hardcoded one.
+    """
+    payload = _payload(
+        _metric(
+            "dietary_energy",
+            units="kcal",
+            points=[_point(qty=1857, date=MIDNIGHT_JST, source="Foodvisor")],
+        )
+    )
+
+    assert normalize_payload(payload, tz="Asia/Tokyo").rows[0].local_day == dt.date(2025, 8, 15)
+    assert normalize_payload(payload, tz=TZ).rows[0].local_day == dt.date(2025, 8, 14)
+
+
+@pytest.mark.parametrize(
+    ("timezone", "expected"),
+    [
+        ("Asia/Tokyo", dt.date(2025, 8, 15)),  # +09:00, the device's own zone
+        ("Asia/Jakarta", dt.date(2025, 8, 14)),  # +07:00, today's users.timezone
+        ("UTC", dt.date(2025, 8, 14)),  # +00:00
+        ("America/New_York", dt.date(2025, 8, 14)),  # -04:00, the far side
+    ],
+)
+def test_the_timezone_parameter_alone_decides_the_day(timezone: str, expected: dt.date) -> None:
+    """FOUND-03. Four zones, one instant, three distinct answers -- a hardcoded zone anywhere in
+    the path collapses these into one and fails here."""
+    result = normalize_payload(
+        _payload(
+            _metric(
+                "dietary_energy",
+                units="kcal",
+                points=[_point(qty=1857, date=MIDNIGHT_JST, source="Foodvisor")],
+            )
+        ),
+        tz=timezone,
+    )
+
+    assert result.rows[0].local_day == expected
+
+
+# ---------------------------------------------------------------------------
+# The real captured fixtures, end to end
+# ---------------------------------------------------------------------------
+
+
+def test_the_hevy_fixture_excludes_hevy_and_keeps_the_iphone_rows() -> None:
+    """HEALTH-08 against the measured 2026-01-02 training day: Hevy wrote 666.5 kcal in one
+    lump record, the iPhone wrote 94.2 kcal across three."""
+    result = normalize_payload(HAEPayload.model_validate(hae_fixture("hevy_active_energy")), tz=TZ)
+
+    assert "Hevy" not in {row.source_name for row in result.rows}, (
+        "HEALTH-08 violated: a Hevy-sourced active_energy datapoint became a row. Hevy writes "
+        "ActiveEnergyBurned to Apple Health on every training day at 70-88% of that day's "
+        "total, so ingesting it double-counts a session BRETT already holds at set-level "
+        f"detail. Observed source names: {sorted({row.source_name for row in result.rows})}"
+    )
+    # The negative space. A predicate that excluded EVERYTHING would satisfy the assertion
+    # above vacuously, and Pitfall N-3's stated warning sign is a filter that never matches.
+    assert result.rows, (
+        "HEALTH-08 satisfied vacuously: the exclusion removed every row, including the "
+        "iPhone's own active energy. That is data loss wearing the costume of a passing test"
+    )
+    assert {row.source_name for row in result.rows} == {DEVICE_NAME}
+    assert result.rows[0].value == Decimal("94.2")
+    assert result.rows[0].sample_count == 3
+    assert result.rows[0].local_day == dt.date(2026, 1, 2)
+    assert all(row.value < Decimal("666.5") for row in result.rows), (
+        "HEALTH-08: a row carries at least the Hevy lump record's magnitude, so the exclusion "
+        "either did not run or ran after aggregation"
+    )
+    assert result.datapoints_dropped == 1
+
+
+def test_the_activity_and_nutrition_fixture_produces_one_row_per_metric() -> None:
+    """All twelve allowlisted metrics in HAE's real envelope, with the verified vendor
+    spellings. This is the case that proves activity and nutrition need ONE normalizer."""
+    result = normalize_payload(
+        HAEPayload.model_validate(hae_fixture("activity_and_nutrition")), tz=TZ
+    )
+
+    assert len(result.rows) == 12, (
+        f"HEALTH-06/NUTR-02: expected one row per allowlisted metric, got {len(result.rows)}"
+    )
+    assert {row.metric for row in result.rows} == set(METRIC_REGISTRY)
+    assert result.kinds_present == frozenset({"activity", "nutrition"})
+    assert result.metrics_unrecognized == 0
+
+    by_metric = {row.metric: row for row in result.rows}
+    assert by_metric["sodium"].units == "mg", (
+        f"NUTR-02: sodium is stored in milligrams -- a gram-valued sodium row is off by 1000 "
+        f"and looks plausible. Got {by_metric['sodium'].units}"
+    )
+    assert by_metric["flights_climbed"].value == Decimal("0.20163697817574894"), (
+        "Finding C: HAE prorates count metrics, so this real datapoint is fractional. A "
+        "truncating cast reads it as 0 flights with no error anywhere"
+    )
+    # Both two-point metrics land on the same local day, so neither splits into two rows.
+    assert by_metric["step_count"].sample_count == 2
+    assert by_metric["walking_running_distance"].sample_count == 2
+    # The nutrition metrics are all midnight-anchored at +0900 -- Pitfall N-4 in the fixture.
+    assert by_metric["protein"].local_day == dt.date(2025, 8, 14)
+    assert by_metric["step_count"].local_day == DAY
+
+
+def test_the_unrecognized_fixture_still_produces_the_step_count_row() -> None:
+    """D-04, D-01 and D-02 in one payload: `walking_speed` (unlisted), `sleep_analysis`
+    (unlisted), `weight_body_mass` (D-01) and a `workouts` sibling (D-02) all cost only
+    themselves, and the one allowlisted metric beside them still lands."""
+    result = normalize_payload(
+        HAEPayload.model_validate(hae_fixture("unrecognized_and_sourceless")), tz=TZ
+    )
+
+    assert [row.metric for row in result.rows] == ["step_count"], (
+        f"D-04 violated: an unlisted metric took the recognised one down with it. Health Auto "
+        f"Export has no documented retry, so that is permanent loss of the window. Rows: "
+        f"{[row.metric for row in result.rows]}"
+    )
+    assert result.metrics_unrecognized >= 3
+    assert "weight_body_mass" not in {row.metric for row in result.rows}, (
+        "D-01 violated: Apple Health body mass became a row. Phase 8 deliberately adds no "
+        "third source to body_measurements, and there is nothing to arbitrate a conflict with"
+    )
+    assert result.rows[0].sample_count == 1
+    assert result.rows[0].local_day == DAY
+
+
+# ---------------------------------------------------------------------------
+# T-08-30 / FOUND-05: no measured quantity may reach the log sink
+# ---------------------------------------------------------------------------
+
+
+def _qty_origins(name: str) -> dict[str, str]:
+    """Map every `qty` spelling in a fixture to the metric it came from.
+
+    Walked out of the parsed fixture rather than listed by hand, so the forbidden set cannot
+    drift away from the files it exists to protect. The VALUE is the key and the ORIGIN is the
+    payload, so a failure can name the metric without printing the measurement.
+    """
+    origins: dict[str, str] = {}
+    for metric in hae_fixture(name)["data"]["metrics"]:
+        for point in metric.get("data", []):
+            if "qty" not in point:
+                continue
+            for spelling in (str(point["qty"]), str(Decimal(str(point["qty"])))):
+                origins[spelling] = f"{name}:{metric['name']}"
+    return origins
+
+
+def test_no_quantity_from_any_fixture_reaches_the_log_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blueprint 44 / FOUND-05. A calorie count and a macro gram figure are personal health
+    data; a sync-lifecycle log carries counts and names and nothing else (T-08-30).
+
+    Every logging path in the module is exercised: the unrecognised-metric warning, the
+    hevy-exclusion line, the multi-point-day warning, and -- via a units-broken copy of the
+    activity fixture -- the per-datapoint drop, which is the one that also carries a unit.
+    """
+    origins: dict[str, str] = {}
+    payloads: list[dict[str, Any]] = []
+    for name in ("activity_and_nutrition", "hevy_active_energy", "unrecognized_and_sourceless"):
+        origins |= _qty_origins(name)
+        payloads.append(hae_fixture(name))
+
+    broken = hae_fixture("activity_and_nutrition")
+    for metric in broken["data"]["metrics"]:
+        metric["units"] = "furlongs"
+    payloads.append(broken)
+
+    def _normalize_all() -> None:
+        for raw in payloads:
+            normalize_payload(HAEPayload.model_validate(raw), tz=TZ)
+
+    _, entries = run_capturing_logs(monkeypatch, _normalize_all)
+
+    # Without these the whole test passes trivially on an empty buffer, which is exactly what a
+    # mis-wired capture produces.
+    for expected in (
+        "health_ingest_unrecognized_metric",
+        "health_ingest_hevy_source_excluded",
+        "health_ingest_multi_point_day",
+        "health_ingest_datapoint_dropped",
+    ):
+        assert _events(entries, expected), f"log capture is not wired: no {expected} event"
+
+    # `timestamp` is dropped before the scan: its microsecond field is an unconstrained
+    # six-digit number that will eventually contain a short quantity by chance, and a suite
+    # that goes red once a fortnight teaches people to re-run it rather than read it.
+    scanned = json.dumps(
+        [{key: value for key, value in entry.items() if key != "timestamp"} for entry in entries]
+    )
+    leaked = sorted({origin for spelling, origin in origins.items() if spelling in scanned})
+
+    assert not leaked, (
+        f"FOUND-05 / T-08-30 violated: a measured quantity reached the log stream. Log lines "
+        f"carry a metric name, a unit, a local_day, a source_name, a count or an exception "
+        f"class name -- never a measurement. Leaking payload:metric pair(s): {leaked}"
+    )
