@@ -17,8 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import SyncState
 from app.db.repositories.sync_state import (
+    PROVIDER_APPLE_HEALTH,
+    PROVIDER_HEVY,
+    RESOURCE_ACTIVITY,
     RESOURCE_BODY_MEASUREMENTS,
     RESOURCE_EXERCISE_TEMPLATES,
+    RESOURCE_NUTRITION,
     RESOURCE_WORKOUTS,
     STATUS_ERROR,
     STATUS_IDLE,
@@ -273,6 +277,119 @@ async def test_helpers_never_commit(bookkeeping: AsyncSession) -> None:
             resource=RESOURCE_WORKOUTS,
         )
     ) is None
+
+
+# HEALTH-11 / NUTR-05 / D-03: Apple Health's two resources alongside Hevy's three.
+#
+# These two cases use the REAL provider constants rather than `_PROVIDER`, because the thing
+# under test is that 'apple_health' and 'hevy' are genuinely separate rows -- a stand-in provider
+# would prove nothing about the pair the production code actually writes. They therefore FLUSH
+# and never COMMIT: the `bookkeeping` fixture's compensating DELETE only knows about `_PROVIDER`,
+# so a committed `provider='hevy'` row for this user would outlive the test and collide with the
+# Hevy sync tests that share this session-scoped container. Its `rollback()` discards these.
+
+# Five distinct instants, one per (provider, resource) pair. Distinct on purpose: five equal
+# values would let a builder that read one row five times pass.
+_FIVE_SYNCED_AT: dict[tuple[str, str], dt.datetime] = {
+    (PROVIDER_HEVY, RESOURCE_WORKOUTS): _SYNCED_AT,
+    (PROVIDER_HEVY, RESOURCE_EXERCISE_TEMPLATES): _SYNCED_AT - dt.timedelta(days=3),
+    (PROVIDER_HEVY, RESOURCE_BODY_MEASUREMENTS): _SYNCED_AT - dt.timedelta(hours=7),
+    (PROVIDER_APPLE_HEALTH, RESOURCE_ACTIVITY): _SYNCED_AT - dt.timedelta(minutes=11),
+    (PROVIDER_APPLE_HEALTH, RESOURCE_NUTRITION): _SYNCED_AT - dt.timedelta(days=1, hours=2),
+}
+
+
+@pytest.mark.integration
+async def test_apple_health_activity_sync_state_is_independent_of_hevy(
+    bookkeeping: AsyncSession,
+) -> None:
+    """HEALTH-11: five rows, five last_synced_at values, no cross-talk.
+
+    The unique constraint is on (user, provider, resource), so two providers can hold the same
+    resource name and one provider can hold five. This asserts the whole grid at once rather
+    than one pair at a time, because the failure mode is a lookup that ignores one of the two
+    columns -- and that only shows up when both columns vary.
+    """
+    for (provider, resource), synced_at in _FIVE_SYNCED_AT.items():
+        await ensure_sync_state(
+            bookkeeping, user_id=DEFAULT_USER_ID, provider=provider, resource=resource
+        )
+        await complete_sync(
+            bookkeeping,
+            user_id=DEFAULT_USER_ID,
+            provider=provider,
+            resource=resource,
+            last_synced_at=synced_at,
+        )
+    await bookkeeping.flush()
+
+    actual = {}
+    for provider, resource in _FIVE_SYNCED_AT:
+        state = await get_sync_state(
+            bookkeeping, user_id=DEFAULT_USER_ID, provider=provider, resource=resource
+        )
+        assert state is not None, (
+            f"HEALTH-11 violated: no sync_state row for ({provider!r}, {resource!r}) after "
+            f"complete_sync wrote one. A missing row reports as 'never synced' in every "
+            f"analytics response, so real, current data would be caveated as absent"
+        )
+        actual[provider, resource] = state.last_synced_at
+
+    assert actual == _FIVE_SYNCED_AT, (
+        "HEALTH-11 violated: the five (provider, resource) pairs do not hold five independent "
+        "last_synced_at values. A pair reading another pair's row means one source's freshness "
+        "is reported as another's -- Hevy's 6-hourly sync time presented as the phone's last "
+        f"Health Auto Export push, or the reverse. Got: {actual}"
+    )
+    assert len(set(actual.values())) == 5, (
+        f"HEALTH-11 violated: only {len(set(actual.values()))} distinct timestamps across five "
+        f"pairs, so at least two pairs are reading the same row. Got: {actual}"
+    )
+
+
+@pytest.mark.integration
+async def test_apple_health_nutrition_sync_state_does_not_move_with_activity(
+    bookkeeping: AsyncSession,
+) -> None:
+    """NUTR-05 / D-03: the split exists so a partial failure is VISIBLE.
+
+    Activity and nutrition arrive in the SAME Health Auto Export POST, which is precisely why
+    a single combined `apple_health` resource is tempting and wrong: the nutrition-logging app
+    can stop writing to HealthKit while step counts keep flowing, and a combined row would go
+    on reporting "fresh" through the entire outage.
+    """
+    await complete_sync(
+        bookkeeping,
+        user_id=DEFAULT_USER_ID,
+        provider=PROVIDER_APPLE_HEALTH,
+        resource=RESOURCE_ACTIVITY,
+        last_synced_at=_SYNCED_AT,
+    )
+    await bookkeeping.flush()
+
+    activity = await get_sync_state(
+        bookkeeping,
+        user_id=DEFAULT_USER_ID,
+        provider=PROVIDER_APPLE_HEALTH,
+        resource=RESOURCE_ACTIVITY,
+    )
+    # Guard against a vacuous pass: if the write never landed, the nutrition assertion below
+    # would hold for the wrong reason.
+    assert activity is not None and activity.last_synced_at == _SYNCED_AT
+
+    nutrition = await get_sync_state(
+        bookkeeping,
+        user_id=DEFAULT_USER_ID,
+        provider=PROVIDER_APPLE_HEALTH,
+        resource=RESOURCE_NUTRITION,
+    )
+
+    assert nutrition is None, (
+        "NUTR-05/D-03 violated: syncing Apple Health ACTIVITY created or advanced the NUTRITION "
+        "bookkeeping row. The two share one webhook POST but go stale independently, so a "
+        "nutrition row that moves with activity reports 'fresh' for calorie and macro data that "
+        f"stopped arriving days ago. Got: {nutrition!r}"
+    )
 
 
 def test_format_sync_error_uses_safe_message_when_present() -> None:
