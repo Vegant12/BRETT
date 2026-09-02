@@ -42,9 +42,12 @@ from app.analytics.schemas import CoverageMetadata, FreshnessMetadata, Measureme
 from app.db.models.body import BodyMeasurement
 from app.db.models.workout import Workout
 from app.db.repositories.sync_state import (
+    PROVIDER_APPLE_HEALTH,
     PROVIDER_HEVY,
+    RESOURCE_ACTIVITY,
     RESOURCE_BODY_MEASUREMENTS,
     RESOURCE_EXERCISE_TEMPLATES,
+    RESOURCE_NUTRITION,
     RESOURCE_WORKOUTS,
     get_sync_state,
 )
@@ -55,20 +58,48 @@ from app.db.repositories.sync_state import (
 # eventually disagree about the same window.
 INSUFFICIENT_DATA_SESSION_THRESHOLD = 2
 
+# A bundle element is a (provider, resource) PAIR, never a bare resource name. The builder below
+# used to default the provider to Hevy, which meant the first Apple Health resource asked for
+# would have been looked up under the Hevy provider and answered with Hevy's timestamp -- a
+# plausible freshness figure that is quietly wrong (RESEARCH Pitfall 7).
+#
+# Prose here deliberately avoids writing the keyword-argument form of that removed default: the
+# Pitfall 7 regression guard is a grep for it near a call, and a comment that trips it would
+# train the next reader to ignore the guard.
+FreshnessPair = tuple[str, str]  # (provider, resource)
+
 # Which bookkeeping rows actually feed a given answer (DQ-01). A per-muscle number is only as
 # fresh as the STALER of the two: the muscle map comes from exercise_templates, so a stale
 # template sync silently changes every per-muscle figure with no error anywhere in the stack.
-FRESHNESS_RESOURCES_WORKOUTS: tuple[str, ...] = (RESOURCE_WORKOUTS,)
-FRESHNESS_RESOURCES_MUSCLE: tuple[str, ...] = (RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES)
-FRESHNESS_RESOURCES_BODY: tuple[str, ...] = (RESOURCE_BODY_MEASUREMENTS,)
+FRESHNESS_RESOURCES_WORKOUTS: tuple[FreshnessPair, ...] = ((PROVIDER_HEVY, RESOURCE_WORKOUTS),)
+FRESHNESS_RESOURCES_MUSCLE: tuple[FreshnessPair, ...] = (
+    (PROVIDER_HEVY, RESOURCE_WORKOUTS),
+    (PROVIDER_HEVY, RESOURCE_EXERCISE_TEMPLATES),
+)
+FRESHNESS_RESOURCES_BODY: tuple[FreshnessPair, ...] = ((PROVIDER_HEVY, RESOURCE_BODY_MEASUREMENTS),)
 # BODY-02 reads BOTH sides -- a body-weight trend and a training-progression signal -- so its
 # answer is only as fresh as the STALEST of the three. A stale template sync silently changes
 # every e1RM eligibility decision (exercise_type is the D-03 gate), which changes the progression
 # signal, with no error anywhere in the stack.
-FRESHNESS_RESOURCES_ALL: tuple[str, ...] = (
-    RESOURCE_WORKOUTS,
-    RESOURCE_EXERCISE_TEMPLATES,
-    RESOURCE_BODY_MEASUREMENTS,
+FRESHNESS_RESOURCES_ALL: tuple[FreshnessPair, ...] = (
+    (PROVIDER_HEVY, RESOURCE_WORKOUTS),
+    (PROVIDER_HEVY, RESOURCE_EXERCISE_TEMPLATES),
+    (PROVIDER_HEVY, RESOURCE_BODY_MEASUREMENTS),
+)
+
+# D-03 / HEALTH-11 / NUTR-05. TWO bundles, never one combined `apple_health` bundle: both kinds
+# arrive in the same webhook POST but go stale independently, and a combined resource reports
+# "fresh" on a partial failure. Phase 13's activity and nutrition tools consume these; nothing in
+# Phase 8 changes an existing tool's payload.
+FRESHNESS_RESOURCES_ACTIVITY: tuple[FreshnessPair, ...] = (
+    (PROVIDER_APPLE_HEALTH, RESOURCE_ACTIVITY),
+)
+FRESHNESS_RESOURCES_NUTRITION: tuple[FreshnessPair, ...] = (
+    (PROVIDER_APPLE_HEALTH, RESOURCE_NUTRITION),
+)
+FRESHNESS_RESOURCES_APPLE_HEALTH: tuple[FreshnessPair, ...] = (
+    (PROVIDER_APPLE_HEALTH, RESOURCE_ACTIVITY),
+    (PROVIDER_APPLE_HEALTH, RESOURCE_NUTRITION),
 )
 
 # D-15. Keys are the window length in DAYS; values are the minimum number of distinct measured
@@ -138,10 +169,19 @@ async def build_freshness(
     session: AsyncSession,
     *,
     user_id: uuid.UUID,
-    resources: Sequence[str],
-    provider: str = PROVIDER_HEVY,
+    resources: Sequence[FreshnessPair],
 ) -> FreshnessMetadata:
-    """DQ-01. One `last_synced_at` per requested resource, and NOTHING else from the row.
+    """DQ-01. One `last_synced_at` per requested (provider, resource) pair, and NOTHING else.
+
+    There is deliberately NO `provider` default. The removed default was `PROVIDER_HEVY`, which
+    meant that the first Apple Health resource passed here would have been looked up under
+    provider='hevy' and returned Hevy's timestamp -- a plausible freshness figure that is quietly
+    wrong, which is exactly this project's primary failure mode (RESEARCH Pitfall 7).
+
+    The OUTPUT dict is still keyed by the bare RESOURCE name, not by a composite. Every resource
+    name is unique across providers -- asserted by `test_resource_names_are_unique_across_providers`
+    -- so no collision is possible, and every existing tool response keeps the exact key set it
+    already advertises in `test_mcp_tool_schemas.py` and `docs/coaching-instructions.md`.
 
     A resource that has never synced reports `None` rather than being omitted: "never synced"
     is the answer to "when was this last synced", and a missing key is indistinguishable from
@@ -150,7 +190,7 @@ async def build_freshness(
     Iterated in sorted order so the map is deterministic and diffable between runs.
     """
     out: dict[str, dt.datetime | None] = {}
-    for resource in sorted(resources):
+    for provider, resource in sorted(resources):
         state = await get_sync_state(session, user_id=user_id, provider=provider, resource=resource)
         # ONLY the last-synced timestamp is read off the row. MCP-06: the row's stored error
         # text, its run status and its two resume cursors are internal bookkeeping that must
