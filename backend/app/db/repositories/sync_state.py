@@ -29,6 +29,24 @@ SYNC_RESOURCES: frozenset[str] = frozenset(
     {RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES, RESOURCE_BODY_MEASUREMENTS}
 )
 
+# D-03. Apple Health arrives through ONE webhook POST but the two data kinds go stale
+# INDEPENDENTLY: the nutrition-logging app can stop writing to HealthKit while step counts keep
+# flowing, or the reverse. One combined `apple_health` resource would report "fresh" on exactly
+# that partial failure, which is the blind spot D-03 exists to remove.
+#
+# No migration is needed for these values: `SyncState.provider` is String(32) and 'apple_health'
+# is 12 characters; `SyncState.resource` is String(32) and 'activity'/'nutrition' are 8 and 9.
+PROVIDER_APPLE_HEALTH = "apple_health"
+
+RESOURCE_ACTIVITY = "activity"
+RESOURCE_NUTRITION = "nutrition"
+
+# Deliberately a SEPARATE frozenset rather than widening `SYNC_RESOURCES`. `conftest.py`'s
+# `worst_case_history` fixture iterates `SYNC_RESOURCES` and calls `complete_sync` with
+# `provider=PROVIDER_HEVY` hardcoded -- widening it would silently seed Apple Health resources
+# under provider='hevy', producing bookkeeping rows for a provider that never wrote them.
+APPLE_HEALTH_RESOURCES: frozenset[str] = frozenset({RESOURCE_ACTIVITY, RESOURCE_NUTRITION})
+
 STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
 STATUS_ERROR = "error"
