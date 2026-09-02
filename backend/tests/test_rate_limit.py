@@ -283,11 +283,10 @@ def test_ingest_path_uses_its_own_bucket() -> None:
     coupling the second bucket was added to remove.
     """
     shared, ingest = _frozen(3), _frozen(3)
+    app = _app_state(rate_limit_bucket=shared, ingest_rate_limit_bucket=ingest)
     middleware = RateLimitMiddleware(_unreached_app, bucket=_frozen(1))
 
-    resolved = middleware._bucket(
-        _http_scope(INGEST_PATH, _app_state(rate_limit_bucket=shared, ingest_rate_limit_bucket=ingest))
-    )
+    resolved = middleware._bucket(_http_scope(INGEST_PATH, app))
 
     assert resolved is ingest, (
         f"HEALTH-07 violated: a request to {INGEST_PATH} resolved to a bucket that is not "

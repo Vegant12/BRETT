@@ -20,7 +20,7 @@ from app.config import get_settings
 from app.db.session import make_engine, make_sessionmaker
 from app.logging import configure_logging
 from app.mcp.server import mcp, mcp_app
-from app.middleware import RateLimitMiddleware, build_limiter
+from app.middleware import RateLimitMiddleware, build_ingest_limiter, build_limiter
 
 settings = get_settings()  # fail-fast BEFORE anything else
 configure_logging(settings)  # then logging, so the scrubber has the secret values
@@ -76,6 +76,10 @@ app = FastAPI(title="BRETT", lifespan=lifespan)
 # The bucket is also published on app.state so there is exactly one live bucket
 # object with one owner; the middleware reads it per request.
 app.state.rate_limit_bucket = build_limiter(settings)
+# RESEARCH Pitfall 2: the ingest path draws from its OWN bucket, so a burst of Health Auto
+# Export deliveries cannot drain the bucket Claude's connector shares. Published here, beside
+# its sibling, so both live objects have exactly one owner.
+app.state.ingest_rate_limit_bucket = build_ingest_limiter(settings)
 app.add_middleware(RateLimitMiddleware, bucket=app.state.rate_limit_bucket)
 
 # Pure-ASGI middleware, never Starlette's response-materialising middleware base
