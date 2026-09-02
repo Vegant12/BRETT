@@ -1,9 +1,9 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-milestone_name: milestone
-status: executing
-stopped_at: Phase 7 context gathered
+milestone_name: MVP
+status: milestone_complete
+stopped_at: v1.0 milestone archived
 last_updated: "2026-09-02T02:23:12.349Z"
 last_activity: 2026-09-02
 progress:
@@ -18,27 +18,25 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-23)
+See: .planning/PROJECT.md (updated 2026-09-02)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 07 — production-hardening-coaching-layer
+**Current focus:** Planning next milestone — run `/gsd-new-milestone`
 
 ## Current Position
 
-Phase: 07
-Plan: Not started
-Status: Executing Phase 07
-Last activity: 2026-09-02
+Milestone: v1.0 MVP — SHIPPED 2026-09-02 (all 7 phases, 65/65 plans complete)
+Status: Milestone archived; awaiting `/gsd-new-milestone`
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 53
+- Total plans completed: 65 (v1.0 milestone, all phases)
 - Average duration: —
-- Total execution time: 0.0 hours
+- Total execution time: —
 
 **By Phase:**
 
@@ -46,6 +44,7 @@ Progress: [░░░░░░░░░░] 0%
 |-------|-------|-------|----------|
 | 01 | 5 | - | - |
 | 02 | 8 | - | - |
+| 03 | 12 | - | - |
 | 04 | 9 | - | - |
 | 05 | 10 | - | - |
 | 06 | 11 | - | - |
@@ -62,15 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting current work:
-
-- [Roadmap]: v1 = backend-first (blueprint Phases 1-5); iOS/HealthKit deferred to Milestone 2
-- [Roadmap]: MCP auth = bearer token for v1 — **unverified**, resolved by the Phase 2 spike
-- [Roadmap]: Deploy + connector auth spike promoted to Phase 2, ahead of Hevy/analytics work, per unanimous researcher recommendation
-- [Roadmap]: Hevy `/v1/body_measurements` synced in Phase 3 instead of manual-entry-only, unlocking weight trend and recomposition status in v1
-- [Roadmap]: Repo layout flat at BRETT root (`backend/`, `ios/`, `docs/`); deploy target Google Cloud Run
-- [Phase 2]: MCP connector auth = OAuth 2.1 via WorkOS AuthKit with CIMD; "bearer token, not OAuth" is overturned
+Full decision log lives in PROJECT.md Key Decisions table (all v1.0 rows now resolved with outcomes) and in `.planning/milestones/v1.0-ROADMAP.md` for phase-level detail.
 
 ### Pending Todos
 
@@ -82,22 +73,23 @@ None yet.
 
 [Issues that affect future work]
 
-- **Resolved (Phase 2, 2026-08-29):** A personal Claude account authenticates a custom remote MCP connector via WorkOS AuthKit (OAuth 2.1, CIMD client identification), not a bearer token — verified on Claude Desktop. See `.planning/phases/02-deploy-connector-auth-spike/02-DEPLOY-LOG.md`.
-- **Resolved (Phase 3, 2026-08-30):** Build against the *live* Hevy schema, not the blueprint's assumed one — no `rir`, no `weight_unit`, `pageSize` caps at 10, no stable child-object IDs, events return newest-to-oldest. Confirmed against a real full + incremental sync (327 workouts, 463 templates, 123 body-measurement rows); also caught a live-only schema bug (`equipment_category` → `equipment`) that no mocked test could have found. See `docs/hevy-api-observations.md`.
-- **Resolved (Phase 3, 2026-08-30):** Dumbbell `weight_kg` is confirmed **per-dumbbell** (matches the Hevy app directly, no correction factor needed) and the seven unsuffixed body-measurement fields are confirmed **centimetres**. Both verified by direct comparison with the Hevy app during plan 03-11. See `docs/hevy-api-observations.md`.
-- **Open (Phase 3):** Hevy's real rate limits remain undocumented — no `429` or `ratelimit-*`/`retry-after` header was observed across 71 requests in the first live sync, so the existing retry policy (`wait_exponential_jitter` + `stop_after_attempt(5)`) is unverified against a real limit, not confirmed unnecessary. Re-check if a live sync ever throttles.
-- **Open (Phase 6):** MCP Python SDK had a breaking `FastMCP` → `MCPServer` rework (spec revision 2026-07-28); re-read SDK docs at phase start rather than trusting cached knowledge.
+- **Open (carried from v1.0):** Hevy's real rate limits remain undocumented — no `429` or `ratelimit-*`/`retry-after` header was observed across 71 requests in the first live sync, so the existing retry policy (`wait_exponential_jitter` + `stop_after_attempt(5)`) is unverified against a real limit, not confirmed unnecessary. Re-check if a live sync ever throttles.
+- **Open (carried from v1.0):** MCP Python SDK had a breaking `FastMCP` → `MCPServer` rework mid-project (spec revision 2026-07-28); re-read SDK docs at the start of any future phase touching `app/mcp/` rather than trusting cached knowledge.
+
+All other v1.0 blockers resolved — see `.planning/RETROSPECTIVE.md` and `.planning/milestones/v1.0-ROADMAP.md`.
 
 ## Deferred Items
 
-Items acknowledged and carried forward from previous milestone close:
+Items acknowledged and deferred at v1.0 milestone close on 2026-09-02:
 
-| Category | Item | Status | Deferred At |
-|----------|------|--------|-------------|
-| *(none)* | | | |
+| Category | Item | Status |
+|----------|------|--------|
+| audit | No formal `/gsd-audit-milestone` run before close | Substituted with a targeted spot-check of the 8 stale requirements (confirmed implemented); user chose to proceed anyway at the pre-flight gate |
+| tooling | `gsd-tools.cjs audit-open`/`--json` broken (`ReferenceError: output is not defined`, bare call at gsd-tools.cjs:784/786 instead of `core.output()`) | Global GSD install bug, not a BRETT issue — worth reporting upstream |
+| docs | REQUIREMENTS.md traceability table/checkboxes had drifted (synced through Phase 4 only); reconciled during this close | Resolved as part of v1.0 archival |
 
 ## Session Continuity
 
-Last session: 2026-09-01T03:40:26.942Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-production-hardening-coaching-layer/07-CONTEXT.md
+Last session: 2026-09-02 (milestone close)
+Stopped at: v1.0 milestone archived; ready for `/gsd-new-milestone`
+Resume file: none — start next milestone fresh
