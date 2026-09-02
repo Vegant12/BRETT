@@ -52,7 +52,7 @@ Plans:
 - [x] 08-02-PLAN.md — freshness envelope takes `(provider, resource)` pairs; two Apple Health resources (wave 1)
 - [x] 08-03-PLAN.md — ingest secret, dedicated rate-limit bucket, body cap, `--memory=1Gi` (wave 1)
 - [x] 08-04-PLAN.md — HAE package core: metric registry, wire quarantine, errors, bearer verifier (wave 2)
-- [ ] 08-05-PLAN.md — normalize: Hevy-source exclusion, unit conversion, whole-payload aggregation (wave 3)
+- [x] 08-05-PLAN.md — normalize: Hevy-source exclusion, unit conversion, whole-payload aggregation (wave 3)
 - [ ] 08-06-PLAN.md — idempotent upsert + independent activity/nutrition freshness bookkeeping (wave 4)
 - [ ] 08-07-PLAN.md — the webhook route, its wiring above the MCP mount, and the criterion-#4 proof (wave 5)
 - [ ] 08-08-PLAN.md — setup doc, secret creation, deploy, and the live device verification checkpoint (wave 6)
