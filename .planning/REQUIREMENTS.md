@@ -12,9 +12,9 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 - [ ] **HEALTH-06**: User's Apple Health activity data (steps, active energy, basal energy, distance, flights climbed) syncs into BRETT via a Health Auto Export webhook receiver — no native iOS app, no Apple Developer Program enrollment
 - [ ] **HEALTH-07**: The webhook receiver authenticates inbound requests via a shared-secret bearer token (or equivalent header-based scheme), rejecting unauthenticated or mis-authenticated payloads
 - [ ] **HEALTH-08**: Sync excludes Apple Health workouts and body-mass records that originate from Hevy's own HealthKit write-back, preventing double-counting of data BRETT already holds at higher fidelity
-- [ ] **HEALTH-09**: Sync is idempotent — reprocessing an overlapping export window does not create duplicate records
+- [x] **HEALTH-09**: Sync is idempotent — reprocessing an overlapping export window does not create duplicate records
 - [ ] **HEALTH-10**: A one-time historical backfill imports the user's existing `export.xml` Apple Health export, applying the same Hevy-exclusion filter as ongoing sync
-- [ ] **HEALTH-11**: Apple Health data freshness (`last_synced_at`) is surfaced through the same freshness/coverage envelope Hevy data already uses (DQ-01/DQ-02)
+- [x] **HEALTH-11**: Apple Health data freshness (`last_synced_at`) is surfaced through the same freshness/coverage envelope Hevy data already uses (DQ-01/DQ-02)
 
 ### Activity Analytics
 
@@ -25,9 +25,9 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 ### Nutrition
 
 - [ ] **NUTR-02**: Nutrition data (calories, protein, carbs, fat, fiber, sugar, sodium) syncs into BRETT via the same Health Auto Export webhook receiver used for activity data — supersedes `NUTR-01`'s original "dedicated provider integration" framing; Apple Health already aggregates data from the user's existing nutrition-logging app, so no separate provider integration is needed
-- [ ] **NUTR-03**: Nutrition sync is idempotent, following the same dedup/idempotency guarantees as activity and body data
+- [x] **NUTR-03**: Nutrition sync is idempotent, following the same dedup/idempotency guarantees as activity and body data
 - [ ] **NUTR-04**: System calculates nutrition trends (daily/weekly average calories and macros) over configurable windows, consistent with existing trend-analytics patterns
-- [ ] **NUTR-05**: Nutrition data freshness is surfaced through the same freshness/coverage envelope (DQ-01/DQ-02)
+- [x] **NUTR-05**: Nutrition data freshness is surfaced through the same freshness/coverage envelope (DQ-01/DQ-02)
 - [ ] **NUTR-06**: A new read-only MCP tool exposes nutrition summary/trend data on demand, following the one-tool-per-analytics-slice pattern already used for volume, frequency, and body-weight trend
 
 *(Scattered single-entry micronutrients — vitamins, minerals with 1-2 lifetime records — aren't a reliable ongoing source and are excluded; scope is calories + the six consistently-logged macros.)*
@@ -100,14 +100,14 @@ Which phases cover which requirements. Populated during roadmap creation.
 | HEALTH-06 | Phase 8 | Pending |
 | HEALTH-07 | Phase 8 | Pending |
 | HEALTH-08 | Phase 8 | Pending |
-| HEALTH-09 | Phase 8 | Pending |
+| HEALTH-09 | Phase 8 | Complete |
 | HEALTH-10 | Phase 9 | Pending |
-| HEALTH-11 | Phase 8 | Pending |
+| HEALTH-11 | Phase 8 | Complete |
 | HEALTH-12 | Phase 13 | Pending |
 | NUTR-02 | Phase 8 | Pending |
-| NUTR-03 | Phase 8 | Pending |
+| NUTR-03 | Phase 8 | Complete |
 | NUTR-04 | Phase 13 | Pending |
-| NUTR-05 | Phase 8 | Pending |
+| NUTR-05 | Phase 8 | Complete |
 | NUTR-06 | Phase 13 | Pending |
 | STR-01 | Phase 10 | Pending |
 | STR-02 | Phase 10 | Pending |
