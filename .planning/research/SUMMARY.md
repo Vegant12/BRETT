@@ -1,183 +1,170 @@
 # Project Research Summary
 
-**Project:** BRETT — personal fitness analytics backend + remote MCP coaching layer
-**Domain:** External-API sync (Hevy) → normalized PostgreSQL → deterministic analytics → read-only remote MCP server consumed by Claude
-**Researched:** 2026-08-23
+**Project:** BRETT v2.0 — Apple Health Ingestion, Strength Tracking & Coaching Programs
+**Domain:** Personal fitness / body-recomposition data platform — extending a shipped, production-live FastAPI + PostgreSQL + MCP backend
+**Researched:** 2026-09-02
 **Confidence:** HIGH
 
 ## Executive Summary
 
-BRETT is a solo-developer, single-user backend that syncs Hevy workout data into PostgreSQL, computes deterministic fitness analytics (volume, progression, plateaus, PRs, recomposition status), and exposes them to Claude through a remote MCP server. All four researchers converge on the same architecture: one FastAPI ASGI application per Render Web Service, with the MCP server mounted as a Starlette sub-app at `/mcp`, backed by a strict layering discipline — `integrations/hevy/` (anti-corruption boundary) → `db/repositories/` → `analytics/` (pure functions, zero I/O) → `services/` (the only layer both adapters call) → `api/routes/` and `mcp/tools/` (thin translators). This is the standard shape for "external API → normalized store → analytics → LLM surface" systems, and the blueprint's existing rules (analytics outside MCP handlers, MCP calls internal functions not HTTP, provider isolation) are validated as correct, not aspirational.
+BRETT v2.0 adds five capabilities to a working v1.0 backend: Apple Health ingestion (via Health Auto Export webhook + a one-time `export.xml` backfill), a shift to max-weight-lifted as the primary strength-progression signal, weekly/monthly report tools, manual body-measurement entry, and training-programs-as-data behind BRETT's first MCP write tool. All research was grounded not just in vendor docs but in the user's actual 191 MB Apple Health export (438,649 records, 2022-03→2026-08) and in direct reads of BRETT's committed source and test suite — this is unusually high-confidence research for a greenfield-feeling milestone.
 
-The recommended approach is table-stakes-first: sync workouts/sets/exercise templates, classify hard sets, build the canonical muscle mapping (with a delt-head split Hevy's own taxonomy cannot provide), compute weekly and per-muscle volume with fractional (direct/indirect) counting, then layer progression, plateau, PR, and recomposition analytics on top — culminating in one high-leverage composed tool, `fitness_get_training_summary`. Every analytic must carry uncertainty, freshness, and methodology metadata; the data layer's job is to hand Claude verdicts with evidence, never raw rows for it to sum. Feature research independently confirms the blueprint's table-stakes list matches what Hevy Pro, Strong, Boostcamp, and RP Hypertrophy all converge on — the actual differentiator is not more analytics but returning a *verdict* ("improving/stable/declining", "plateaued") instead of a chart, which none of the four competitor products do.
+Two findings should reshape scope before any roadmap is written. First, the user has **no Apple Watch**: zero heart-rate, HRV, VO2max, or exercise-ring samples exist across 4.5 years, and sleep data is undifferentiated `InBed`-only and stopped on 2024-11-30. "Recovery trends" (an Active requirement in PROJECT.md) has no data source and must be re-scoped to activity only (steps, active/basal energy, distance, flights) or explicitly deferred pending hardware. Second, **218 of 221 Apple Health workouts, and most Apple Health body-weight records, are Hevy data re-exported through Apple's Health app** — ingesting them as a separate signal would double-count training volume BRETT already owns at higher fidelity. Apple Health's real contribution is activity data Hevy cannot supply, not a second copy of what it can.
 
-The single largest risk, identified independently and with high confidence by all four researchers, is that **PROJECT.md's "MCP auth = bearer token" Key Decision is not directly implementable through Claude's custom-connector UI** — that UI only exposes OAuth Client ID/Secret; the `static_headers` beta is org-admin-shaped and a GitHub feature request for bearer support was closed as "not planned." A second cluster of risk comes from the Hevy API itself diverging from the blueprint's assumed schema (pageSize max 10, no `rir` field, no stable child-object IDs, newest-to-oldest event ordering, an existing `/v1/body_measurements` endpoint) and from the MCP Python SDK's very recent (26-day-old) breaking rework from `FastMCP` to `MCPServer` under a new stateless spec revision. All three are mitigated the same way: resolve them early and cheaply, before deep work is built on top of unverified assumptions — specifically via a small deploy+connector spike inserted right after Phase 1, and by treating the real (not assumed) Hevy schema as ground truth from Phase 2 onward.
+The recommended approach requires **zero new runtime dependencies** — every capability is carried by packages already in `pyproject.toml` plus stdlib (`xml.etree.ElementTree.iterparse`, `secrets.compare_digest`, `decimal.Decimal`). The real risk is not the stack; it is three things the research converged on independently: (1) Health Auto Export's payload can reach "several hundred megabytes" against Cloud Run's 32 MiB request cap and BRETT's 512 MiB instance — this forces a deploy change (`--memory=1Gi`) and a body-size guard, not a library; (2) the confirm-gated write tool is BRETT's first-ever mutation path in an MCP server whose entire security model has been "nothing can write" — a naive `confirm: bool` parameter is trivially bypassable by the model itself, and the fix (a server-issued, single-use, target-bound confirmation token) is the milestone's single highest-severity design decision; (3) the max-weight strength-signal switch changes three interlocking, live-data-calibrated constants (`TREND_STABLE_BAND_PERCENT_PER_WEEK`, `PLATEAU_IMPROVEMENT_TOLERANCE`, `RECOMP_PROGRESSION_NET_BAND`) whose values are tuned to e1RM's continuous distribution and will misbehave, silently and plausibly, against max weight's discrete plate-increment distribution unless re-derived and re-validated against live data.
 
 ## Key Findings
 
 ### Recommended Stack
 
-The blueprint's stack (Python/FastAPI/PostgreSQL/SQLAlchemy/Alembic/Pydantic/MCP SDK/pytest/Ruff) holds up, with three corrections verified by live install and primary sources: pin `mcp==2.0.0` (not the v1/`FastMCP` shape most tutorials and training data assume), standardize on `httpx2` (Pydantic's maintained successor to `httpx`, and already a transitive dependency of `mcp` 2.x — mixing in `httpx` adds a redundant, incompatible-with-test-tooling second client), and use `uv` + `pyproject.toml`/`uv.lock` instead of `requirements.txt` for reproducible Render deploys.
+No new third-party runtime dependencies. FastAPI, Pydantic, SQLAlchemy, `mcp==2.0.0`, and stdlib (`xml.etree.ElementTree`, `secrets`, `decimal.Decimal`, `zoneinfo`) already carry all five capabilities. The one infrastructure change required is raising Cloud Run memory from 512Mi to 1Gi (measured: baseline RSS 101 MB, +10 MB JSON body + Pydantic validation peaks near 235 MB — two concurrent ingest POSTs at default concurrency=80 is an OOM waiting to happen at 512Mi) plus a new `HEALTH_WEBHOOK_SECRET` in Secret Manager, added the same way `MCP_AUTH_SECRET` was.
 
-**Core technologies:**
-- Python 3.13 (pin via `.python-version`) — widest wheel coverage; Render's 3.14 default is less-trodden ground for `mcp` 2.x
-- FastAPI 0.141.1 + Starlette 1.6.0 — HTTP layer; a Starlette app, so MCP mounts directly into it
-- `mcp==2.0.0` (official SDK) — targets the current 2026-07-28 stateless spec; `MCPServer.streamable_http_app()` returns a Starlette sub-app
-- PostgreSQL (Render **paid** managed instance) — source of truth; window functions/`date_trunc` cover all analytics needs, no separate analytics store
-- SQLAlchemy 2.0.52 (`Mapped[]`/`DeclarativeBase`) + asyncpg 0.31.0 (or sync SQLAlchemy — see Architecture) + Alembic 1.19.1
-- Pydantic 2.13.4 + pydantic-settings 2.15.0 — validation and typed config; MCP v2 auto-derives `output_schema` from a returned `BaseModel`
-- httpx2 2.12.0 — Hevy API client; tenacity 9.1.4 for retry/backoff (not optional — Hevy pageSize caps at 10)
-- uv, Ruff, mypy, pytest+pytest-asyncio, `pytest-httpx2` (not `respx`/`pytest-httpx` — incompatible with httpx2), `testcontainers[postgres]` (SQLite will silently diverge on `date_trunc`/window functions/timezone arithmetic)
+**Core technologies (all already installed):**
+- **FastAPI 0.141.1 + Pydantic 2.13.4** — webhook receiver and manual-entry routes. Health Auto Export dates are `"yyyy-MM-dd HH:mm:ss Z"`, NOT ISO 8601 — Pydantic's `datetime` field type rejects this outright (measured); type HAE date fields as `str` with a `BeforeValidator` trying an ordered `strptime` format list (24-hour and 12-hour, including the U+202F narrow-no-break-space variant newer iOS inserts before AM/PM).
+- **`xml.etree.ElementTree.iterparse`** (stdlib) — the one-time `export.xml` backfill. Measured on the real 191 MB file: 2.5s, 52 MB peak RSS, 437,239 records. `ElementTree.parse()` (whole-DOM) would OOM a 512Mi instance immediately.
+- **`mcp==2.0.0` `ToolAnnotations`** — the entire per-tool write surface; there is no scope-per-tool mechanism. Spec defaults are hostile (`destructive_hint=True`, `idempotent_hint=False`, `open_world_hint=True`) and must be overridden explicitly for the new write tool.
+- **`secrets.compare_digest` on bytes** (stdlib) — the verification scheme for the webhook, since Health Auto Export offers arbitrary custom headers but no HMAC signing, no OAuth, no shared-secret mechanism of its own. Precedent already exists at `app/mcp/auth.py:49`.
+
+**Explicitly rejected:** `orjson`/`lxml` (CPU is not the bottleneck, memory is), `svix`/`standardwebhooks` (no signature exists to verify), `APScheduler`/Celery/Cloud Tasks (Claude's own scheduled-tasks feature drives report delivery; there is no server-side schedule to run), `pandas`/`numpy` (banned in v1, and a further memory risk on a tight instance), and — critically — the MCP SDK's built-in `Elicit`/`Resolve` confirmation mechanism, which is architecturally unavailable under BRETT's `stateless_http=True` configuration (`NoBackChannelError`) and unverified on Claude's connector besides.
 
 ### Expected Features
 
-**Must have (table stakes, v1):**
-- Hevy workout/set/exercise-template sync with hard-set classification (`normal`+`failure` count, `warmup` excluded)
-- Exercise normalization with a canonical muscle map and delt-head split (front/side/rear) — Hevy's single `shoulders` bucket cannot answer the flagship "side delts" question on its own
-- Fractional set counting (direct 1.0 / indirect 0.5, configurable, evidence-backed per Pelland et al. 2025)
-- Local-timezone (Asia/Jakarta, configurable) week bucketing
-- Weekly volume, per-muscle volume (direct/indirect), exercise progression with modality-gated e1RM, PR detection, progressive-overload classification, plateau detection, training frequency
-- Body-weight trend and recomposition status — **now automatable in v1** via Hevy's `GET /v1/body_measurements` (no HealthKit dependency required, contrary to PROJECT.md's current assumption)
-- Period comparison (normalized per-week), data freshness/coverage envelope on every response, `fitness_get_training_summary` composed tool
-- Read-only MCP tools, `readOnlyHint: true`, bearer/OAuth auth, rate limiting
+**Must have (table stakes):**
+- HAE webhook receiver with shared-secret header auth, idempotent upsert on natural keys, and a multi-shape metric parser (four distinct point shapes in one payload array)
+- Metric allowlist limited to ~6 signals (`step_count`, `active_energy`, `walking_running_distance`, `flights_climbed`, `weight_body_mass`, `sleep_analysis` as `inBed` only) — not "ingest everything," which the vendor's own docs warn kills the automation
+- `export.xml` backfill with an explicit `sourceName="Hevy"` exclusion filter — without it, the historical import silently double-counts sessions BRETT already owns
+- Max-weight-primary progression with e1RM retained as a labelled secondary field (PROJECT.md requires retention, not removal)
+- `training_programs` as real rows with an append-only active-program history, program-aware recomposition thresholds, and the confirm-gated write tool
+- Manual body-measurement write path plus a fix to a latent `_dedupe_by_day` bug that manual entry activates
+- One `fitness_get_weekly_report` / `fitness_get_monthly_report` composer (two windows, not two tools) over analytics that already exist
 
-**Should have (differentiators, v1.x — add after v1 validated):**
-- Volume landmark bands (MEV/MAV/MRV, user-configurable, honestly labeled as heuristics)
-- Muscle balance ratios (push:pull, quad:hamstring, delt-head share)
-- RPE-derived stimulus-quality metrics with explicit `rpe_coverage_pct`
-- Exercise substitution/equivalence grouping (prevents false plateaus from variant swaps)
-- "What to progress next" ranked candidates, routine adherence, session density trends
+**Should have (differentiators):**
+- Activity load (steps, active energy) as recomposition *context*, never a classifier input
+- Dual-signal disagreement surfaced explicitly (max weight flat, e1RM improving = rep progression) rather than resolved
+- Waist-vs-weight divergence as a recomposition signal — gated on the user actually logging enough waist data
 
-**Defer (Milestone 2 — HealthKit/nutrition):**
-- Activity/recovery/sleep analytics, Apple Health workouts, nutrition auto-import, composite readiness scores, full multi-input recomposition analytics
-
-**Anti-features (explicitly avoid):** gamification, push notifications, social/sharing, write/mutation MCP tools, generic "run a query" tools, backend-generated coaching prose, composite readiness scores without sleep/HRV data, ACWR/training-monotony metrics, live Hevy fetch on MCP request, charts/images from MCP, and a tool-per-question explosion (target 6–13 well-parameterized tools, not 40+).
+**Explicit anti-features (cut, not deferred):**
+- Ingesting Apple Health `workouts` into training analytics (97% Hevy duplicates)
+- Sleep-stage/HRV/resting-HR "recovery score" analytics (zero records exist; no Apple Watch)
+- A second MCP write tool, or a general MCP write API (PROJECT.md caps v2.0 at exactly one)
+- Backend-generated coaching prose or a backend cron pushing reports (Claude writes narrative; Claude's scheduled-tasks feature drives cadence)
+- Auto-deriving body fat % from circumferences, progress photos, nutrition of any kind
 
 ### Architecture Approach
 
-One deployable service: a FastAPI app with the MCP server mounted as an ASGI sub-app at `/mcp`, sharing one Render Web Service, one Postgres instance, one connection pool, and one settings/logging setup. The two adapters (`api/routes/` and `mcp/tools/`) are both thin ~5-line translators over a shared `services/` layer, which is the only thing that touches both `db/repositories/` (I/O) and `analytics/` (pure, deterministic, zero-I/O functions). MCP 2.0's removal of protocol-level sessions makes this stateless-HTTP topology safe to run as a single instance with no sticky-session concerns.
+Four of five capabilities fit the existing architecture without bending it: Apple Health ingestion is a new `integrations/health_auto_export/` package mirroring `integrations/hevy/`'s provider-isolation shape (just inbound instead of outbound); reports are a response-shaping layer over analytics functions that already compose (`fitness_get_training_summary` is the proof); manual measurement entry writes into a table (`body_measurements`) whose `source='manual'` column was built in v1.0 and is currently dead code. The confirm-gated write tool does **not** fit without deliberate, named changes: BRETT's read-only guarantee is enforced by a PostgreSQL `READ ONLY` transaction and three static source-scanning tests, all of which must be narrowed (never deleted) to allow exactly one write module.
 
 **Major components:**
-1. `integrations/hevy/` (client, schemas, mapper, sync) — hard anti-corruption boundary; nothing outside imports Hevy's payload shapes directly
-2. `db/repositories/` + `analytics/` — the only place SQL lives, and pure computation with zero DB/clock/HTTP access respectively
-3. `services/` — composes repository reads + analytics into response DTOs; the single source of truth both adapters call
-4. `mcp/tools/` and `api/routes/` — thin, schema-only translators; if a tool handler is >8 lines, logic has leaked
-5. `domain/` — provider-agnostic vocabulary (canonical muscle taxonomy finer than Hevy's, `SetType`/`ProgressionStatus` enums, volume-weighting config)
+1. `api/routes/health_ingest.py` (NEW) — terminates the webhook; must be registered **above** the catch-all `app.mount("/", mcp_app)` in `main.py`, or every request silently 404s through the MCP sub-app
+2. `integrations/health_auto_export/` (NEW) — schemas, normalizer, ingest/upsert, auth; shared by both the live webhook and the one-shot backfill CLI so the two never disagree about shape
+3. `db/models/health.py` (NEW) — `health_daily_metrics` (day-grained, not sample-grained — 438k raw samples is 44% zero-value walking-gait noise) and `health_workouts` (stored but quarantined from all training analytics)
+4. `db/models/program.py` (NEW) — `training_programs` + append-only `user_program_history` with a partial unique index enforcing at most one active row; a mutable single column was rejected because it retroactively re-classifies 12 weeks of past recomposition verdicts on every switch
+5. `mcp/tools/programs.py` (NEW) — the **only** module in `app/mcp/` permitted to write, registered outside the shared `READ_ONLY` annotation loop with its own explicit annotation object
 
 ### Critical Pitfalls
 
-1. **MCP auth around a bearer token Claude's connector UI cannot send** — decide the auth strategy in the Phase-1.5 spike (recommended: minimal OAuth 2.1 resource-server shim using the SDK's `TokenVerifier`/`AuthSettings`, or accept desktop/Claude-Code-only for longer if that's acceptable).
-2. **Idempotency assumed at the workout level is insufficient** — Hevy's child objects (exercises, sets) have no stable IDs; sync must delete-and-reinsert children inside one transaction per workout, keyed on `(user_id, provider, external_id)` at the parent only.
-3. **Sync built on an assumed page size** — Hevy caps `pageSize` at 10 (not 50–100); scheduled syncs must use the events endpoint only, never a scheduled full re-sync.
-4. **Cursor advanced against a newest-first, paginated events feed** — drain all pages before applying anything, apply oldest-first, commit the cursor once (set to `run_start_time`, not the newest event seen), with an overlap window.
-5. **Volume math (`SUM(weight_kg * reps)`) ignoring set type and the 8 exercise types** — warmups inflate every number, bodyweight exercises silently evaluate to zero/NULL, and 5 of 8 Hevy exercise types don't fit weight×reps at all. Compute `hard_sets` (works for all types) as the primary metric and gate `tonnage_kg` to applicable types.
+1. **Route registration order** — a webhook router added below `app.mount("/", mcp_app)` (a catch-all, registered last on purpose) is dead code that imports fine and passes unit tests, but every real request 404s through the MCP sub-app. Register above the mount; test on FastAPI-shaped response bodies, not just "not 404."
+2. **`confirm: bool` is not a confirmation gate** — the single highest-severity pitfall in the milestone. If `confirm` is a plain boolean tool parameter, the model can set it `true` on the first call; there is no protocol rule forcing a warn-then-confirm sequence, and `ctx.elicit()` is unavailable under BRETT's stateless transport besides. Fix: the warn call returns a server-issued, single-use, short-TTL, target-bound confirmation token; the switch call takes `confirmation_token: str`, not a boolean.
+3. **Adding one write tool disarms the guards protecting the other thirteen** — the smallest way to add a write tool (relax `read_only_session`, delete `test_mcp_never_writes`, add the tool to the shared `READ_ONLY` annotation loop) silently un-protects every read tool or makes the annotation an active lie to the client. Narrow every guard to a named single-module allowlist; never delete.
+4. **Non-idempotent ingest against a webhook with no retry** — Health Auto Export's default sync window re-sends the full previous day on every run with no sender-side dedup, and a rejected delivery is permanently lost data (no retry mechanism exists). Upsert on measurement identity `(user_id, source, metric, measured_at)`, never on the `session-id` header (unique per-request, not per-datapoint).
+5. **Payload size vs. a 512 MiB instance and a 32 MiB Cloud Run request cap** — HAE warns payloads can reach "several hundred megabytes"; a 10 MB JSON body already peaks near 235 MB of RSS through parse + Pydantic validation. Requires both a deploy-time memory increase and a body-size-cap ASGI middleware that rejects oversized requests before parsing.
 
 ## Implications for Roadmap
 
-Based on combined research, suggested phase structure:
+Based on combined research, five phases plus two schedule-flexible "floaters":
 
-### Phase 1: Backend Foundation
-**Rationale:** Everything downstream depends on config, DB, and the timezone helper being correct from the start; timezone bugs written once and copy-pasted are the hardest class of bug to catch later (PITFALLS #16).
-**Delivers:** FastAPI app skeleton, PostgreSQL (paid tier — free Postgres expires in 30 days), Alembic migrations, users table with configurable timezone, structured logging with a secret-redaction filter, `/healthz`, `core/time.py` local-day/week helper.
-**Addresses:** Local-tz week bucketing (table stakes), data-integrity constraints.
-**Avoids:** Pitfall 16 (timezone/week-boundary bugs), Pitfall 18 (expiring free Postgres), Pitfall 17 (log leakage — set up redaction now, not retrofitted).
+### Phase 1: Apple Health Ingest Foundation
+**Rationale:** Longest external lead time (the phone must be configured and data must accumulate while later phases run) and it defines the canonical metric shape every downstream phase reads. Also the phase where Pitfalls 1–5, 7, and 8 (route ordering, rate-limit collision, unauthenticated route, non-idempotent ingest, payload size, freshness-provider default, `VARCHAR(16)` truncation) must all be closed.
+**Delivers:** `health_daily_metrics` + `health_workouts` schema and migration; `integrations/health_auto_export/` (schemas, normalizer, ingest, auth); the FastAPI webhook route registered correctly; `sync_state` extended for `provider='apple_health'`; a dedicated rate-limit bucket for the ingest path; the `--memory=1Gi` deploy change and new secret.
+**Addresses:** Table-stakes Apple Health ingestion features from FEATURES.md.
+**Avoids:** Pitfalls 1–5, 7 (partially — freshness fix completes in Phase 5), 8.
 
-### Phase 1.5: Deploy + Connector Auth Spike (NEW — inserted per unanimous researcher recommendation)
-**Rationale:** The single highest-uncertainty item in the entire project is whether a personal Claude account can authenticate to a custom remote MCP connector with a bearer token. `static_headers` is beta and org-admin-shaped; the GitHub request for bearer support in the connector UI was closed "not planned." Finding this out now costs ~2 hours; finding it out in a "Phase 5" deployment push invalidates a Key Decision after everything else is built.
-**Delivers:** A throwaway "hello world" MCP tool, deployed to Render, mounted correctly (lifespan wired, `TransportSecuritySettings.allowed_hosts` set), first verified via Claude Code's `--header` bearer support (de-risking the Hevy→Postgres→analytics→MCP loop against the real transport before touching connector auth), then attempted as an actual Claude Desktop/Web/Mobile custom connector add. Resolves whether `static_headers` beta access is obtainable, or whether a minimal OAuth 2.1 resource-server shim (SDK's `TokenVerifier` + `AuthSettings`) must be built.
-**Addresses:** PROJECT.md's "MCP auth = bearer token, not OAuth" Key Decision — validates or explicitly invalidates it before Phase 4/5 are built around the assumption.
-**Avoids:** Pitfall 1 (auth mechanism unusable from the connector), Pitfall 10 (MCP SDK v1→v2 breaking rework — surfaces immediately if you build against stale training data), Pitfall 11 (mounted-lifespan and transport-security defaults that fail silently in production).
+### Phase 2: Historical Backfill
+**Rationale:** Deliberately separate from Phase 1 so the live webhook is proven before a 438k-element import runs; also the cheapest correctness test the normalizer will get (4.5 years of real data through the same code path).
+**Delivers:** `backfill-apple-health` CLI using streaming `iterparse`, filtered to ~6 useful metric types, running through the **same** normalizer and upsert path as the webhook, with a hard `sourceName="Hevy"` exclusion filter.
+**Addresses:** The one-time backfill table-stakes row from FEATURES.md.
+**Avoids:** Pitfall 6 (`export.xml` OOM) and the Hevy-duplication anti-feature.
 
-### Phase 2: Hevy Integration
-**Rationale:** The whole system is downstream of sync; exercise-template sync and the canonical muscle map are hard prerequisites for Phase 3's analytics, not a nice-to-have — moved up from the blueprint's implied Phase 3 placement per architecture research.
-**Delivers:** `integrations/hevy/` client (auth via `api-key` header, not `Authorization: Bearer`; pagination at the real max of 10; retry/backoff), Pydantic schemas matching the *live* Hevy OpenAPI spec (no `rir`, no `weight_unit`, no stable child IDs), mapper, idempotent cursor-based incremental sync with soft deletes, `exercise_templates` sync feeding a `muscle_map_overrides` table (delt-head split), and — reconsidering PROJECT.md's manual-entry-only assumption — Hevy `body_measurements` sync as a low-cost addition that unlocks automatic weight trend and recomposition status in v1.
-**Uses:** httpx2, tenacity, the real Hevy schema (see Research Flags below).
-**Implements:** the anti-corruption-layer pattern; cursor + event-replay idempotent sync pattern.
-**Avoids:** Pitfalls 2–9 (idempotency, page-size assumptions, cursor ordering, hard-delete data loss, schema mismatches, name-based exercise matching, two sources of truth for body weight).
+### Phase 3: Max-Weight Strength Signal (movable — may run first)
+**Rationale:** No new I/O, no schema dependency — the data plumbing (`best_set_per_day` already computes `best_weight_kg`) is trivial; the risk is entirely in threshold re-derivation. Because it touches no external system, this phase could legitimately run *before* Phase 1 if Apple Health configuration stalls externally. It must land before reports (Phase 5), since it changes what the report and summary tools return.
+**Delivers:** Max-weight-primary trend and plateau detection with e1RM retained as a labelled secondary field; re-derived (not merely renamed) `TREND_STABLE_BAND_PERCENT_PER_WEEK` and `PLATEAU_IMPROVEMENT_TOLERANCE` validated against live data, preserving their existing derived relationship; `recomposition.py` re-validated against the new verdict distribution.
+**Addresses:** Capability #2 from FEATURES.md — max-weight as primary strength signal, with dual-signal disagreement surfaced rather than hidden.
+**Avoids:** Pitfalls 10, 11, 12 (rep progression flattened, ungated max weight destroying the "we could not tell" honesty path, mis-calibrated constants).
 
-### Phase 3: Analytics
-**Rationale:** Pure, deterministic functions over rows the sync layer has already normalized; cannot start until Phase 2's effective muscle map exists.
-**Delivers:** `analytics/` modules — volume (hard-set-based, not naive `SUM(weight*reps)`), muscle_volume (direct/indirect split), progression (modality- and rep-range-gated e1RM), plateau, prs, frequency, trends, recomposition — each independently unit-tested against golden fixtures covering all 8 Hevy exercise types, warmups, dropsets, and supersets.
-**Addresses:** Progressive-overload classification, plateau detection, PR detection, recomposition status (the project's namesake synthesis — built last, degrades cleanly to `insufficient_data`).
-**Avoids:** Pitfall 8 (volume math ignoring set/exercise type) — the single most consequential correctness bug in the project.
+### Phase 4: Training Programs (the write-tool phase)
+**Rationale:** Must precede Phase 5 if reports are to be program-aware. Groups all write-path risk into one security-shaped phase rather than scattering it. This phase's success criteria should read like a threat model, not a feature list.
+**Delivers:** `training_programs` + append-only `user_program_history` schema; program-aware `recomposition.py` thresholds (injected as parameters, keeping the classifier pure); `fitness_get_active_program` read tool; the confirm-gated `fitness_set_active_program` write tool with a server-issued single-use confirmation token; the three static MCP guards narrowed to a named single-module allowlist.
+**Addresses:** Capability #5 from FEATURES.md — training programs as data, the milestone's only write path.
+**Avoids:** Pitfalls 13, 14, 15, 16 (bypassable confirm, disarmed guards, `safe_tool` masking write outcomes, mutable-column history loss) — this cluster is the highest-severity set in the whole milestone.
 
-### Phase 4: MCP Tools
-**Rationale:** Composition over `services/`, not new computation; can be built and tested in-memory via the SDK's `Client` once analytics exist.
-**Delivers:** 6–13 purpose-built, read-only, budgeted MCP tools (not the blueprint's full 15 at once), each carrying a shared `DataFreshness` envelope, uncertainty fields, and hard response-size caps; `fitness_get_training_summary` as the highest-leverage composed tool.
-**Uses:** MCP SDK v2's structured-output derivation from Pydantic return types; `ToolAnnotations(read_only_hint=True)`.
-**Implements:** the dual-adapter-over-shared-service-core pattern; typed/budgeted MCP responses pattern.
-**Avoids:** Pitfall 13 (unbounded/raw-data tool responses blowing the context window), Pitfall 14 (silent staleness — freshness must be unconditional, not an opt-in tool), Pitfall 15 (never trigger sync from a tool call).
+### Phase 5: Health Analytics + Reports + Coaching Style
+**Rationale:** Composes everything above (health data, settled strength verdict, programs) — sequenced last by construction. The report-tools spike (verifying Claude's scheduled-tasks feature can actually invoke an MCP tool autonomously) should run **early within this phase, before the report tools are built**, since a negative result should reshape scope rather than sink the phase at its end.
+**Delivers:** `analytics/health.py` (activity trends, scoped to steps/energy/distance — explicitly not recovery); `analytics/reports.py` closed-period composition; `fitness_get_weekly_report` / `fitness_get_monthly_report`; a tightened `docs/coaching-instructions.md` rewritten once against the final tool registry.
+**Addresses:** Capability #1's activity-analytics slice, Capability #3 (reports) from FEATURES.md.
+**Avoids:** Pitfalls 17, 18, 19 (scheduled-task connector unreliability, report fan-out blowing the context/latency budget, coaching-doc character ceiling).
 
-### Phase 5: Production Hardening
-**Rationale:** By this point Phase 1.5 has already resolved the auth question, so this phase is "make deployment production-grade," not "make deployment work" — a much better risk profile than the blueprint's original ordering.
-**Delivers:** Finalized auth (OAuth shim or `static_headers`, per the Phase 1.5 finding), `TransportSecuritySettings.allowed_hosts` for the real Render hostname, rate limiting applied before auth, verified backup/restore drill, secret-rotation rehearsal, cold-start verification from a phone on cellular, alerting on consecutive sync failures.
-**Addresses:** Deployment requirement, security constraints (§32/§33).
-**Avoids:** Pitfall 12 (cold starts + proxy buffering breaking the connector experience), Pitfall 17 (data minimization/text neutralization), Pitfall 18 (unbacked-up source of truth).
+**Floaters (schedule where cheapest, no hard dependency):**
+- Manual body-measurement entry + bulk CSV import (CLI-based, per architecture research) — natural fit with Phase 4's data-model thinking or Phase 1's CLI work. **Must ship the `_dedupe_by_day` fix in the same phase**, not after — Pitfall 9 notes this bug is dormant today and is activated the moment a manual row exists, and Apple Health (Phase 1) is the third source that also triggers it via alphabetical-precedence collision. If body measurements land after Phase 1, pull the precedence-map fix forward into Phase 1.
+- Circumference/composition trend analytics beyond weight — independent of the health tables; data is thin (`fat_percent`/`lean_mass_kg` are 0 of 123 live rows), so per-metric coverage floors are required or most windows will honestly return `insufficient_data`.
 
 ### Phase Ordering Rationale
 
-- The Phase 1.5 spike exists because auth is the one unknown that can invalidate a stated Key Decision after the rest of the project is built — resolving it in week 1 costs a day; discovering it in a final deployment push costs a rewrite of the auth layer under time pressure.
-- Exercise-template sync and the muscle-map override table move from an implied Phase 3 concern to a Phase 2 deliverable because per-muscle analytics (the flagship "undertrained muscles" question) structurally cannot start without them.
-- Hevy body-measurement sync is reconsidered from "manual entry only" to "sync it in Phase 2" because it is nearly free given the client already exists, and it unlocks weight-trend/recomposition-status features in v1 without waiting for HealthKit.
-- Analytics (Phase 3) must follow Hevy integration (Phase 2) completely, including the effective muscle map, because per-muscle volume, progression, and plateau detection all depend on it.
-- MCP tools (Phase 4) are composition, not computation, and should be built last among the "real work" phases so `fitness_get_training_summary` can depend on everything else already existing.
+- Reports depend on everything else, so they sequence last — building them earlier guarantees a rewrite once the strength metric or program thresholds change underneath them.
+- Max-weight and programs both terminate in `recomposition.py`'s verdict; landing both in one phase would produce a verdict change with two simultaneous causes and no clean regression baseline. They are deliberately separate phases (3 and 4).
+- The Hevy-exclusion filter blocks the *backfill* (Phase 2), not the webhook (Phase 1) — going-forward deliveries can simply omit the `workouts` array from the HAE automation's data-type selection, but the historical file has no such switch.
+- Pitfall 9 (the `_dedupe_by_day` bug) forces a cross-phase ordering constraint independent of the "natural" phase grouping: whichever of Phase 1 (Apple Health) or the manual-measurement floater ships first, the source-precedence fix must land with it.
 
 ### Research Flags
 
 Phases likely needing deeper research during planning:
-- **Phase 1.5 (spike):** direct — this phase's entire purpose is resolving an open question (`static_headers` beta availability for a personal account) that only Anthropic can answer definitively; treat the spike itself as the research.
-- **Phase 2 (Hevy integration):** the real Hevy schema differs materially from the blueprint's assumed schema (see below) — use `.planning/research/PITFALLS.md` Pitfalls 2–9 and `ARCHITECTURE.md`'s data-flow section as primary references rather than re-deriving from the blueprint.
-- **Phase 4 (MCP tools):** the MCP Python SDK had a breaking rework 26 days before this research (`FastMCP`→`MCPServer`, spec revision 2026-07-28); re-read the SDK docs at phase start rather than trusting any cached mental model, including this summary's.
+- **Phase 3 (max-weight strength signal):** the re-derived dead-band values have no correct answer on paper — they require live-data calibration against this user's actual plate-increment distribution, the same way the original e1RM thresholds were calibrated. Treat as its own research/validation sub-task before implementation.
+- **Phase 4 (training programs / write tool):** confirmation-token design (issuance, storage, TTL, single-use consumption), scope strategy (`required_scopes` vs. tool-body scope checks against WorkOS AuthKit claims), and the per-mode vs. program-independent label-matrix decision all need to be resolved as explicit design decisions in the phase context, not defaulted.
+- **Phase 5 (reports):** the scheduled-tasks reliability question is outside this repo's control (two GitHub issues closed "not planned" describe MCP tools never being injected into autonomous scheduled sessions) — spike it before committing to the phase's scope, and design the report tools to be fully valuable on-demand regardless of the spike's outcome.
 
-Phases with standard patterns (skip deep research-phase):
-- **Phase 1 (backend foundation):** well-documented FastAPI/SQLAlchemy/Alembic patterns; no domain-specific unknowns.
-- **Phase 3 (analytics):** the math and thresholds are documented in FEATURES.md and PITFALLS.md with peer-reviewed backing (Pelland et al. 2025); implementation is standard Python/SQL, no new research needed once the definitions are fixed in `docs/analytics-definitions.md`.
-- **Phase 5 (hardening):** the specific gotchas (transport security, cold starts, backups) are already fully enumerated in PITFALLS.md with concrete remediations.
-
-**Explicit note for Phase 2 and Phase 3 planning:** build against the real Hevy schema, not the blueprint's assumed one. Concretely: no `rir` field exists (derive `rir ≈ 10 − rpe` or treat as unavailable); no `weight_unit` field exists (Hevy always returns `weight_kg`); `pageSize` maxes at 10 for workouts/events/body_measurements (100 for exercise_templates); `/v1/exercise_templates` already provides `primary_muscle_group`/`secondary_muscle_groups` — do not hand-build a name-matching table; `/v1/body_measurements` exists and can supply v1 weight-trend/recomposition data without HealthKit; the events endpoint returns results newest-to-oldest and is the only source of deletion signals, requiring careful drain-then-apply-oldest-first handling to avoid permanent, silent data loss.
+Phases with standard, well-documented patterns (research-phase likely unnecessary):
+- **Phase 1 (Apple Health ingest):** mostly *verification* work against facts already established in this research — the wire contract, idempotency pattern, and body-size mitigation are all specified with HIGH confidence.
+- **Phase 2 (backfill):** a known streaming-XML pattern (`iterparse` + `elem.clear()`) already measured against the real file.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | Core versions verified by a live clean-venv install with zero dependency conflicts; MCP SDK behavior verified against installed source, not memory. Render-specific pricing/spin-down figures are MEDIUM (third-party guides, not Render's own pricing page). |
-| Features | HIGH for Hevy API surface (live OpenAPI spec parsed same day) and volume methodology (peer-reviewed meta-regression); MEDIUM for competitor feature comparisons (vendor pages/review sites) and MCP token-economics figures (industry write-ups, not a formal spec). |
-| Architecture | HIGH for MCP SDK mounting/lifespan/auth and the Hevy API contract (verified against primary sources); MEDIUM for the sync-vs-async SQLAlchemy recommendation and in-process-scheduler-vs-cron call (defensible engineering judgment, not documented consensus). |
-| Pitfalls | HIGH for Hevy API surface and MCP transport/auth (live spec + official docs + a closed Anthropic GitHub issue as direct evidence); MEDIUM for analytics-semantics conventions and Render operational specifics; a few items explicitly flagged LOW and marked "verify during execution" (e.g., whether Hevy stores dumbbell weight per-dumbbell or combined; actual undocumented rate limits). |
+| Stack | HIGH | Verified by direct venv introspection, source reads of the installed `mcp`/`starlette` packages, and live memory/latency measurement on this project's own code — the strongest evidence class available |
+| Features | HIGH for Apple Health (verified against vendor docs, vendor reference server source, two independent third-party implementations, and the user's own 438,649-record export); MEDIUM-HIGH for capabilities 2–5 (industry convention and published coaching guidelines, which genuinely disagree with each other on bulk/cut rate bands) |
+| Architecture | HIGH for existing BRETT architecture and Apple Health data availability (read from committed source and the user's real export); MEDIUM for the Health Auto Export wire contract (vendor docs are thin in places and version-split) |
+| Pitfalls | HIGH for everything grounded in repo source (read directly, including test-suite assertions); HIGH for Health Auto Export behavior (official docs); MEDIUM-HIGH for the Claude scheduled-task connector failure (two GitHub issues fetched directly, both closed "not planned," with independent server-log corroboration); MEDIUM for the Claude Desktop "Always approve" irreversibility claim (single community source) |
 
-**Overall confidence:** HIGH — all four researchers independently reached the same conclusions on the two load-bearing risks (MCP connector auth, real vs. assumed Hevy schema), each corroborated against live primary sources (Hevy's own OpenAPI spec, Anthropic's connector docs, a closed GitHub issue, and a clean SDK install) rather than training-data assumptions.
+**Overall confidence:** HIGH
 
 ### Gaps to Address
 
-- **Is `static_headers` beta access obtainable for an individual Pro/Max account?** The single highest-leverage open question in the project. Anthropic's docs frame it in organization-admin terms. Resolve directly in the Phase 1.5 spike by requesting access and/or attempting a connector add; if refused, plan a minimal OAuth 2.1 resource-server shim (~1 day of work, SDK provides the primitives) rather than defaulting to desktop-only.
-- **Hevy's real-world rate limits are undocumented.** Must be discovered empirically during the first full sync in Phase 2 and recorded in `integrations/hevy/README.md`; design the client with conservative concurrency (1–2) and full backoff/jitter from day one rather than tuning after a 429 storm.
-- **Whether Hevy stores dumbbell exercise weight per-dumbbell or combined.** Unverified; affects tonnage calculations for a common exercise category. Verify against the user's own Hevy account in Phase 2 and record the finding before analytics ship.
-- **Which MCP protocol revision Claude's connector infrastructure currently negotiates.** The SDK handles multi-era backward compatibility, but empirically confirming this during the Phase 1.5 spike (log the received `MCP-Protocol-Version` header) closes the loop rather than assuming.
-- **mypy 2.x against SQLAlchemy 2.0.52's `Mapped[]` typing** — a very recent mypy major version; if friction appears, scope `--strict` to `app/analytics/` only rather than fighting it project-wide.
+- **`weight_body_mass` vs. `weight_&_body_mass` metric-name spelling is not settled by documentation** — three sources say the former, the vendor's own prose says the latter. Resolvable in five minutes with one real Manual Export from the phone before writing the normalizer; do this at the start of Phase 1.
+- **Health Auto Export's retry/delivery semantics are undocumented** — assume at-least-once with overlapping windows (the *Previous 7 Days* window recommendation exists precisely so this doesn't need answering), but a single observed production run may allow a cheaper design later.
+- **Whether Claude's custom connector implements the `elicitation` client capability is unverified** — irrelevant to the recommended design (two-call token confirm), but worth re-checking if elicitation is ever considered as a UX enhancement layered on top.
+- **The max-weight dead-band has no empirical basis yet** — flagged above as a Phase 3 research flag; cannot be resolved on paper.
+- **Whether HAE reuses one `session-id` across a batched export's requests, or mints one per request, is unknown** — determines whether it can serve as a batch-level correlation key (it must never serve as a dedup key regardless).
+- **Where the manual-measurement write path lives** — CLI is recommended (lowest cost, no new auth surface) over an authenticated FastAPI route; confirm this during Phase 4/floater planning rather than defaulting silently.
+- **Closed-period report anchoring (option a vs. b)** — recommend carrying the anchored-on-today recomposition verdict alongside closed-period volume/frequency/PRs rather than adding an `anchor_day` parameter to functions whose docstrings currently argue against one; decide explicitly in the Phase 5 context.
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- Live OpenAPI spec, `https://api.hevyapp.com/docs/` (parsed 2026-08-23) — endpoint list, pagination limits, all schema shapes, `MuscleGroup`/exercise-type enums, event ordering semantics
-- Live clean-venv install and `inspect.signature`/source reads of `mcp/server/mcpserver/server.py`, `starlette/testclient.py` — FastAPI+MCP integration pattern, dependency resolution
-- MCP specification 2026-07-28 (Streamable HTTP transport) — https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
-- MCP Python SDK docs — https://py.sdk.modelcontextprotocol.io/v2/run/asgi, /v2/run/authorization
-- Claude connector docs — https://claude.com/docs/connectors/building/authentication, /connectors/custom/remote-mcp
-- anthropics/claude-ai-mcp issue #112 (closed "not planned") — https://github.com/anthropics/claude-ai-mcp/issues/112
-- PyPI JSON API for all package versions, queried 2026-08-23
-- Render docs — https://render.com/docs/python-version, /docs/free
-- Pelland et al. 2025, *Sports Medicine*, DOI 10.1007/s40279-025-02344-w — fractional set-counting evidence base
+- Direct venv/source introspection: `inspect.signature(MCPServer.add_tool)`, `ToolAnnotations`/`AuthSettings`/`AccessToken` model fields, installed `mcp 2.0.0`/`starlette 1.6.0` source reads
+- The user's own `export.xml` (191,257,897 bytes, HealthKit Export Version 14, 438,649 records, 2022-03-10→2026-08-26) — parsed and counted directly, the primary evidence for all Apple Health data-availability claims
+- BRETT repository source, read directly: `app/main.py`, `app/mcp/server.py`, `app/mcp/auth.py`, `app/mcp/tools/_common.py`, `app/analytics/{progression,recomposition,bodyweight,metadata,estimates}.py`, `app/db/models/*`, `app/integrations/hevy/*`, `app/middleware.py`, `app/config.py`, and the full `test_*_isolation.py` / `test_mcp_readonly.py` / `test_mcp_tool_schemas.py` / `test_coaching_doc.py` suites
+- https://help.healthyapps.dev/en/health-auto-export/ (automations/rest-api, export-format, export-format/workouts, export-format/health-metrics — all pages dated 2026-08-23) — transport, auth, envelope, field shapes, date format
+- `HealthyApps/health-auto-export-server` (vendor's own reference server source, read directly)
+- https://docs.cloud.google.com/run/quotas — Cloud Run 32 MiB HTTP/1 request cap
 
 ### Secondary (MEDIUM confidence)
-- Render pricing/spin-down figures — third-party 2026 guides, not Render's own pricing page
-- Competitor analytics feature sets — Hevy/Strong/Boostcamp/RP vendor pages and review sites
-- WorkOS blog, gofastmcp.com docs — IdP/OAuth alternative comparisons
-- MCP tool-design token economics — pydantic.dev, kansei-link.com, mindstudio.ai engineering write-ups
+- `irvinlim/apple-health-ingester`, `meltforce/FreeReps`, `korosuke613/vitalbridge` — independent third-party HAE implementations corroborating field names and timestamp-format quirks
+- https://github.com/anthropics/claude-code/issues/43397 and #45306 — scheduled-task MCP connector failures, both closed "not planned," with server-side protocol log corroboration
+- Rate-band literature for bulk/cut/recomp (Helms, thebodybuildingdietitians.com, RippedBody-style recomp framing) — sources genuinely disagree; the disagreement itself is reported as a finding
 
 ### Tertiary (LOW confidence)
-- Whether Hevy stores dumbbell weight per-dumbbell vs. combined — flagged explicitly for empirical verification in Phase 2
-- Hevy's actual (undocumented) rate limits — flagged for empirical discovery during first full sync
+- Claude Desktop "Always approve cannot be undone" — single community source (kahunam.com), treated as a design risk rather than verified fact
+- Whether the installed HAE app build emits 24-hour or 12-hour timestamps on this specific device — settable, unverified without a captured payload
 
 ---
-*Research completed: 2026-08-23*
+*Research completed: 2026-09-02*
 *Ready for roadmap: yes*

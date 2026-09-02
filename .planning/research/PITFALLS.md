@@ -1,566 +1,864 @@
 # Pitfalls Research
 
-**Domain:** Personal fitness data backend (third-party API sync → normalized PostgreSQL → analytics) exposed to an LLM via a remote MCP server
-**Researched:** 2026-08-23
-**Confidence:** HIGH for Hevy API surface (read directly from the live OpenAPI spec), HIGH for MCP transport/auth (official spec + SDK docs + closed Anthropic issue), MEDIUM for analytics-semantics and Render operational details, LOW where explicitly flagged
+**Domain:** Adding v2.0 capabilities to BRETT — a shipped, production-live, read-only fitness MCP backend
+**Researched:** 2026-09-02
+**Confidence:** HIGH for everything grounded in this repo's source (read directly); HIGH for Health Auto Export behaviour (official Help Center); MEDIUM-HIGH for Claude scheduled-task connector failures (two GitHub issues fetched directly, both closed "not planned"); MEDIUM for Claude Desktop "Always approve" irreversibility (community sources only).
 
-**Baseline:** Blueprint §7 (Hevy sync), §31–33 (permissions/auth/privacy), §42–44 (testing/observability) already say "be idempotent," "use bearer token," "don't log health data." This document goes past that: it names the *specific* mechanisms in the current Hevy API and the current MCP spec that make those instructions insufficient or, in one case, unimplementable as written.
-
----
-
-## The three findings that change the plan
-
-Read these before anything else. Each contradicts or materially tightens something in `PROJECT.md` / the blueprint.
-
-1. **Claude's custom-connector UI cannot send a static bearer token.** `PROJECT.md` Key Decisions records "MCP auth = bearer token for v1, not OAuth." Anthropic's connector UI exposes only OAuth Client ID / Client Secret; the feature request to add an `Authorization: Bearer` field ([anthropics/claude-ai-mcp#112](https://github.com/anthropics/claude-ai-mcp/issues/112)) is **closed as not planned**. This decision must be revisited in Phase 4, not Phase 5. (Pitfall 1)
-2. **Hevy's max `pageSize` is 10** on `/v1/workouts` and `/v1/workouts/events` (default 5). Every sync-cost assumption in the blueprint is off by an order of magnitude. (Pitfall 3)
-3. **The MCP spec had a breaking revision on 2026-07-28** — 26 days before this research — removing the `initialize` handshake, `Mcp-Session-Id`, and the GET stream. The Python SDK shipped `2.0.0` the same day, renaming `FastMCP` → `MCPServer`. Any MCP code written from model training data will be v1-shaped. (Pitfall 10)
-
----
-
-## Ground truth: the live Hevy API surface
-
-Fetched and parsed from `https://api.hevyapp.com/docs/swagger-ui-init.js` on 2026-08-23 (the Swagger UI page itself renders no content to fetchers; the embedded `swaggerDoc` object is the real spec). **Confidence: HIGH** — this is the authoritative document, not a blog summary.
-
-| Fact | Value | Why it matters |
-|------|-------|----------------|
-| Auth | `api-key` **header**, `format: uuid` | Not `Authorization: Bearer`. A generic HTTP client wrapper will get this wrong. |
-| API version | `0.0.1` | Self-described as unstable (see disclaimer below) |
-| `GET /v1/workouts` | `page` (≥1), `pageSize` **default 5, max 10** | 500 workouts = 50 requests minimum |
-| `GET /v1/workouts/events` | `page`, `pageSize` **max 10**, `since` (default `1970-01-01T00:00:00Z`); **"Events are ordered from newest to oldest"** | Cursor advancement is order-sensitive — see Pitfall 4 |
-| `GET /v1/exercise_templates` | `pageSize` **max 100** | Different limit from everything else |
-| `GET /v1/body_measurements` | `pageSize` default 10, **max 10**; documents a **404 "Page not found"** response | Paging past the end 404s rather than returning `[]` |
-| List response envelope | `{ page, page_count, workouts[] }` / `{ page, page_count, events[] }` | `page_count` is available — use it, don't loop until empty |
-| `GET /v1/workouts/count` | `{ workout_count }` | Free reconciliation oracle (Pitfall 3) |
-| Event shapes | `{type:"updated", workout:{...full workout...}}` or `{type:"deleted", id, deleted_at}` | Updated events carry the **full** workout — no refetch needed |
-| Rate limits | **Not documented anywhere in the spec** | Must be discovered empirically; assume 429 exists and handle it |
-
-**Object model (exact):**
-
-- `Workout`: `id`, `title`, `routine_id`, `description`, `start_time`, `end_time`, `updated_at`, `created_at`, `exercises[]`
-- `Exercise` (within workout): `index`, `title`, `notes`, `exercise_template_id`, `supersets_id` (nullable number), `sets[]` — **no `id`**
-- `Set`: `index`, `type` (`normal` | `warmup` | `dropset` | `failure`), `weight_kg` (nullable), `reps` (nullable), `distance_meters` (nullable), `duration_seconds` (nullable), `rpe` (nullable), `custom_metric` (nullable) — **no `id`, no `rir`, no `weight_unit`**
-- `ExerciseTemplate`: `id`, `title`, `type`, `primary_muscle_group`, `secondary_muscle_groups[]`, `equipment_category`, `is_custom`
-- `MuscleGroup` enum (20): `abdominals, shoulders, biceps, triceps, forearms, quadriceps, hamstrings, calves, glutes, abductors, adductors, lats, upper_back, traps, lower_back, chest, cardio, neck, full_body, other`
-- Exercise `type` enum (8): `weight_reps, reps_only, bodyweight_reps, bodyweight_assisted_reps, duration, weight_duration, distance_duration, short_distance_weight`
-- `EquipmentCategory` enum (9): `none, barbell, dumbbell, kettlebell, machine, plate, resistance_band, suspension, other`
-
-**Hevy's own disclaimer, verbatim from the spec's `info.description`:** *"we make no guarantees that we won't completely change the structure or abandon the project entirely so use it at your own risk."* This is the strongest possible argument for the blueprint's provider-isolation constraint — treat it as a hard requirement, not a preference.
-
-**Endpoints the blueprint doesn't mention but that exist:** `/v1/body_measurements` (GET/POST/PUT — weight, lean mass, fat %, neck, shoulder, chest, biceps L/R, forearms L/R, abdomen, waist, hips, thighs L/R, calves L/R), `/v1/exercise_history/{exerciseTemplateId}`, `/v1/user/info`, `/v1/routines`, `/v1/routine_folders`. See Pitfall 9 — the "manual entry only" body-measurements decision is now questionable.
+> **Scope note.** This document is deliberately *not* generic fitness-app advice. Every pitfall below is
+> anchored to a specific file, line, constant, constraint or deployment flag that already exists in BRETT
+> today, and describes what breaks when one of the five v2.0 features is bolted onto it. Where a pitfall is
+> already anticipated by an in-repo docstring or guard, that is stated — because the most dangerous
+> pitfalls here are the ones where v1.0's authors *wrote down the counter-argument* and v2.0 is about to
+> walk past it.
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Designing MCP auth around a static bearer token Claude cannot send
+### Pitfall 1: The webhook route is registered after the catch-all mount and silently never runs
 
 **What goes wrong:**
-Phase 4 builds a clean bearer-token-authenticated MCP server. It passes every local test (MCP Inspector, `claude mcp add --transport http --header "Authorization: Bearer …"`, `mcp-remote`). Phase 5 deploys to Render, and then the Claude custom-connector dialog offers **Name**, **Remote MCP server URL**, and — under advanced settings — **OAuth Client ID** and **OAuth Client Secret**. There is no header field. The connector either connects with no auth at all (if the server allows it) or fails, and the "read-only MCP server exposed to Claude over HTTPS with bearer-token auth" acceptance criterion is unreachable on the mobile/web surfaces the project explicitly targets.
+`backend/app/main.py:98` ends with `app.mount("/", mcp_app)` — a catch-all mount at the root, registered
+last *on purpose*, with the comment "Registered LAST because it is a catch-all: FastAPI's own routes are
+matched first and therefore win." Starlette matches routes in registration order. Add
+`app.include_router(webhooks.router)` **below** that line and the mount matches first: every POST to
+`/webhooks/health-auto-export` is handed to the MCP sub-app, which answers with an MCP-shaped 404/406 or a
+401 from `RequireAuthMiddleware`. The route exists, imports fine, has tests that pass against a
+`TestClient` built from a bare router — and is dead in production.
 
 **Why it happens:**
-Three different Claude surfaces have three different auth capabilities, and they get conflated:
-- **Claude Code / Desktop local config / `mcp-remote` / Cursor** — arbitrary headers, bearer tokens fine.
-- **Claude.ai custom connector (web, mobile, Desktop connectors UI)** — OAuth only.
-- **`static_headers`** — exists, but is beta and described as an *organization administrator* entering the value, i.e. Team/Enterprise-shaped, not a personal Pro/Max account.
-
-All the tutorials and local dev loops use the first category. The project's target ("Desktop/Web/Mobile custom connector") is the second.
+Every other route in the file (`app.include_router(health.router)`, line 90) sits above the mount, so the
+ordering rule is invisible unless you read the comment. The natural editing instinct is to append.
 
 **How to avoid:**
-Decide the auth strategy in **Phase 4**, before deployment, from these three options:
-
-| Option | Effort | Works on web/mobile connector? | Notes |
-|--------|--------|-------------------------------|-------|
-| **Minimal single-user OAuth 2.1 shim** (recommended) | ~1 day | Yes | Serve `/.well-known/oauth-protected-resource` (RFC 9728), `/.well-known/oauth-authorization-server`, a `/register` DCR endpoint, `/authorize` (single hardcoded password prompt), `/token` issuing a short-lived signed JWT audience-bound to your MCP URL. The MCP Python SDK ships `create_protected_resource_routes()`, `TokenVerifier`, and `BearerAuthBackend` — you implement the AS half only. Precedent: the public `hevy-mcp` server built exactly this "for Claude.ai and remote clients unable to send fixed headers." |
-| **Bearer token + desktop-only** | ~0 | No | Keep `TokenVerifier` bearer auth, connect via Claude Code / `mcp-remote` with `--header`. Ships fastest, forfeits the mobile/web goal. |
-| **Secret in the URL path** (`/mcp/<128-bit-token>`) | ~0 | Yes | The blueprint explicitly forbids relying on this alone (§32), and it's right: URLs leak into proxy logs, crash reports, and screenshots. Only defensible as a *second* factor layered under a bearer/OAuth check. |
-
-Structure the code so the token-verification seam is a single `TokenVerifier` implementation — then swapping "static secret compare" for "verify JWT signature + audience" is a one-file change.
+Register the webhook router **above** line 98, immediately after the health router. Add a test in the
+style of `backend/tests/test_mcp_mount.py` that asserts the webhook path resolves to the FastAPI route and
+not the mounted app — assert on the *response shape* (a FastAPI 422 validation error for a bad body, say),
+not merely on "not 404", because the MCP app also returns 404s.
 
 **Warning signs:**
-- The Phase 4 exit criterion says "verified with MCP Inspector" and never says "verified from claude.ai on mobile."
-- Anyone writes "we'll paste the token into Claude's connector settings" in a plan doc.
-- The deployment checklist has no step that exercises the actual connector-add flow.
+A webhook that returns 401 with an MCP `WWW-Authenticate` header, or a 404 whose body is not FastAPI's
+`{"detail":"Not Found"}`. Health Auto Export's Activity Log showing consistent non-2xx with no server log
+line from your handler.
 
-**Phase to address:** **Phase 4** (design + build the auth mechanism), verified in **Phase 5** (real connector add from a phone).
+**Phase to address:** Apple Health webhook ingest phase, first plan.
 
 ---
 
-### Pitfall 2: Treating "unique(user_id, provider, external_id)" as sufficient idempotency
+### Pitfall 2: The webhook shares one global 30/min token bucket with `/mcp`, and Health Auto Export does not retry
 
 **What goes wrong:**
-The unique constraint is on `workouts`. It prevents duplicate *workouts*. It does nothing for `workout_exercises` and `sets`, and **Hevy's API gives those objects no stable identifier at all** — only a positional `index` inside the parent. So a re-sync of an edited workout does one of:
-- naive insert → the workout now has 2× the exercises and 2× the sets → every volume number silently doubles;
-- upsert keyed on `(workout_id, order_index)` → works until the user *reorders* or *deletes* an exercise in Hevy, at which point set data from exercise #3 gets grafted onto exercise #2, and the stale trailing exercise #4 is orphaned but still counted;
-- delete-then-insert without a transaction → a crash mid-sync leaves a workout with zero exercises, which analytics reads as a real (empty) training session.
+`backend/app/middleware.py` builds **one process-wide `TokenBucket`** (`build_limiter`, capacity 30, refill
+30/min) applied to every path except `/health` and `/.well-known/` (`EXEMPT_PREFIXES`, line 57). It is
+registered app-level in `main.py:79`, i.e. *outside* the router, so it fires before routing. A new webhook
+path inherits it automatically.
+
+Two failure directions, both real:
+- Health Auto Export with **Batch Requests ON** (which you will need — see Pitfall 4) sends many HTTP
+  requests in quick succession. Those drain the same 30-token bucket Claude's MCP calls draw from. A
+  mid-conversation `fitness_get_training_summary` gets a 429 during a health sync.
+- Conversely, an active coaching conversation drains the bucket and the health push gets 429'd.
+
+The second direction is the damaging one: **Health Auto Export has no documented retry mechanism.** Its own
+docs describe checking "Activity Logs for HTTP status codes and per-day failures" and document no automatic
+retry. A 429 is therefore not backpressure — it is silent, permanent data loss for that window, unless the
+user notices and re-runs manually. Worse, if the automation is configured to **"Since Last Sync"**, a failed
+delivery may leave a gap that the next run does not re-cover.
 
 **Why it happens:**
-"Idempotent sync" gets interpreted as "don't duplicate the top-level record." Nobody checks whether the child objects have IDs — and in Hevy's case they emphatically don't (verified: `Set` and `Exercise` schemas have no `id` property).
+The single global bucket was a deliberate, well-argued v1.0 decision (documented at length in
+`middleware.py`'s docstring: no per-IP key because the service is `--allow-unauthenticated` and the
+forwarded-address header is attacker-controlled). That reasoning is still correct *for `/mcp`*. It was
+simply never asked to arbitrate between two traffic classes with opposite retry semantics.
 
 **How to avoid:**
-- Model the workout as an **immutable-by-value aggregate**: on any create-or-update, inside **one transaction**, `DELETE FROM workout_exercises WHERE workout_id = :id` (with `ON DELETE CASCADE` to `sets`) then re-insert all children from the payload, then update the parent row and its `source_updated_at`.
-- Never let child rows be the target of a partial write. One transaction per workout, committed atomically. A batch of 10 workouts should be 10 transactions, not one — a single malformed workout must not roll back nine good ones.
-- Store `updated_at` from Hevy as `source_updated_at`. Skip the child rewrite entirely when `payload.updated_at <= source_updated_at` — this makes re-runs cheap as well as correct.
-- Keep the raw JSON payload (a `jsonb` column or a `sync_raw_payloads` table). When analytics disagree with the Hevy app six months from now, this is the only way to tell whether the bug is in ingestion or in the math.
-- **Test explicitly:** sync a workout, mutate the fixture (remove the middle exercise, reorder two, change one set's weight), re-sync, assert exact child-row counts and values. Then re-sync the *unchanged* fixture 3× and assert byte-identical DB state.
+Give the webhook its **own bucket**, keyed by path prefix, sized for burst delivery (HAE batches) rather
+than for conversational cadence. Keep the global bucket for everything else so the DoS argument in
+`middleware.py`'s docstring still holds. Do **not** add the webhook to `EXEMPT_PREFIXES` — that would make
+an unauthenticated-by-default write path the one unbounded surface on the service. Return `503` with
+`Retry-After` rather than `429` if you want HAE to surface it as a retryable failure in its Activity Log,
+and log a distinct `webhook_rejected` event so a dropped window is findable after the fact.
 
 **Warning signs:**
-- Total tonnage jumps by a clean multiple after a re-sync.
-- `SELECT workout_id, COUNT(*) FROM workout_exercises GROUP BY 1 HAVING COUNT(*) > 20` returns rows.
-- Any workout with `COUNT(exercises) = 0`.
-- The sync service has an `update_workout()` that touches child tables outside a transaction block.
+`rate_limit_rejected` log lines whose `path` is the webhook path. Gaps in Apple Health data that align with
+periods of heavy Claude usage. A `sync_state`-equivalent `last_synced_at` for Apple Health that stops
+advancing while the iOS app reports success.
 
-**Phase to address:** **Phase 2**. Add a persistent invariant check (Pitfall 14) that runs after every sync.
+**Phase to address:** Apple Health webhook ingest phase.
 
 ---
 
-### Pitfall 3: Sync architecture built on an assumed page size (real max: 10)
+### Pitfall 3: A FastAPI-side route inherits zero authentication on an `--allow-unauthenticated` service
 
 **What goes wrong:**
-The natural design — "full sync on first run, then re-fetch recent pages hourly" — assumes pages of 50–100. Hevy caps `pageSize` at **10** (default **5**) on `/v1/workouts` and `/v1/workouts/events`. A 600-workout history is 60 sequential HTTPS round-trips. If Phase 2 is built as "just re-fetch everything every sync" because the initial sync felt fast enough in testing with 20 workouts, the hourly job later hammers an undocumented rate limit, and the failure surfaces in production as a partially-synced database.
+BRETT's entire inbound auth story lives inside the mounted MCP sub-app. `AuthSettings` +
+`build_token_verifier` (`backend/app/mcp/auth.py`) are consumed by `MCPServer`, and the SDK's
+`RequireAuthMiddleware` wraps only `mcp_app`. The FastAPI side has exactly one route today — `/health` —
+and it is **deliberately open** (`main.py:89`: "D-04: no auth dependency -- /health is open so platform
+health checks reach it"). `scripts/deploy-cloud-run.sh` deploys with `--allow-unauthenticated`.
+
+Consequently a new `POST /webhooks/...` on the FastAPI side is, by default, **a public write endpoint into
+a health-data database, reachable by anyone on the internet**. Nothing in the existing test suite would
+catch this: `test_mcp_auth.py` tests the MCP path, and a new webhook test written against `TestClient` with
+no header would pass precisely *because* there is no auth.
 
 **Why it happens:**
-`pageSize` limits are read once during exploration, then the number is forgotten. Nobody re-checks it when designing the *scheduled* job. Combined with no documented rate limit, there's no forcing function to think about request volume.
+"The app is authenticated" is true of the app the developer thinks about (`/mcp`). The mental model that
+auth is an app-level property is wrong here — it is a property of one mounted sub-application.
 
 **How to avoid:**
-- Hard-code `pageSize=10` and treat request count as a first-class design constraint. Full sync ≈ `ceil(workout_count / 10)` requests — get `workout_count` from `/v1/workouts/count` first and **log the planned request count before starting**.
-- **Never full-sync on a schedule.** Full sync is a one-time bootstrap plus a manual `--force` escape hatch. Scheduled syncs go through `/v1/workouts/events` only.
-- Build the HTTP client with, from day one: a bounded concurrency of 1–2 (not 10 — you don't know the rate limit), `Retry-After`-aware 429 handling, exponential backoff with jitter on 429/5xx/timeouts, a total-attempt ceiling, and a hard cap on pages per run.
-- Since rate limits are undocumented, **discover them**: log every response's status and any `X-RateLimit-*` / `Retry-After` headers on the first real full sync, and write the observed behaviour into `integrations/hevy/README.md`. This is a deliverable, not a side effect.
-- Blueprint §38 suggests "every 1–6 hours." For a single user who trains ~4×/week, **every 6 hours is plenty**; hourly buys nothing and multiplies rate-limit exposure by 6.
+Health Auto Export **does** support custom request headers, including `Authorization: Bearer <token>` and
+`X-API-Key` (confirmed in its official REST API docs). Use one. Verify it with
+`secrets.compare_digest` over **bytes**, following the exact pattern and reasoning already established in
+`StaticTokenVerifier.__init__` (`auth.py:37-46` — a `str` compare raises `TypeError` on non-ASCII header
+bytes, which escapes as a 500 with traceback rather than a 401). Store it in Google Secret Manager beside
+`MCP_AUTH_SECRET` and add it to `Settings.secret_values()` so `configure_logging`'s scrubber redacts it.
+Fail **closed** and **silent** — return a bare 401 with no body detail, matching `auth.py`'s stated
+contract.
+
+Write the negative test: `test_webhook_rejects_a_request_with_no_credential`. Then add a *static* guard in
+the style of `backend/tests/test_mcp_isolation.py` asserting that every route registered on the FastAPI app
+other than `/health` carries an auth dependency — so route #3 cannot be added unguarded.
 
 **Warning signs:**
-- `pageSize` appears as a configurable with a default above 10 (Hevy returns **400 "Invalid page size"**).
-- Sync duration grows linearly with total history rather than staying flat.
-- The scheduled job's request count doesn't drop after the first run.
+An HTTP route module under `app/api/routes/` with no `Depends(...)` in its decorator. A Cloud Run request
+log showing 2xx on the webhook path from an IP outside the user's carrier ranges.
 
-**Phase to address:** **Phase 2**.
+**Phase to address:** Apple Health webhook ingest phase — this is the phase's first success criterion, not a hardening afterthought.
 
 ---
 
-### Pitfall 4: Losing events forever by advancing the cursor against a newest-first, paginated feed
+### Pitfall 4: Non-idempotent ingest, when Health Auto Export re-sends overlapping windows by design
 
 **What goes wrong:**
-`/v1/workouts/events?since=T` returns events **ordered newest to oldest**, paginated. The obvious loop is:
+Health Auto Export's **Default** export period is documented as: *"Syncs data for the full previous day plus
+data up to the current date and time."* Run that automation hourly and every run re-sends the whole of
+yesterday plus a growing slice of today. Its docs describe **no deduplication mechanism** on the sender
+side. A naive `INSERT` receiver therefore accumulates duplicate rows on every run — and because the data
+feeds averages, duplicates do not error, they *bias*. A body weight re-sent 24 times gets 24 votes in a
+7-day mean.
 
+This is the one integrity property BRETT already treats as non-negotiable for Hevy ("Hevy sync must be
+idempotent and must never corrupt existing data on partial/failed sync" — CLAUDE.md constraint), and the
+webhook is where it is easiest to forget, because a webhook *feels* like an event rather than a sync.
+
+**Why it happens:**
+Webhooks are mentally filed as "push, therefore each delivery is new". HAE's Default period breaks that
+assumption, and the `session-id` header it sends is unique *per request*, so it looks like a dedup key while
+being exactly the wrong one — the same measurement arrives under a different `session-id` every run.
+
+**How to avoid:**
+Key on the **measurement's own identity**, never on delivery identity. Follow the pattern already proven in
+`backend/app/integrations/hevy/body.py:97-120`: `pg_insert(...).on_conflict_do_update(constraint=...)`
+against a natural-key unique constraint. For Apple Health metrics the natural key is
+`(user_id, source, metric_name, measured_at)` — plus the aggregation interval, because HAE can send the same
+underlying samples aggregated hourly *and* daily depending on configuration, and those are genuinely
+different rows that must not collide.
+
+Make the whole delivery **one transaction**. HAE reports per-day failures; a half-applied batch that returns
+500 and is never retried is worse than a rejected one.
+
+**Warning signs:**
+Row counts growing faster than wall-clock days. A 7-day body-weight average that moves when no new weigh-in
+happened. `rows_upserted` in your ingest result consistently equal to rows received (a healthy steady-state
+run should be mostly no-op updates).
+
+**Phase to address:** Apple Health webhook ingest phase. Verify with a test that POSTs the *identical* payload twice and asserts the row count and every computed average are unchanged — the direct analogue of `test_hevy_sync.py`'s duplicate test.
+
+---
+
+### Pitfall 5: Payload size and cold start collide with a 512 MiB / 32 MiB / 30-second budget
+
+**What goes wrong:**
+Four hard numbers, all verified, that nobody checks until the first real sync:
+
+| Limit | Value | Source |
+|---|---|---|
+| Cloud Run max HTTP/1 request body | **32 MiB** | Google Cloud Run quotas |
+| BRETT's instance memory | **512 MiB** | `scripts/deploy-cloud-run.sh` (`--memory=512Mi`) |
+| BRETT's min instances | **0** (cold start on every idle period) | `deploy-cloud-run.sh` (`MIN_INSTANCES="${BRETT_MIN_INSTANCES:-0}"`) |
+| iOS background task budget | **30 seconds** | Health Auto Export docs |
+
+Health Auto Export's own documentation warns that backends should handle payloads of *"possibly several
+hundred megabytes"* for large exports with fine-grained aggregation. That exceeds the Cloud Run request cap
+by an order of magnitude, and FastAPI/Starlette buffers the request body in memory by default — so a payload
+that *does* squeak under 32 MiB still risks OOM-killing a 512 MiB instance, which Cloud Run surfaces as a
+generic 503 with no application log.
+
+Separately: `MIN_INSTANCES=0` means the first webhook delivery after an idle period pays a full cold start.
+Add JSON parse + N upserts and you can blow past HAE's 30-second iOS background budget, which fails the
+export on the *device* side with "Health data could not be fully read."
+
+**Why it happens:**
+The `--memory=512Mi` and `--min=0` settings were correct for v1.0, where all inbound traffic was small MCP
+JSON-RPC calls and all bulk work happened in an outbound-only Cloud Run Job.
+
+**How to avoid:**
+- Configure the HAE automation with **Batch Requests ON** and a **coarse aggregation interval** (hours, not
+  seconds), and document that configuration in `docs/` as part of the setup — it is a deployment
+  prerequisite, not a user preference.
+- Enforce a request-body size cap in the webhook handler and reject oversized bodies with a clear status
+  before parsing, rather than discovering the limit as an OOM.
+- Keep the handler's synchronous work minimal: validate, upsert, return. Do not compute analytics inline.
+- Consider `--min=1` for the service, or accept cold starts and set HAE's user-configurable request timeout
+  generously. Note that `--min=1` also removes the cold-start risk against Claude's documented 10-second
+  connector-discovery budget (CLAUDE.md) — one change, two problems.
+
+**Warning signs:**
+Cloud Run 503s with no corresponding application log line (the OOM signature). HAE Activity Log entries
+showing timeouts. `--cpu-boost` masking the problem in testing but not under concurrent load with
+`--max=2`.
+
+**Phase to address:** Apple Health webhook ingest phase, with the deployment-flag change made and verified before the first real device sync.
+
+---
+
+### Pitfall 6: Parsing a 182 MB `export.xml` in-process OOMs the service
+
+**What goes wrong:**
+The backfill source file is real and already on disk: **`export.xml` is 182 MB** (`export_cda.xml` is 79 KB
+and is the wrong file — it is the CDA clinical-document variant, not the HealthKit sample dump).
+`xml.etree.ElementTree.parse()` builds the entire DOM in memory; for a 182 MB Apple Health export that is
+routinely 1.5–2 GB of Python objects. On a 512 MiB Cloud Run instance that is an instant OOM kill.
+
+**Why it happens:**
+`ElementTree.parse()` is the obvious API and works fine on the 79 KB file you test with.
+
+**How to avoid:**
+Two rules:
+1. **Stream it.** `ET.iterparse(path, events=("end",))` with an explicit `elem.clear()` and a
+   `root.clear()`-equivalent after each `Record` element. Without the clear, `iterparse` still accumulates
+   the tree and you have written a slower version of the same bug.
+2. **Do not run it through the web service at all.** This is a one-time operation on a file the user already
+   has locally. Run it as a `app/cli.py` subcommand (the pattern already exists — the Hevy sync runs as
+   `uv run python -m app.cli sync-hevy` in a Cloud Run Job), executed locally against the production
+   database, or as a one-off Cloud Run Job with raised memory. An HTTP upload path for a 182 MB file also
+   walks straight into Pitfall 5's 32 MiB cap.
+
+Additionally: the backfill and the ongoing webhook write into the same tables. Make the backfill use the
+**same upsert path** as the webhook, so running the backfill after the webhook has been live for a week is a
+no-op on the overlapping days rather than a duplicate-or-clobber event.
+
+**Warning signs:**
+A backfill command that works on a trimmed test file and dies with exit 137 (SIGKILL) on the real one.
+Memory profile climbing monotonically through the parse.
+
+**Phase to address:** Apple Health backfill phase. Success criterion should be "the real 182 MB `export.xml` parses to completion within the instance memory budget", tested against the actual file, not a fixture.
+
+---
+
+### Pitfall 7: The freshness envelope defaults to `provider="hevy"` and starts lying the moment a second provider writes
+
+**What goes wrong:**
+`backend/app/analytics/metadata.py:137-143`:
+
+```python
+async def build_freshness(session, *, user_id, resources, provider: str = PROVIDER_HEVY) -> FreshnessMetadata:
 ```
-page 1 → process events → record newest event timestamp as new cursor → page 2 → ...
+
+Every single analytics call site uses that default. `FRESHNESS_RESOURCES_BODY` is
+`(RESOURCE_BODY_MEASUREMENTS,)`, so `fitness_get_body_weight_trend` reports the `last_synced_at` of the
+**Hevy** body-measurements sync — regardless of where the weight actually came from.
+
+Once Apple Health (or manual entry) writes body weight, this is a *silent lie in both directions*:
+- Apple Health pushed a weigh-in five minutes ago, Hevy's body sync last ran six hours ago → the response
+  claims six-hour-old data and Claude, obeying the coaching instructions, warns the user about staleness
+  that does not exist.
+- Hevy body sync is healthy but Health Auto Export stopped running two weeks ago → the response claims
+  fresh data and Claude answers confidently from a stale Apple Health picture.
+
+This directly breaks DQ-01, the requirement PROJECT.md records as *resolved at the v2.0 boundary* — and it
+breaks it without any error, test failure, or code change in the analytics layer.
+
+**Why it happens:**
+`provider` was given a default because there was exactly one provider. The default is invisible at 20+ call
+sites.
+
+**How to avoid:**
+Remove the default. Make `provider` (or better, a sequence of `(provider, resource)` pairs) **required** so
+adding a provider is a `TypeError` at every call site rather than a silent wrong answer — the same
+discipline `resolve_user_id`/`user_id`-with-no-default already applies for ASVS V4. Define the v2.0
+resource tuples explicitly (`FRESHNESS_RESOURCES_BODY` must name *every* provider that writes
+`body_measurements`) and follow the existing rule from `FRESHNESS_RESOURCES_MUSCLE`'s comment: an answer is
+only as fresh as the **stalest** input that feeds it.
+
+Write a `sync_state` row for the webhook provider on every successful delivery, so `last_synced_at` is real
+rather than perpetually `None` (which `build_freshness` correctly reports as "never synced" — accurate, and
+useless).
+
+**Warning signs:**
+A `FreshnessMetadata` response whose `resources` map has fewer keys than the number of providers writing the
+tables that answer fed from. Claude flagging staleness immediately after a successful webhook delivery.
+
+**Phase to address:** Apple Health webhook ingest phase (write the `sync_state` row) **and** the health-analytics-extension phase (fix the provider parameter). Do not defer — this pitfall is invisible until someone notices Claude giving a wrong freshness warning, which may be never.
+
+---
+
+### Pitfall 8: `body_measurements.source` is `VARCHAR(16)` and `'health_auto_export'` is 18 characters
+
+**What goes wrong:**
+`backend/app/db/models/body.py:50` and migration `0004_hevy_reference_tables.py:87`:
+`sa.Column("source", sa.String(length=16), nullable=False)`. Candidate source names:
+
+| Candidate | Length | Fits `VARCHAR(16)`? |
+|---|---|---|
+| `hevy` | 4 | yes (existing) |
+| `manual` | 6 | yes (existing) |
+| `apple_health` | 12 | yes |
+| `healthkit` | 9 | yes |
+| `health_auto_export` | **18** | **no — `StringDataRightTruncation`** |
+| `apple-health-export` | 19 | no |
+
+PostgreSQL raises rather than truncating, so this fails loudly — but it fails at *insert time in
+production*, potentially inside the first real webhook delivery, and the natural "fix" under pressure is to
+shorten the string in one place and miss another, leaving two spellings of the same source in one column.
+
+**Why it happens:**
+16 was generous for `'hevy'` and `'manual'`. Nobody widens a column they are not thinking about.
+
+**How to avoid:**
+Pick `'apple_health'` (12 chars, describes the *data origin* rather than the *transport*, and survives a
+future switch away from the Health Auto Export app). Define it as a module constant next to
+`bodyweight.MANUAL_SOURCE`, never as an inline literal. If you want transport-level detail, that belongs in
+`sync_state.provider` (`VARCHAR(32)`), not in the row discriminator. If a longer name is genuinely wanted,
+widen the column in the same migration that introduces the source — do not discover it at runtime.
+
+**Warning signs:**
+`asyncpg.exceptions.StringDataRightTruncationError` in the webhook path. Two source strings in
+`SELECT DISTINCT source FROM body_measurements`.
+
+**Phase to address:** Apple Health webhook ingest phase (schema migration plan).
+
+---
+
+### Pitfall 9: `_dedupe_by_day` resolves source conflicts at ROW grain, which deletes columns when extended beyond weight
+
+**What goes wrong:**
+This is the most subtle data-integrity pitfall in the milestone, and it is *latent today*.
+
+`backend/app/analytics/bodyweight.py:129-155` implements D-14 — "a manual entry is a deliberate correction
+of that day's number, so it wins":
+
+```python
+def _dedupe_by_day(rows):
+    by_day, seen_manual = {}, set()
+    for row in rows:                      # ordered by (measured_on, source)
+        if row.weight_kg is None: continue
+        if row.measured_on in seen_manual: continue
+        by_day[row.measured_on] = row.weight_kg
+        if row.source == MANUAL_SOURCE: seen_manual.add(row.measured_on)
+    return by_day
 ```
 
-Page 1 holds the *newest* events. If you persist the cursor from page 1 and then crash (or hit a 429, or the process is killed by Render's deploy) before draining pages 2..N, the cursor has moved past events you never processed. They are **permanently unreachable** — the next run asks for events since a later timestamp. Silent, unrecoverable data loss with no error in the logs.
+Two things break when v2.0 extends this beyond weight-only:
 
-A second, subtler variant: this is **offset** pagination over a feed that grows at the front. If the user finishes a workout while you're on page 3, everything shifts one slot toward older, and one event slides from page 3 to page 4 *after you've already read page 3* — you skip it.
+**(a) Row-level precedence discards columns.** The natural key is
+`UniqueConstraint("user_id", "source", "measured_on")` — the whole *row*, per source, per day. So a day can
+legitimately hold a Hevy row `(weight=65.2, waist=80.0, chest=101.0)` and a manual row
+`(weight=64.8, waist=NULL, chest=NULL)`. Row-level "manual wins" is correct for weight and **destroys the
+waist and chest readings for that day**. The v2.0 requirement is explicitly "trend/comparison analytics
+across weight *and* circumference/composition columns" — so the moment this function is generalised, the
+correct rule becomes a **per-column coalesce with a stated source precedence**, not a per-row winner.
+Copying `_dedupe_by_day`'s shape for `waist_cm` is the obvious move and it silently deletes data.
+
+**(b) The precedence ladder has exactly two rungs, and third-source precedence is decided by the
+alphabet.** The ordering is `ORDER BY measured_on, source`, and correctness relies on `'hevy' < 'manual'`
+alphabetically with a `seen_manual` guard on top. Introduce `'apple_health'` and it sorts **first**
+(`'apple_health' < 'hevy' < 'manual'`), so a day with both an Apple Health and a Hevy weigh-in resolves to
+**Hevy**, because `h` comes after `a` — a precedence nobody chose, nobody wrote down, and no test asserts.
+For body weight specifically that is arguably the *wrong* answer: a smart-scale reading synced through
+HealthKit is usually more trustworthy than a Hevy manual log.
+
+The v1.0 authors saw half of this coming — the docstring says "Moot today -- zero `'manual'` rows exist --
+and locked now so it cannot silently become a double-count the day manual entry ships." The double-count is
+guarded. The column-shadowing and the third-source ordering are not.
 
 **Why it happens:**
-Every incremental-sync tutorial assumes an append-only, oldest-first, cursor-paginated feed. Hevy's is the inverse, and the ordering is stated in one clause of an endpoint description that's easy to skim past.
+The function is correct, tested, and reads as finished. Its correctness depends on two facts that are true
+today and false in v2.0: that there is exactly one column, and exactly two sources.
 
 **How to avoid:**
-- **Two-phase: drain, then commit.** Capture `now_utc` *before* the first request. Fetch **all** pages 1..`page_count` into memory (events are small; even a large backlog is trivial). Only after the last page succeeds, apply them to the DB and set `last_hevy_event_cursor = now_utc` in the **same transaction**. Any failure → apply nothing, cursor unchanged, next run retries the whole window. This is safe precisely because event application is idempotent (Pitfall 2).
-- **Apply oldest-first.** Reverse the collected list before applying so that update-then-delete for the same workout resolves in real-world order. Applying newest-first would resurrect a deleted workout.
-- **Deduplicate by workout id, last-write-wins**, when the same workout appears in multiple events in one window.
-- **Overlap the window.** Set the cursor to `now_utc - 5 minutes`, not `now_utc`. Re-processing a few events is free (idempotent); missing one is not. This also absorbs clock skew between your server and Hevy's.
-- **Never trust `page_count` to stay constant mid-drain.** If `page_count` grows between requests, restart the drain rather than continuing.
-- **Test:** a fake Hevy that returns 3 pages and raises on page 2 → assert cursor unchanged and DB unchanged. A fake that inserts a new event between page 1 and page 2 → assert nothing is lost.
+- Replace the implicit alphabetical ordering with an **explicit precedence map**, e.g.
+  `_SOURCE_PRECEDENCE = MappingProxyType({"manual": 3, "apple_health": 2, "hevy": 1})` — the same
+  `MappingProxyType` discipline `recomposition._LABEL_MATRIX` and `exercise_map.py` already use so a caller
+  cannot retune a health verdict at runtime. Raise on an unknown source rather than defaulting it to zero;
+  a silently-lowest-precedence source is a source that never appears.
+- Resolve **per column**, not per row: for each `(day, metric)` take the value from the highest-precedence
+  source that has a non-NULL value for *that metric*.
+- Add the regression test that does not exist today: one day, three sources, partially overlapping columns,
+  asserting every column resolves independently.
 
 **Warning signs:**
-- The cursor is written inside the pagination loop rather than after it.
-- Workouts exist in the Hevy app but not in your DB, with no error in sync logs.
-- Sync logs show `records_imported: 0` on runs where you know you trained.
-- A "repair" or "backfill" script starts appearing in the repo — that's the recovery for this bug, and it means it already happened.
+A waist or chest series that develops holes on exactly the days a manual weight was entered. A body-weight
+value that changes when Apple Health is connected, with no new weigh-in.
 
-**Phase to address:** **Phase 2**. This is the single highest-value test in the whole project.
+**Phase to address:** Historical body measurements phase — but the *fix* must land before or with the Apple Health webhook phase, since Apple Health is the third source that triggers (b).
 
 ---
 
-### Pitfall 5: Hard-deleting on `deleted` events
+### Pitfall 10: The repo already documents, with live-data evidence, why max-weight was rejected as the progression signal
 
 **What goes wrong:**
-A `{type:"deleted", id, deleted_at}` event arrives; the sync `DELETE`s the workout row. Three problems compound:
-1. **Historical analytics silently rewrite themselves.** "Weekly volume in March" changes retroactively because a March workout was deleted in August. Claude has already told the user things based on the old numbers, and there is no record that the data moved.
-2. **Nothing is auditable.** You cannot answer "did we ever have this workout, or did sync never fetch it?" — which is exactly the question you need when debugging Pitfall 4.
-3. **PR detection breaks catastrophically.** Deleting the workout that held a personal record silently demotes the PR, and if PRs are cached/materialized, the cache and the base data disagree with no way to detect it.
+`backend/app/analytics/progression.py:7-10`, verbatim:
 
-Meanwhile the *inverse* mistake: if you never call the events endpoint (full-resync-only strategy), deleted workouts are **never** discovered — `/v1/workouts` simply stops listing them, and a naive upsert-only full sync leaves them in your DB forever as phantom training sessions.
+> **The day's headline set is the one with the highest ESTIMATED 1RM, not the heaviest.** Epley maps 60 kg x
+> 10 to 80.000 and 70 kg x 5 to 81.667: a lighter set at more reps can imply more strength. Picking the
+> heaviest weight instead returns a number that is real, in the right units, and wrong — and it silently
+> flattens a lifter who progressed by adding reps rather than load.
+
+The v2.0 decision to make max-weight-lifted primary is a *user-preference* decision ("the user trains and
+thinks in terms of the heaviest weight moved"), and it is legitimate. But it walks directly into a failure
+mode the v1.0 author identified and wrote down. If the switch is implemented as "change the ranking key in
+`best_set_per_day`", then on this user's actual data — where `progression.py:24-27` records that every
+high-frequency template spans reps 5–12 with a standard deviation of 1.9–2.4 — a rep-progression block
+(same load, more reps, week over week) reads as a **flat line**, and `classify_trend` returns `stable` for
+training that is objectively improving.
 
 **Why it happens:**
-"Handle deletions" reads as "delete the row." And the phantom-workout variant happens because the deletion path is the least-exercised branch — you have to actually delete a workout in the Hevy app to test it, which nobody does by accident.
+The requirement says "max-weight-lifted becomes the primary signal". The smallest change that satisfies that
+sentence is a one-line ranking swap. The consequence is three modules away.
 
 **How to avoid:**
-- **Soft delete.** `deleted_at TIMESTAMPTZ NULL` on `workouts`. Every analytics query filters `WHERE deleted_at IS NULL`. Put this filter in one shared base query / SQLAlchemy criteria so it cannot be forgotten in the ninth analytics function.
-- Record the deletion in the sync log with the workout's date, so "why did March change?" is answerable.
-- Handle **delete-before-create**: a `deleted` event may arrive for a workout you never synced (created and deleted between two sync runs). Insert a tombstone row rather than no-op'ing, so the event is not re-applied and the history is complete.
-- **Test the full lifecycle explicitly** with a mock Hevy: create → sync → update → sync → delete → sync → assert soft-deleted and excluded from all analytics → re-sync same events → assert stable.
+Treat this as a **two-signal design**, not a substitution. Concretely:
+- Keep `best_set_per_day`'s existing e1RM-ranked selection *and* add a max-weight-ranked selection, both
+  derived from the same `qualifying_set_rows` fold (the module's own "one aggregate, folded once" rule).
+  `SessionBest` already carries `best_weight_kg` beside `best_e1rm_kg` — the data is there.
+- Make the *headline* verdict max-weight, and carry the e1RM verdict as a required sibling field, the same
+  way `RecompositionResult` carries `progression_signal` beside `status` specifically so a disagreement is
+  visible rather than resolved.
+- Surface the disagreement explicitly: "max weight flat, estimated 1RM improving" is the sentence that
+  detects rep progression, and it is only sayable if both numbers are in the payload.
+
+The precedent is already in the codebase: `progression.py:29-35` argues at length that PROG-02 and PROG-03
+"will disagree on real data, and both will be right", and solves it by making each carry its window as a
+field. Do the same for the two strength signals.
 
 **Warning signs:**
-- `db.delete(workout)` anywhere in the sync service.
-- Any analytics query on `workouts` without a `deleted_at` predicate.
-- Historical weekly-volume numbers that differ between two runs on the same date range.
+A trend verdict of `stable` for an exercise whose `total_reps` is climbing across weeks. `weeks_with_data`
+jumping from a gated subset to 100% of training weeks (see Pitfall 11). A user saying "but I *am* getting
+stronger" about an exercise the tool calls flat.
 
-**Phase to address:** **Phase 2** (soft delete + lifecycle test), enforced in **Phase 3** (every analytics query).
+**Phase to address:** Strength-metric-shift phase, as an explicit design decision recorded in the phase context — with `progression.py`'s existing docstring quoted and answered, not deleted.
 
 ---
 
-### Pitfall 6: Modeling fields Hevy doesn't have, and discarding the ones it does
+### Pitfall 11: Max weight is ungated, so removing e1RM's gates destroys the "we could not tell" honesty path
 
 **What goes wrong:**
-The blueprint's `sets` table (§8) specifies `weight`, `weight_unit`, `reps`, `distance`, `duration`, `rir`, `rpe`. Against the live spec:
+`estimate_1rm` (`backend/app/analytics/estimates.py:64-89`) applies two gates and returns a
+`NoEstimateReason` when either fails: modality must be exactly `weight_reps` (`E1RM_EXERCISE_TYPE`), reps
+must be 1–`MAX_TRUSTED_REPS` (12). The live-data consequence is recorded in the module: **4,802 of 7,719
+live hard sets pass both gates**, and `progression.py:14-16` notes **376 of 2,239 exercise-sessions (16.8%)
+have no e1RM-qualifying set at all**.
 
-- **`rir` does not exist.** Hevy's `Set` has `rpe` only. An `rir` column will be 100% NULL forever — and worse, "hard sets" analytics designed around RIR (the standard definition: a set within ~4 reps of failure) is **not implementable** from this data source. Design volume analytics around `set.type` and `rpe`, or around raw set counts, and be explicit that RIR is unavailable.
-- **`weight_unit` does not exist.** Hevy always returns `weight_kg`. A `weight_unit` column invites someone to write conversion code that runs on data that's already normalized — a silent 2.2× error waiting to happen. Drop it; the blueprint's own §41 says internal storage is kg.
-- **Fields that *do* exist and are missing from the blueprint model:** `supersets_id` (needed to interpret set density and rest), exercise-level `notes` (the user's own training observations — genuinely valuable coaching context), `custom_metric`, `routine_id` (lets you say "you've drifted from your program"), `set.index`, `exercise.index`, and the exercise-type/equipment metadata on templates.
-- **`set.type` is the one field everything depends on** and it's easy to store as an untyped string and then never filter on it (see Pitfall 8).
+Max weight has no such gates by design — `records.py` says so explicitly: *"D-02's 12-rep cap gates the
+ESTIMATE, never the observation. The rep PR and the max-weight PR are deliberately un-gated."*
+
+So switching the primary signal to max weight makes **~100% of sessions qualify**. Downstream, that is not
+"more data", it is the loss of a signal:
+- `weeks_with_data` on `ExerciseTrend` jumps, so `MIN_TREND_WEEKS = 4` stops filtering anything and
+  `TrendVerdict.UNCLEAR` all but disappears.
+- `aggregate_progression` (`recomposition.py:107-150`) deliberately **excludes `unclear` from the
+  denominator**. If `unclear` vanishes, the denominator inflates with low-information exercises and
+  `RECOMP_PROGRESSION_NET_BAND = 0.25` is being applied to a different population than it was calibrated on.
+- `scan_plateau`'s D-07a skip (`best_e1rm_kg is None` → skip, neither extends nor breaks the streak) becomes
+  a dead branch. Deload weeks and high-rep accessory days now *extend* plateau streaks — reintroducing
+  exactly the false positive the skip exists to prevent, in the opposite direction.
+- `ProgressionPoint.no_estimate_reason` is a field in the MCP response contract that stops being populated,
+  so Claude loses the "here is *why* there is no number" explanation without any schema change.
 
 **Why it happens:**
-The blueprint's schema was written from a mental model of what a workout logger *should* expose, then treated as authoritative. The `PROJECT.md` requirement "built against current official Hevy API docs (not invented endpoints)" correctly guards endpoints — but not fields.
+Ungated feels strictly better — more coverage, fewer nulls. The gates were never about coverage; they were
+about not putting a number on a set that cannot support one.
 
 **How to avoid:**
-- Generate Pydantic models **directly from the OpenAPI spec** (`datamodel-code-generator` against the extracted `swaggerDoc`, or hand-write to match it exactly), then let the DB schema follow the Pydantic models. The saved spec is at hand — commit a copy to `integrations/hevy/openapi-snapshot.json` and diff against the live one in CI so field changes surface as a test failure rather than a runtime `KeyError`.
-- Use `extra="forbid"` on the Hevy response models in tests (so new upstream fields are *noticed*) and `extra="ignore"` in production (so they don't break sync). Log a warning when unknown fields appear.
-- Keep the raw `jsonb` payload — it makes "we didn't model that field" a migration rather than a re-sync.
-- Where the blueprint and the spec disagree, **the spec wins**; record the deviation in the Key Decisions table so it isn't re-litigated.
+Decide, per downstream consumer, what "insufficient" means under the new signal, and say it in the phase
+context before writing code:
+- Keep a **modality gate** for max weight. A bodyweight or duration-only exercise has no meaningful "heaviest
+  weight" — `progression.py:93` already documents 48 live non-warm-up sets with a genuine `Decimal("0.000")`
+  weight, which the `_NO_WEIGHT_RANK = Decimal(-1)` sentinel exists to rank below real weights. That
+  sentinel logic must survive the switch or a bodyweight exercise will report a max weight of 0 kg as a real
+  observation.
+- Keep `no_estimate_reason` populated (rename it if the semantics widen), so the honesty channel stays open.
+- Re-derive `MIN_TREND_WEEKS` and the plateau skip semantics against the new signal rather than inheriting
+  numbers tuned for the gated one.
 
 **Warning signs:**
-- A column that is NULL for every row after a full sync.
-- Any unit-conversion code inside `integrations/hevy/`.
-- `KeyError` / `ValidationError` on real data after passing all tests against hand-written fixtures.
+`UNCLEAR` verdict count dropping to near zero. Plateau durations getting *longer* across the board.
+`no_estimate_reason` absent from every response.
 
-**Phase to address:** **Phase 2**.
+**Phase to address:** Strength-metric-shift phase.
 
 ---
 
-### Pitfall 7: Building exercise normalization by string-matching names when Hevy already gives you the mapping
+### Pitfall 12: Three tuned constants are calibrated against e1RM's continuous distribution, and max weight is a step function
 
 **What goes wrong:**
-`PROJECT.md` specifies "an exercise normalization layer mapping exercise **names** to canonical muscle groups." Name-matching is fragile in exactly the ways that matter: `"Bench Press (Barbell)"` vs `"Bench Press (Dumbbell)"` vs `"Incline Bench Press (Smith Machine)"` vs a user-renamed custom exercise vs the emoji-and-parenthesis conventions Hevy uses. You end up with a hand-maintained regex table that silently drops any exercise it doesn't recognize — and *dropped* exercises don't error, they just make a muscle group look undertrained. Claude then confidently advises the user to add chest volume they're already doing.
+The switch changes the *statistical character* of the input, and every threshold downstream was tuned to the
+old character on live data. In detail:
 
-Meanwhile, `GET /v1/exercise_templates` returns `primary_muscle_group` and `secondary_muscle_groups[]` **for every exercise, including custom ones**, drawn from a fixed 20-value enum — and every workout exercise carries a stable `exercise_template_id` pointing at it.
+| Constant | Value | Where | Calibrated how |
+|---|---|---|---|
+| `TREND_STABLE_BAND_PERCENT_PER_WEEK` | `0.5` %/wk | `progression.py:328` | **Derived**: D-07's 2% band ÷ D-05's 4 weeks. Validated on live data: 9 improving / 9 stable / 10 declining across 28 exercises |
+| `PLATEAU_IMPROVEMENT_TOLERANCE` | `0.02` (2%) | `progression.py:522` | Chosen to absorb Epley rep-scheme noise |
+| `RECOMP_PROGRESSION_NET_BAND` | `0.25` | `recomposition.py:93` | Applied to the 9/9/10 live split |
+
+Two structural problems:
+
+**(a) D-18's derivation collapses.** `progression.py:314-328` is explicit that 0.5%/week is *not an
+independent number* — it is 2%/4 weeks, and sharing one underlying figure is what makes PROG-02 and PROG-03
+unable to contradict each other **by construction**. If the plateau tolerance and the trend band are
+re-tuned independently for max weight, that structural guarantee is gone, and the codebase will happily
+report an exercise as `improving` at a rate the plateau scanner refuses to call an improvement.
+
+**(b) Max weight moves in discrete increments, not continuously.** Machine stacks and plate loading move in
+2.5–5 kg steps. On a 100 kg lift a single 5 kg increment is a **5% jump** — 2.5× the plateau tolerance — so
+*every* load increase breaks the streak. Between increases, every session is *exactly* equal, so the
+tolerance band does nothing at all. The 2% band, which was a noise filter for a continuous quantity, becomes
+a no-op applied to a step function. Meanwhile OLS (`_weekly_slope`) over a staircase with long flats and
+occasional jumps produces a slope dominated by *when* the jump landed in the window — move the window one
+week and the verdict flips.
 
 **Why it happens:**
-The exercise-normalization requirement was written before the template endpoint was examined. Also `exercise.title` is right there in the workout payload, so name-based mapping is the path of least resistance.
+The constants have names that read like policy ("2% tolerance") rather than like calibration artefacts. Only
+the comments record that they were fitted to a specific distribution on specific data.
 
 **How to avoid:**
-- **Key on `exercise_template_id`, never on the title.** Titles are display strings; the template ID is the join key.
-- **Seed the mapping table from `/v1/exercise_templates`** (`pageSize=100`, so this is cheap) and store `primary_muscle_group`, `secondary_muscle_groups`, `type`, `equipment_category`, `is_custom`. Keep the blueprint's manual-override capability as a *nullable override column* layered on top of the Hevy-sourced defaults — you get correctness by default and the ability to disagree (e.g. reclassifying a movement's secondary emphasis) without maintaining the base mapping by hand.
-- **Fail loud on unmapped templates.** An exercise whose `exercise_template_id` has no template row must raise a visible warning and appear in a `SELECT` you actually run — never be silently excluded from volume.
-- Re-sync exercise templates as part of the scheduled job (new custom exercises appear whenever the user creates one mid-workout); an unmapped ID discovered during workout sync should trigger an on-demand `GET /v1/exercise_templates/{id}`.
-- Use Hevy's 20-value `MuscleGroup` enum as your canonical vocabulary rather than inventing one. It already distinguishes `lats` / `upper_back` / `traps` / `lower_back`, which is the granularity muscle-group volume analysis needs.
+- Re-run the calibration the same way v1.0 did — against the live account, reporting the improving /
+  stable / declining split — and record the new numbers and the split in the phase context. A threshold
+  carried over without re-validation is a number that was right about a different quantity.
+- Preserve the *derivation relationship*: whatever the new band is, derive the trend band from the plateau
+  tolerance and the minimum window, and say so in a comment, so D-18's structural guarantee survives.
+- Consider whether "plateau" even means the same thing under max weight. Under e1RM it meant "your ceiling
+  hasn't moved". Under max weight it means "you haven't added load" — which is a longer, coarser, and
+  arguably more useful signal, but it is a **different definition** and `PlateauResult`'s
+  `threshold_percent` / `min_sessions` / `min_elapsed_days` echo fields must describe the new one honestly.
 
 **Warning signs:**
-- Any `re.match` / `LIKE '%bench%'` in the normalization layer.
-- A muscle group with implausibly low volume (usually means its exercises fell through the mapping).
-- The count of distinct `exercise_template_id` in `workout_exercises` exceeds the count of rows in your templates table.
+Trend verdicts that flip when `weeks` changes by one. All exercises classifying as `improving` or
+`declining` with almost nothing `stable` (band too tight for a step function), or the reverse.
+`recomposition_status` changing for the whole account on the deploy that ships the switch.
 
-**Phase to address:** **Phase 2** (sync templates), consumed in **Phase 3**.
+**Phase to address:** Strength-metric-shift phase. The phase's success criterion should be a *before/after* comparison table on live data, not just green tests — green tests will stay green, because the fixtures move with the code.
 
 ---
 
-### Pitfall 8: Volume math that ignores set type, null weights, and the 8 exercise types
+### Pitfall 13: `confirm=true` as a plain tool parameter is not a confirmation gate
 
 **What goes wrong:**
-`volume = SUM(weight_kg * reps)` is the default implementation and it is wrong in at least five ways against real Hevy data:
+This is the highest-severity pitfall in the milestone, because it is the one that lets a language model
+mutate state without the user's knowledge, in a system whose entire security posture to date has been
+"nothing can write".
 
-1. **Warm-up sets are included.** Hevy tags them (`set.type = 'warmup'`), and the training-science consensus is unambiguous that light warm-ups shouldn't count toward volume. Including them inflates tonnage by 20–40% and, worse, makes tonnage *fluctuate with warm-up habits* rather than with training.
-2. **`weight_kg` is nullable.** For `bodyweight_reps` (pull-ups, dips, push-ups) it's null or zero → `NULL * reps = NULL`, and `SUM` silently skips it. Your entire back and chest calisthenics volume evaluates to zero. Claude reports "your lats are undertrained."
-3. **`bodyweight_assisted_reps`** logs the *assistance* weight. Multiplying it into tonnage adds volume in proportion to how much help you needed — the metric runs backwards.
-4. **`duration`, `distance_duration`, `weight_duration`, `short_distance_weight`, `reps_only`** have no meaningful `weight × reps`. Five of Hevy's eight exercise types don't fit the formula.
-5. **`dropset` and `failure` sets** are real working sets and should count, but conflating them with `normal` sets distorts set-count-based metrics.
+PROJECT.md's decision describes a "two-call design: first call warns, second call with `confirm=true`
+switches". If `confirm` is exposed as a `bool` in the tool's `inputSchema`, **the model can set it to `true`
+on the very first call.** There is no protocol-level rule that a model must make the warning call first;
+`confirm` is just another argument it is free to populate, and a model that has been told "switch me to a
+cut" will helpfully do exactly that in one shot. The warning step is advisory, not a gate.
 
-Because this produces *numbers* rather than errors, it passes tests written against hand-crafted barbell-only fixtures, ships, and then Claude presents wrong analysis with full confidence — which is worse than no analysis at all.
+Compounding it: `mcp 2.0.0`'s `Context.elicit()` exists and looks like the correct primitive — but the
+SDK's own docstring (read from the installed package) says:
+
+> "If the client is an agent, it might decide how to handle the elicitation — **either by asking the user or
+> automatically generating a response.**"
+
+So elicitation is *also* not a guaranteed human gate. And `Context.client_capabilities` documents that it is
+`None` "when the client declared none (e.g. an **anonymous stateless request** without the reserved `_meta`
+keys)" — BRETT builds its app with `stateless_http=True` (`server.py:221`), so a capability check will
+frequently return `None` and a tool that depends on elicitation will fail on the one client the user
+actually uses.
+
+On the client side: Claude Desktop's tool-approval dialog has an "Always approve" option which community
+sources report **cannot be undone** once clicked. Client-side approval is therefore a control the user can
+permanently disable by accident.
 
 **Why it happens:**
-`sets × reps × weight` is the textbook definition, and the blueprint (§17) says "training volume" without defining it. Test fixtures are always barbell bench press.
+"Two-call confirm" sounds like a protocol. Implemented as a boolean parameter, it is a naming convention.
 
 **How to avoid:**
-- **Write down the definition before writing the code**, in `docs/analytics-definitions.md`, and expose it: every MCP tool response should carry a `methodology` string or a documented tool description so Claude can explain what "volume" means when asked.
-- **Compute two metrics, not one:**
-  - `hard_sets` — count of sets where `type IN ('normal','dropset','failure')`. This works for **all 8 exercise types** and is the more defensible primary metric.
-  - `tonnage_kg` — `SUM(weight_kg * reps)` restricted to `type IN ('normal','dropset','failure')` **and** exercise `type IN ('weight_reps','weight_duration','short_distance_weight')`. Report it as `NULL`/absent for other types rather than 0.
-- **Bodyweight handling:** either exclude bodyweight exercises from tonnage entirely (honest) or impute using logged body weight from `body_measurements` (better, but then say so in the methodology and mark it as estimated). Never let them silently contribute 0.
-- **Never emit `0` where you mean "not applicable."** Zero means "did nothing"; null means "not measurable." Claude will interpret 0 as a training gap.
-- **Golden-fixture tests:** hand-compute expected values for a fixture set that includes a barbell exercise with warm-ups, a bodyweight exercise, an assisted exercise, a duration-only exercise, a dropset, and a superset. Assert exact numbers. This is the single test that protects every downstream metric.
-- **Unverified assumption to validate against real data (LOW confidence):** whether Hevy stores dumbbell exercise weight *per dumbbell* or as a *combined* total. If per-dumbbell (likely), dumbbell tonnage is half of true tonnage and dumbbell-vs-barbell progression comparisons are invalid. Verify against your own account in Phase 2 and record the finding.
+Make the second call **impossible to construct without the first**:
+- The warn call returns a **server-generated, single-use, short-TTL confirmation token** (e.g.
+  `secrets.token_urlsafe(16)`), persisted server-side with the *exact target state* it authorises
+  (`from_program`, `to_program`, `issued_at`, `expires_at`, `consumed_at`).
+- The switch call takes `confirmation_token: str`, not `confirm: bool`. The model cannot guess it; it can
+  only echo back what the server just gave it, which means the warning text was necessarily rendered into
+  the conversation first.
+- Bind the token to the target: if the token was issued for "switch to cut" and the second call asks for
+  "switch to lean bulk", reject. Otherwise the model can reuse a token to perform a *different* switch than
+  the one the user saw described.
+- Consume atomically (`UPDATE ... WHERE consumed_at IS NULL RETURNING ...`) so a retried second call is a
+  no-op rather than a double-switch.
+- Expire in minutes, not hours. A stale token found in a scrolled-back conversation must not still work.
+
+Do **not** rely on `ctx.elicit()` as the control. It is acceptable as an *additional* prompt where the
+client supports it; it is not the gate.
 
 **Warning signs:**
-- Total volume for a bodyweight-heavy session is 0 or NULL.
-- Any muscle group whose volume is exactly 0 across all weeks.
-- Weekly tonnage that correlates with warm-up count rather than working sets.
-- `SUM(weight_kg * reps)` appearing without a `set_type` filter beside it.
+A tool schema containing a boolean named `confirm`, `force`, `yes`, or `acknowledged`. A test that switches
+a program in a single tool call. Any code path where the first call has a side effect.
 
-**Phase to address:** **Phase 3**. Add the fixture-diversity requirement to the phase's exit criteria.
+**Phase to address:** Training-programs / write-tool phase. This is the phase's defining success criterion: "a single tool call cannot change the active program", proven by a test that tries.
 
 ---
 
-### Pitfall 9: Two sources of truth for body weight
+### Pitfall 14: Adding one write tool disarms the guards that protect the other thirteen
 
 **What goes wrong:**
-`PROJECT.md` scopes body measurements to manual entry. But Hevy's API has a full `/v1/body_measurements` resource (weight, lean mass, fat %, and 15 circumference fields) — and the user, who owns a Hevy Pro subscription, is plausibly already logging weight there. If both paths exist, the weight-trend analytic (7/14/30-day moving averages) reads from a table that has some days from Hevy and some typed into BRETT, with no conflict rule. Moving averages over an inconsistently-populated series produce trend lines that flip sign depending on which source happened to have data that week — and recomposition-status classification is built directly on top of that trend.
+BRETT's read-only guarantee is enforced by four mechanisms, and the *smallest* way to add a write tool
+breaks or bypasses each of them:
 
-Additionally, Hevy's `PUT /v1/body_measurements/{date}` documents **"All fields are overwritten; omitted fields are set to null"** — a write path that silently destroys data. (Not a v1 concern since MCP is read-only, but a trap for milestone 2.)
+| Mechanism | Where | What the write tool does to it |
+|---|---|---|
+| PostgreSQL `READ ONLY` transaction | `_common.read_only_session` (`_common.py:123-154`) | Needs a writable session. Temptation: relax `read_only_session` itself, which silently un-protects all 13 read tools |
+| Static ban on writes in `app/mcp/` | `test_mcp_isolation.py:129` `test_mcp_never_writes` — bans `session.commit\|flush\|add\|add_all` and `from sqlalchemy import insert\|update\|delete` across every module under `app/mcp/` | **Will fail on the commit that adds the tool.** Temptation: delete the test |
+| `READ_ONLY` annotations applied by loop | `server.py:215-216` — `for _fn, _description in _TOOLS: mcp.add_tool(..., annotations=READ_ONLY)` | Adding the write tool to `_TOOLS` gives it `read_only_hint=True, destructive_hint=False`. `test_every_tool_is_annotated_read_only` **passes**, while the tool writes. The annotation is now an active lie to the client |
+| No required scopes | `server.py:116` `required_scopes=None`, with the in-code note *"Revisit when the first write tool ships."* | Left as-is, the write tool is authorised by exactly the same token as a read |
 
 **Why it happens:**
-The blueprint predates (or overlooked) the body-measurements endpoint, so "manual entry" was the only option considered. The endpoint's existence changes the calculus.
+Each guard fails in a way whose cheapest fix is to weaken it globally. `test_mcp_never_writes` in particular
+produces a red test with a message telling you the file must not write — and the two-second fix is to remove
+the file from the walk or the assertion from the test.
 
 **How to avoid:**
-- **Decide the source-of-truth policy in Phase 1, when the schema is designed**, not in Phase 3 when the trend math breaks. Model `body_measurements` with `(user_id, source, measured_on)` unique and an explicit precedence order (`hevy` > `manual`, or vice versa) resolved in a single view/query — the same shape the blueprint already uses for workouts.
-- Ask the user whether they log weight in Hevy. If yes, **sync it in Phase 2** — it's one more paginated endpoint against an already-built client, and it removes a manual-entry chore that will otherwise be skipped, leaving the recomposition analytics data-starved.
-- Weight-trend analytics must handle **irregular sampling** regardless of source: a "7-day average" over 2 data points is not a 7-day average. Return the sample count alongside every trend value, and refuse to classify recomposition status below a minimum sample threshold rather than emitting a confident label from 2 points.
-- Note the `POST` → **409 on existing date** behaviour and the destructive `PUT` semantics in `integrations/hevy/README.md` now, so milestone 2 doesn't rediscover them by overwriting real measurements.
+- **Narrow, never remove.** `test_mcp_never_writes` should take an explicit single-module allowlist (the
+  program-switch tool module, by exact filename) and assert that the allowlist has **exactly one entry** —
+  so adding a second write tool is also a red test. This mirrors how `test_mcp_uses_no_raw_sql_text` already
+  exempts `ping.py` "by name".
+- Add a **second** static assertion: that `read_only_session` is *not* referenced in the write module and
+  that no other module references the writable-session helper. Two guards pointing at each other.
+- Give the write tool its **own** `ToolAnnotations` — `read_only_hint=False`, `destructive_hint=True`,
+  `idempotent_hint=False` — registered outside the `_TOOLS` loop, and update
+  `test_every_tool_is_annotated_read_only` to assert *the exact partition*: 13 read-only tools by name, 1
+  write tool by name. A test that says "all tools are read-only" must become a test that says "these 13 are
+  read-only and this 1 is not", or it silently stops meaning anything.
+- Revisit `required_scopes` as the in-code note instructs. Note the tradeoff the same comment records:
+  adding a required scope "would mean re-consenting the Phase 2 connector that already works." A reasonable
+  middle path is a scope required *only* by the write tool, checked in the tool body against
+  `AccessToken.scopes` — but be aware `AuthKitJWTVerifier` populates scopes from the WorkOS `scope` claim,
+  so this needs a corresponding AuthKit configuration change and an end-to-end re-verification, not just
+  server code.
+- The writable session must **not** live in `app/analytics/` — `test_analytics_isolation.py` bans writes
+  there too, and for good reason. Put it in `app/db/repositories/` (which owns writes today) or a new
+  `app/services/programs.py`, and have the MCP tool call it.
 
 **Warning signs:**
-- Weight-trend output changes materially when a single measurement is added.
-- Recomposition status flips between adjacent runs.
-- Two rows for the same date with different weights.
+A diff that deletes or weakens an assertion in `test_mcp_isolation.py`. A `git log` entry touching
+`_common.read_only_session`. The write tool appearing inside the `_TOOLS` tuple.
 
-**Phase to address:** **Phase 1** (schema + precedence), **Phase 2** (optional Hevy sync), **Phase 3** (sample-count guards).
+**Phase to address:** Training-programs / write-tool phase.
 
 ---
 
-### Pitfall 10: Building against MCP knowledge that is one breaking revision stale
+### Pitfall 15: `safe_tool` swallows write failures and reports them as "degraded", inviting a retry that double-applies
 
 **What goes wrong:**
-The MCP spec's **current revision is `2026-07-28`** — released 26 days before this research. It removed the `initialize`/`initialized` handshake, removed protocol-level sessions (`Mcp-Session-Id`), removed the GET stream endpoint and `Last-Event-ID` resumability, and deprecated Roots, Sampling, and Logging. The Python SDK shipped **`mcp` 2.0.0 on the same day**, renaming the high-level server class from `FastMCP` to `MCPServer` (`from mcp.server import MCPServer`, previously `from mcp.server.fastmcp import FastMCP`).
+`_common.safe_tool` (`_common.py:254-290`) wraps every tool: any exception is logged and replaced with a
+caller-supplied `degraded()` payload. It exists for an excellent, verified reason — `mcp 2.0.0` returns
+`str(exception)` to the model verbatim, and an asyncpg connection error carries the full DSN.
 
-Any MCP server code an assistant writes from memory will be v1/`FastMCP`-shaped. If you `pip install mcp` unpinned today you get 2.0.0 and the code won't import. If you pin to 1.x you get an SDK aligned with a superseded spec revision — and, critically, **you don't know which revision Claude's connector infrastructure currently speaks**, so you need the SDK's dual-era compatibility handling rather than a hand-rolled transport.
+Applied unchanged to a write tool, it produces two distinct bugs:
+1. **A failed write is indistinguishable from a failed read.** Claude receives a generic
+   `data_available: false` payload and, following the coaching instructions' "call a tool before making any
+   claim" discipline, may simply try again — re-consuming or re-requesting a confirmation and potentially
+   applying the switch twice.
+2. **Worse: an exception raised *after* `commit()`** — during response serialisation, or in a follow-up read
+   — returns a *failure* payload for a write that **succeeded**. The user is told the program did not
+   change; it did. If they then retry, the second switch is applied to a state they do not know about.
 
 **Why it happens:**
-This is the training-data-as-hypothesis failure mode in its purest form: MCP is churning faster than any model's cutoff, and the transport is exactly the layer where a stale mental model produces "connects locally, fails from Claude."
+`safe_tool` is applied uniformly by convention (`test_every_tool_module_guards_its_public_tools` in
+`test_mcp_isolation.py:212` asserts it), so the write tool gets it automatically.
 
 **How to avoid:**
-- **Pin `mcp` exactly** in `pyproject.toml` (`mcp==2.0.0` or whatever is current at Phase 4 start) and record the pinned version + spec revision in the Key Decisions table.
-- **Do not hand-roll the transport.** Let the SDK own protocol-version negotiation and backward compatibility with the `2025-03-26`…`2025-11-25` era. The SDK has an explicit "legacy clients" code path; use it.
-- **Re-read the SDK docs at the start of Phase 4** rather than trusting any code in this repo's planning docs (including this file). Verify: the class name, `streamable_http_app()`'s signature, `stateless_http`, and `TransportSecuritySettings`.
-- Have the MCP server report its protocol/SDK version on a plain `/health` route so a mismatch is diagnosable from outside.
-- Assume this will churn again. Keep MCP tool handlers as thin adapters over the analytics layer (blueprint already requires analytics to live outside MCP handlers — enforce it) so an SDK migration touches one directory.
+Keep `safe_tool` — the DSN leak is real — but give the write tool a **three-state** result rather than a
+boolean: `applied` / `not_applied` / `unknown`. Return `unknown` from the exception path and have the
+degraded payload instruct the model to **read the current program back** rather than retry. Structure the
+tool so that commit is the **last** statement and everything after it is pure serialisation of already-held
+values, minimising the post-commit failure window. Consume the confirmation token **in the same transaction
+as the switch**, so "token consumed" and "switch applied" cannot disagree.
 
 **Warning signs:**
-- `from mcp.server.fastmcp import FastMCP` in new code.
-- Any unpinned `mcp` dependency.
-- Code that manually constructs `initialize` responses or manages `Mcp-Session-Id`.
-- Handshake works in MCP Inspector (which tracks the newest spec) but fails from Claude, or vice versa.
+A write tool whose `degraded()` factory returns the same shape as a read tool's. A conversation transcript
+where Claude calls the switch tool twice in a row.
 
-**Phase to address:** **Phase 4**, first task.
+**Phase to address:** Training-programs / write-tool phase.
 
 ---
 
-### Pitfall 11: Mounting the MCP app in FastAPI without wiring its lifespan (and the localhost-only default)
+### Pitfall 16: Storing the active program as a mutable column makes every historical answer retroactively wrong
 
 **What goes wrong:**
-Two failure modes, both of which pass local smoke tests and then break:
+`recomposition.py:68-97` hardcodes five lean-bulk constants with the comment: *"The user's stated goal is a
+LEAN BULK. There is no `users.goal` column and none is being added; the goal shapes these threshold VALUES
+and nothing structural."* v2.0 replaces those with program data.
 
-1. **"Task group is not initialized."** `mcp.streamable_http_app()` ships its own lifespan that starts the session manager. **Mounting it inside a parent FastAPI/Starlette app disables that lifespan.** Every request then fails at runtime. The SDK's own troubleshooting page documents this exact error. Fix: the *host* app's lifespan must enter `mcp.session_manager.run()`. This is directly relevant because the blueprint (§45) plans to run `fitness-api` and `fitness-mcp` in one service.
-2. **Works on localhost, 4xx on Render.** The SDK's DNS-rebinding protection is **on by default** and, per the SDK docs, the app "only responds to requests addressed to localhost" unless you configure `TransportSecuritySettings(allowed_hosts=[...])`. On Render the `Host` header is `brett-xyz.onrender.com`, so every request is rejected — after a green deploy, with no application error.
-
-Related, from the spec: servers **MUST** validate the `Origin` header and return **403** when it's present and invalid. Anthropic's connector traffic originates from Anthropic's cloud, not the user's browser, so an over-tight `allowed_origins` list is another way to lock out the only client you care about.
+The obvious model is a `users.active_program` column (or a `programs` table with an `is_active` flag). But
+`get_recomposition_status` classifies against a **12-week lookback** (`RECOMP_LOOKBACK_WEEKS = 12`) and a
+4-week smoothed weight rate. If the program is a single mutable value, then switching from Lean Bulk to Cut
+today re-classifies the **previous twelve weeks** under cut thresholds. Asked "how did my bulk go?", Claude
+answers using cut thresholds, and the answer it gave last week is now unreproducible. In a system whose
+entire value proposition is *"answer from actual data instead of guessing"*, a retroactively-mutating
+threshold is a silent correctness failure — and one the user is uniquely positioned to notice and lose trust
+over.
 
 **Why it happens:**
-Both defaults are *correct security defaults for local stdio-adjacent servers* and both become wrong the moment you deploy behind a hostname. Neither produces a startup error — they fail at request time, after "deploy succeeded."
+"Active program" reads as current state, not as history. The temporal dimension only becomes visible when
+you notice the classifier looks 12 weeks back.
 
 **How to avoid:**
-- Parent-app lifespan **must** wrap `async with mcp.session_manager.run(): yield`. If you ever mount two MCP servers, the shared lifespan enters both.
-- Set `TransportSecuritySettings(allowed_hosts=["<your-host>", "<your-host>:*"])` from an env var (`MCP_ALLOWED_HOSTS`) so local, preview, and production differ by config, not code. Include both the bare host and the `:*` wildcard-port form — the SDK docs call this out explicitly.
-- Be **permissive on `allowed_origins`** (or leave it unset) for a non-browser client; Anthropic's IP ranges and Origin behaviour aren't something you control. Alternatively, if Render's proxy already normalises `Host`, `enable_dns_rebinding_protection=False` plus your own auth is a documented, defensible choice — just make it a deliberate one.
-- Ordering matters: define your own routes **before** the `Mount`, or the MCP app swallows them.
-- Add a Phase 5 exit criterion that is a real HTTP call from outside your network — `curl` a `tools/list` against the deployed HTTPS URL with a correct `Accept: application/json, text/event-stream` and `MCP-Protocol-Version` header — not just "the deploy is green."
+Model it as **effective-dated history**: `program_periods(user_id, program, started_on, ended_on)`, with the
+switch tool closing the current period and opening a new one. Then:
+- `get_recomposition_status` resolves thresholds for the period(s) its window covers, and a window spanning
+  a switch is a *reportable fact* — return the program alongside the verdict, exactly as `PlateauResult`
+  returns its window and threshold alongside its verdict, for exactly the same reason
+  (`progression.py:29-35`: "a verdict without its window is a contradiction waiting to be narrated").
+- A window straddling a program change should say so rather than silently picking one.
+
+This also gives the write tool something honest to report: "switched from Lean Bulk (started 2026-06-14, 11
+weeks) to Cut" — which is a far better confirmation prompt than "switch program?".
 
 **Warning signs:**
-- `RuntimeError: Task group is not initialized` in Render logs.
-- 400/403 on `/mcp` from the internet while `curl localhost` works in a local container.
-- `/health` returns 200 but `/mcp` doesn't.
+A `programs` table with a boolean `is_active` and no date columns. A recomposition response that does not
+name the program it classified against. Two runs of the same question a day apart giving different verdicts
+with no new data.
 
-**Phase to address:** **Phase 4** (lifespan), **Phase 5** (transport security + external verification).
+**Phase to address:** Training-programs / write-tool phase, in the schema plan — this is a modelling decision, and it is nearly free now and expensive after there is history.
 
 ---
 
-### Pitfall 12: Proxy buffering, cold starts, and the 60-second initialize window
+### Pitfall 17: Building the report feature around a client capability that is documented-broken and closed "not planned"
 
 **What goes wrong:**
-Remote MCP over Streamable HTTP is a long-lived-response protocol running through a reverse proxy. Three interacting failures:
+PROJECT.md's decision: *"Weekly/monthly reports = on-demand MCP tools driven by Claude's own scheduled-tasks
+feature, not a BRETT-side scheduler."* The architectural half of that (no server-side scheduler, no push
+channel, reports as ordinary MCP tools) is sound and low-risk. The **delivery** half depends on a client
+feature with a documented failure mode:
 
-1. **Buffering.** Reverse proxies (nginx and friends) buffer responses by default; an SSE response gets held in a buffer instead of streamed. The MCP spec says servers **SHOULD** send `X-Accel-Buffering: no` when initiating an SSE stream, precisely for this. Symptom: the connector hangs and eventually times out, with a perfectly healthy server.
-2. **Cold starts.** Render's **free web services spin down after 15 minutes of inactivity and take roughly a minute to spin back up**. Claude cancels the connection if the server doesn't respond to its opening request within about 60 seconds. A connector you use twice a day will be cold nearly every time — so the *first* tool call of every session lands in the worst case, and the user experiences BRETT as "the connector that never works."
-3. **Idle timeouts** on quiet connections, plus VPN/zero-trust agents that selectively break long-lived HTTPS streams while normal web traffic looks fine.
+- **anthropics/claude-code#43397** (opened 2026-04-04, **closed as not planned**): *"Cloud scheduled tasks
+  cannot access MCP connectors — tools not loaded into session."* The agent runs `ToolSearch` per connector
+  and gets "No matching deferred tools found" for all of them. **100% reproducible.** Sending any user
+  message into the same session immediately makes the connectors available — i.e. the failure is specific to
+  autonomous start, which is the entire point of scheduling. Listed as a regression from before 2026-03-31.
+- **anthropics/claude-code#45306** (opened 2026-04-08, **closed as not planned**): scheduled tasks fail
+  *silently* — the agent only has WebFetch, WebSearch, RemoteTrigger and filesystem tools, and reports "the
+  required integrations are not available in this environment." Affects both API-created and UI-created
+  triggers.
+- Related issues span Claude Desktop too (#35899, #36327), plus #40835 ("creating new tasks disables
+  connectors in existing tasks").
+- Separately, community reports describe OAuth token expiry crashing scheduled tasks — directly relevant
+  here, because `AuthKitJWTVerifier` **fails closed** by design (`auth.py:69-73`) and a non-interactive
+  session has no way to complete a refresh.
+
+The risk is not "the reports are bad". It is that the milestone's success criterion — "reports Claude can
+deliver on a schedule" — may be **unachievable for reasons entirely outside this repo**, discovered only at
+the end of the phase.
 
 **Why it happens:**
-Everything is tested locally where there's no proxy, no spin-down, and no timeout. "It's just HTTPS" hides that this is a streaming protocol.
+The feature is real, documented and demoed. Its interaction with third-party connectors is where it breaks,
+and that is not visible from the feature's own documentation.
 
 **How to avoid:**
-- **Use a paid Render instance type for the MCP service.** This is the cheapest possible fix for the highest-frequency user-visible failure. If cost is a real constraint, a cron-based keepalive ping every 10 minutes is a workaround — but it also burns the 750 free instance-hours/month allowance, so it isn't actually free.
-- Emit `X-Accel-Buffering: no` on SSE responses (verify the SDK does this; add it via middleware if not).
-- Keep tool handlers **fast** — target well under 5 seconds. All analytics should be plain SQL over indexed columns. Don't trigger a Hevy sync inside a tool call (Pitfall 15).
-- Make DB connection acquisition cheap on cold start: modest pool size, `pool_pre_ping=True` (Render Postgres will drop idle connections), and no heavyweight work in the app lifespan.
-- **Verify from a phone on cellular**, not just from your laptop, as a Phase 5 exit criterion. That's the path that exercises Anthropic's cloud → Render, cold.
+- **Spike it first, in a day, before building the report tools.** Schedule a task that calls the *existing*
+  `fitness_ping` and check it actually runs autonomously. This is the cheapest possible de-risk and it uses
+  a tool that already ships.
+- **Decouple the value from the delivery.** Design the report tools so they are fully valuable **on demand**
+  ("give me my weekly report"). Then scheduling is an enhancement, and a scheduled-task failure is a missed
+  convenience rather than a failed phase.
+- If the spike fails, the documented community workaround for #43397 is to structure the scheduled prompt to
+  **delegate to a sub-agent**, which initialises MCP tools correctly. Capture that in
+  `docs/coaching-instructions.md` or a setup doc rather than in server code.
+- Record explicitly in the phase context that this dependency is unverified and outside the repo's control.
 
 **Warning signs:**
-- Connector works immediately after a deploy, fails hours later.
-- Intermittent "connection failed"/timeout in Claude with no corresponding error in Render logs (the request never arrived, or the response never flushed).
-- Any tool handler that does network I/O.
+A scheduled run that completes with no output and no error. A run whose transcript contains "I don't have a
+BRETT tool available in this environment". A 401 in Cloud Run logs at the scheduled time.
 
-**Phase to address:** **Phase 5**.
+**Phase to address:** Report-tools phase, as a **spike plan before** the implementation plans. Consider sequencing this phase early enough that a negative result can reshape the milestone rather than sink a phase.
 
 ---
 
-### Pitfall 13: Feeding Claude raw data instead of answers
+### Pitfall 18: The report tool fans out across every analytics module and blows both the context budget and the cold-start budget
 
 **What goes wrong:**
-`fitness_get_recent_workouts(limit=20)` returns every set of every exercise. Twenty workouts × 6 exercises × 4 sets × ~10 JSON fields is thousands of tokens of near-identical structure. Real limits: **Claude Code rejects tool results above ~25,000 tokens** (`MAX_MCP_OUTPUT_TOKENS`), and Claude Desktop caps around **150,000 characters**, with truncation that is lossy and position-biased — it keeps the beginning and drops the rest, so the *newest* or *oldest* data (whichever you sorted last) silently vanishes and Claude reasons over a partial series without knowing it.
+A weekly/monthly report composing "volume, strength, measurements, trends, and recommendations into one
+structured payload" is `fitness_get_training_summary` again, but wider. That tool's docstring
+(`mcp/tools/schemas.py`, `TrainingSummaryResponse`) records the measurement that made it possible:
 
-Separately, **15 tools with verbose JSON schemas is itself a context cost** paid on every single conversation turn, before any data is fetched. Overlapping tools (`fitness_get_training_summary` vs `fitness_get_weekly_volume` vs `fitness_compare_periods`) also make tool *selection* unreliable — the model picks the wrong one, gets a plausible answer, and never realises.
+> "composing the four analytics results verbatim measures ~24 KB structured / ~57 KB wire at a 4-week
+> window; this shape is ~3,963 / ~9,502."
+
+That is a **6× reduction achieved by deliberate field selection**, and it is why the summary tool
+*excludes* personal records, plateaus, the per-exercise frequency list and the per-week × per-muscle grid. A
+monthly report is a wider window (higher `weeks`) over *more* modules — the naive composition is
+comfortably worse than the 24 KB shape that was already rejected.
+
+Simultaneously, on the runtime side: `get_recomposition_status` alone already calls
+`get_body_weight_trend` → `get_exercise_trends` → `get_weekly_volume`, each with its own
+`build_coverage`/`build_freshness` round trips. A report that adds records, plateaus, per-muscle rollups and
+multi-column measurement trends multiplies the query count, on a service with `MIN_INSTANCES=0` (cold start)
+and `MAX_INSTANCES=2` (SQLAlchemy pool ≤10 connections per instance).
 
 **Why it happens:**
-The tool list in the blueprint (§29) is a data-model inventory, not a task inventory. And "return structured JSON" gets read as "return the rows."
+"One structured payload" reads as a composition problem. It is a budget problem, and the budget was already
+found to be binding at a narrower scope.
 
 **How to avoid:**
-- **Aggregate server-side. Always.** The whole point of the analytics layer is that the MCP returns *computed* values. `fitness_get_weekly_volume` returns ~12 rows of `{week_start, hard_sets, tonnage_kg}`, not sets.
-- Every list-returning tool gets a **`limit` with a sane default and a hard server-side maximum**, and returns a `truncated: true` flag plus `total_available` when it clips — so Claude *knows* it's looking at a subset and can say so.
-- **Budget tokens explicitly:** target < 2,000 tokens per tool response; treat > 5,000 as a bug. Add a test that asserts serialized response size for a realistic dataset — cheap to write, catches this permanently.
-- **Compact JSON shapes:** short key names, ISO dates as strings, round floats to 1–2 decimals (`117.30000000000001` kg of tonnage is noise), omit null fields rather than emitting `"rpe": null` thousands of times.
-- **Start with 6–8 tools, not 15.** Ship the ones that answer the two questions in the Core Value statement ("Am I progressing?", "Which muscles are undertrained?") and add more only when a real conversation demonstrably needs one. Make tool descriptions crisply non-overlapping and state *when to use this instead of that*.
-- Keep one deliberately verbose escape hatch (`fitness_get_workout(workout_id)`) for drill-down, and make the summary tools return IDs so Claude can drill down on demand. That's the pattern that keeps context small without losing fidelity.
+- Set the byte budget **before** writing the tool, in the phase context, and measure it the way Phase 6
+  measured the summary (structured and wire, at the widest legal window). Add it to
+  `test_mcp_tool_budget.py`, which already exists for this purpose.
+- Add a `MAX_REPORT_WEEKS` cap next to `MAX_SUMMARY_WEEKS = 12` in `_common.py` — the monthly report's window
+  is the multiplier on everything.
+- Reuse the existing composition (`get_training_summary`'s selected fields) as the report's spine and add
+  *narrow* extras, rather than composing full analytics results and trimming afterwards.
+- Use `truncate()` (`_common.py:293`) for every list, and carry both returned flags — an unlabelled cap in a
+  report is exactly the "wrong answer with no signal that anything was withheld" that function's docstring
+  warns about, and a report is the response most likely to be read as complete.
 
 **Warning signs:**
-- "MCP tool response exceeds maximum allowed tokens" in Claude.
-- Claude summarising 20 workouts but only ever mentioning the first few.
-- A tool handler that does `.all()` on a query with no limit.
-- Two tools whose descriptions you can't distinguish in one sentence each.
+A report tool that calls three or more `app.analytics` entry points without a measured payload size. Tool
+latency creeping toward the client's tool-call timeout on a cold instance.
 
-**Phase to address:** **Phase 4**.
+**Phase to address:** Report-tools phase.
 
 ---
 
-### Pitfall 14: Silent staleness — Claude answering confidently from a database that stopped syncing
+### Pitfall 19: The coaching document has ~1,800 characters of headroom, and v2.0 wants to add four topics to it
 
 **What goes wrong:**
-The Render cron job fails (bad deploy, expired Hevy key, rate limit, the cursor bug in Pitfall 4). Nothing is on fire: the API is up, the MCP responds, tools return well-formed JSON. But the data is three weeks old. The user asks "am I progressing?" and Claude answers, fluently and completely wrongly, from stale data — and there is nothing in the response that would let it know or hedge.
+`backend/tests/test_coaching_doc.py` enforces `_PASTE_CEILING_CHARS = 9_000` — the practical ceiling for a
+Claude Project's custom-instructions field, past which *"it silently did not all fit"* becomes the likely
+failure, and *"that failure is invisible from this repo."* `docs/coaching-instructions.md` is currently
+**7,216 characters**. Headroom: **1,784 characters.**
 
-This is the most dangerous failure in the whole system because **every safety property of the design is intact** and the output is still wrong. A read-only MCP can't corrupt anything; it can still mislead.
+v2.0 needs that document to gain: Apple Health data sources and their freshness semantics, the max-weight vs
+e1RM distinction (and how to narrate a disagreement between them), the new report tools, the program-switch
+confirmation protocol (what to say on the warn call, what not to do), the new body-measurement tools, and —
+simultaneously — the requirement to become **more concise**.
 
-**Why it happens:**
-Sync is a background job with no user-facing surface. Failures are logged, and nobody reads logs for a personal project. The blueprint's `last_synced_at` requirement (§39) exists but is easy to implement as a display field rather than a guardrail.
-
-**How to avoid:**
-- **Every tool response carries freshness, unconditionally.** Not a separate `fitness_get_data_freshness` tool that Claude has to think to call — an envelope field on every response: `{"data_as_of": "...", "hevy_last_synced_at": "...", "staleness_hours": 62, "stale": true}`.
-- **Make staleness loud when it matters.** If `staleness_hours > 24`, prepend a human-readable warning string to the response content so it lands in Claude's context as text, not just as a field it might ignore. Encode the expected behaviour in the fitness-coach system prompt too ("if `stale` is true, say so before answering").
-- Track **three distinct timestamps** and don't conflate them: `last_sync_attempted_at`, `last_sync_succeeded_at`, `last_source_data_at`. A job that runs every 6 hours and fails every time has a recent *attempt* and an ancient *success*.
-- Persist a `sync_runs` table (started, finished, status, records imported/updated/deleted, error class, correlation id) and expose the last N through an admin endpoint. This is also your forensic record when Pitfall 4 or 5 bites.
-- **Post-sync invariant checks** that fail loudly: `workout_count` from `/v1/workouts/count` vs `COUNT(*) WHERE deleted_at IS NULL`; zero workouts with zero exercises; zero sets with `reps IS NULL AND duration_seconds IS NULL AND distance_meters IS NULL`. A mismatch means sync is broken *now*, not in three weeks.
-- One outbound alert (email/webhook/ntfy) on N consecutive sync failures. For a personal project this is the difference between finding out in an hour and finding out in a month.
-
-**Warning signs:**
-- `last_synced_at` exists in the DB but appears in no tool response.
-- No record of *failed* syncs anywhere — only successful ones write rows.
-- Nobody can answer "when did sync last succeed?" without SSH'ing into Render.
-
-**Phase to address:** **Phase 2** (sync run tracking + invariant checks), **Phase 4** (freshness in every response), **Phase 5** (alerting).
-
----
-
-### Pitfall 15: Triggering sync from an MCP tool call
-
-**What goes wrong:**
-It's tempting to make `fitness_get_recent_workouts` "refresh first, then read" so data is always current. This puts 5–60 seconds of paginated third-party HTTP inside a request that Claude will abandon at its timeout, makes the read path fail whenever Hevy is down or rate-limiting, lets concurrent tool calls run overlapping syncs against a shared cursor (the exact race Pitfall 4's two-phase commit assumes doesn't happen), and converts an explicitly read-only MCP surface into one with a write side-effect — undermining the security argument in blueprint §31 that read-only is what makes remote exposure acceptable.
+The same test also enforces a **bidirectional drift guard**: every `fitness_*` token in the document must
+exist in the live MCP registry, and every registered tool (except the `fitness_ping` canary) must appear in
+the document. So new tools *must* be documented — it is not optional — while the budget shrinks.
 
 **Why it happens:**
-It's the obvious fix for Pitfall 14, and it feels like better UX.
+The ceiling is enforced by a test nobody thinks about until it goes red, at which point the cheapest fix is
+to raise the constant — which converts a loud failure into the silent truncation the constant exists to
+prevent.
 
 **How to avoid:**
-- **Sync is a scheduled job. Tools read committed state only.** Period. Enforce it structurally: the MCP tool module should not import the Hevy client at all — a lint rule or an import test can make this permanent.
-- Solve freshness by *reporting* it (Pitfall 14), not by fetching on read.
-- If manual refresh is genuinely needed, expose it as an authenticated **REST** endpoint on the API service (`POST /admin/sync/hevy`) that the user can hit from a browser or shortcut — not as an MCP tool.
-- Guard the sync job with a DB advisory lock so overlapping runs (cron overlap, manual + scheduled) can't interleave.
+Treat the coaching document as a **budgeted artefact with a rewrite plan**, not an append target. The
+"concise coaching style" requirement is the lever: it is not a separate nice-to-have, it is what pays for
+the new content. Draft the v2.0 document by rewriting from scratch against the new tool set rather than
+editing in place. Do **not** raise `_PASTE_CEILING_CHARS`. If content genuinely will not fit, move the
+overflow into the server's `_INSTRUCTIONS` string (`server.py:76-86`) — but note that file's own honest
+caveat: whether Claude's custom connector actually injects `instructions` into the model's system prompt is
+**UNVERIFIED**, so it is a belt, not a replacement for the braces.
 
 **Warning signs:**
-- `from app.integrations.hevy import ...` inside `app/mcp/`.
-- Tool p95 latency above a couple of seconds.
-- Sync-related errors surfacing as tool errors in Claude.
+`test_coaching_doc.py` failing on length. A diff that increases `_PASTE_CEILING_CHARS`. A tool shipped
+without a corresponding row in the document's mapping table (the drift guard catches this — do not silence
+it).
 
-**Phase to address:** **Phase 4** (structural boundary), **Phase 2** (advisory lock).
-
----
-
-### Pitfall 16: Timezone and week-boundary bugs that make every time-bucketed metric subtly wrong
-
-**What goes wrong:**
-Everything in this system is time-bucketed — weekly volume, 7/14/30-day averages, training frequency, period comparison, plateau windows. Failure modes:
-
-- **Grouping by UTC day.** A 19:00 Jakarta workout is 12:00 UTC (fine), but a 06:00 Jakarta session is 23:00 UTC the *previous* day. Sessions land in the wrong week, and "training frequency" undercounts or double-counts.
-- **`date_trunc('week', ...)` in Postgres is ISO (Monday-start)** and operates on whatever timezone the input is in. Mixing `date_trunc` on UTC timestamps with a user-facing Monday-start week gives boundaries that are 7 hours off — so a Sunday-night or Monday-morning session hops weeks.
-- **Asia/Jakarta has no DST**, which makes `+07:00` *work* during development. That's the trap: it lulls you into hard-coding an offset, and the code becomes silently wrong for any other user (and the blueprint explicitly requires configurability).
-- **Workouts spanning midnight.** `start_time` and `end_time` can straddle a local day boundary. Pick `start_time` as the canonical bucketing timestamp and apply it *everywhere*, or two metrics will disagree about which day a session belongs to.
-- **"Last 8 weeks"** — is week 1 the current (partial) week? A partial current week always looks like a volume drop, which plateau detection happily reports as a plateau.
-
-**Why it happens:**
-Timezone handling is written once, early, in one query, and then copy-pasted into eight more analytics functions. Testing happens in the user's own timezone where the bug is invisible.
-
-**How to avoid:**
-- **Store UTC (`TIMESTAMPTZ`), bucket in local.** One shared helper: `local_day(ts) = (ts AT TIME ZONE :user_tz)::date`, and `local_week(ts)` built on it. Every analytics query calls the helper. Zero raw `date_trunc` calls outside it.
-- Put `timezone` on the `users` table with a default of `Asia/Jakarta`, and read it — never a constant, never an env var used as the source of truth.
-- Define the week start **once** (Monday) in `docs/analytics-definitions.md` and make it a parameter of the helper.
-- **Exclude or explicitly flag the current partial week** in every trend/plateau calculation. Return `{week_start, is_partial: true}` so Claude can discount it.
-- **Test with adversarial fixtures:** a workout at 23:30 local on a Sunday, one at 00:15 local on a Monday, one starting 23:45 and ending 00:50. Assert exact bucket assignment. Also run the whole analytics suite with `user_tz = America/Los_Angeles` (UTC−8, *with* DST) — if any number changes in a way you can't explain, the helper is being bypassed somewhere.
-
-**Warning signs:**
-- Any `AT TIME ZONE 'UTC'`, `date_trunc('week', ...)`, or `+7` outside the shared helper.
-- Weekly volume showing a sharp drop in the most recent week, every time you look.
-- Training frequency for a known 4-day week reporting 3 or 5.
-
-**Phase to address:** **Phase 1** (user timezone in schema, helper module), **Phase 3** (every analytic uses it).
-
----
-
-### Pitfall 17: Underestimating what it means to pipe personal health data into an LLM
-
-**What goes wrong:**
-Read-only + HTTPS + a token is the *transport* security story. It is not the *data* security story. Specific exposures for this system:
-
-1. **Free text from Hevy flows straight into Claude's context.** `workout.title`, `workout.description`, and `exercise.notes` are user-authored strings that BRETT will faithfully relay. Any instruction-shaped text in them is read by Claude as content. In a single-user, self-authored system this is low-likelihood — but the mitigation is nearly free, and the field is *not* fully self-authored if routines are ever imported or shared.
-2. **The lethal trifecta.** The recognised risk pattern is an agent that can simultaneously (a) read untrusted external content, (b) access sensitive data, and (c) communicate outward. Enabling the BRETT connector supplies (b). The same Claude conversation typically has web search (a) and other connectors (c). Read-only-ness on BRETT's side does not prevent BRETT's data from being exfiltrated *by* another tool in the same session. This is the strongest argument for keeping the exposed data minimal and for not enabling BRETT alongside browsing tools in the same conversation when discussing sensitive detail.
-3. **Data leaves your control on every tool call.** Body weight, body-fat percentage, waist measurements, and training history enter Anthropic's infrastructure and conversation history. That's an accepted, deliberate trade for this project — but it should be a *recorded* decision, and it argues directly for data minimisation.
-4. **Health-adjacent inference.** `PROJECT.md` correctly frames recomposition status as decision-support, not medical/diagnostic. That framing has to live in the tool descriptions and response payloads, not only in a system prompt the user might not attach — because the system prompt is optional and the tool description is not.
-5. **Log leakage.** Blueprint §33/§44 say don't log health data or secrets. The paths that actually leak in practice are the ones nobody classifies as "logging": unhandled exception tracebacks containing the DB DSN with password, `httpx` debug logging echoing the `api-key` header, FastAPI validation errors echoing request bodies, and error responses returned to Claude that include a stack trace.
-
-**Why it happens:**
-"Read-only" is treated as a complete security argument. It closes the *integrity* hole and leaves the *confidentiality* one wide open.
-
-**How to avoid:**
-- **Minimise at the tool boundary.** Return only what answers the question. Body-fat percentage and circumference measurements should be returned by tools that *need* them, not bundled into a general summary.
-- **Neutralise free text**: cap `title`/`description`/`notes` length (e.g. 200 chars), strip control characters, and clearly delimit them as data in the response (e.g. nest under a `user_text` key rather than interleaving with computed fields). Consider omitting `description`/`notes` from list tools entirely and exposing them only in the single-workout drill-down.
-- **Never build tool output by string-formatting user text into a sentence.** Emit structured JSON and let Claude do the prose.
-- **Scrub logs structurally, not by discipline:** a logging filter that redacts `api-key`, `authorization`, `password`, and any `postgres://` URL; `httpx` log level pinned above DEBUG in production; a global exception handler that returns a correlation ID to the caller and logs the detail server-side. Add a test that asserts the configured secret string never appears in captured log output during a full sync.
-- **Bound the token's blast radius:** short-lived tokens (if OAuth) or a rotatable secret, per-IP + per-token rate limiting on `/mcp`, and a documented revocation procedure (rotate `MCP_AUTH_SECRET` in Render → connector must re-auth). Verify revocation actually works before trusting it.
-- **Record in Key Decisions** that health data is intentionally exposed to Anthropic's infrastructure, so it's a decision rather than an oversight.
-
-**Warning signs:**
-- Tool responses that include fields no tool description mentions.
-- A Render log line containing `postgres://` or a UUID that looks like the Hevy key.
-- Error responses to Claude containing file paths or stack traces.
-- No rate limit on `/mcp` (the blueprint requires one — verify it exists and is actually reachable, i.e. applied before auth so it also throttles unauthenticated probes).
-
-**Phase to address:** **Phase 1** (log scrubbing, exception handler), **Phase 4** (minimisation, text neutralisation, rate limiting), **Phase 5** (rotation/revocation drill).
-
----
-
-### Pitfall 18: Deploying the source of truth onto storage that expires
-
-**What goes wrong:**
-Render's **free PostgreSQL databases expire 30 days after creation**, with a 14-day grace period before the database *and its data* are deleted. Blueprint §2.3 makes PostgreSQL the source of truth for the entire platform. Thirty days after a "let's just get it deployed" Phase 5, the source of truth is gone.
-
-The damage is partly recoverable (re-sync from Hevy) and partly not: manual body measurements, manual nutrition entries, exercise-mapping overrides, and sync history exist only in your database. Hevy has none of it.
-
-**Why it happens:**
-Free tier is chosen for a personal project during Phase 1 local setup, and the expiry clock starts at *creation*, silently, weeks before anything depends on it.
-
-**How to avoid:**
-- **Provision paid Postgres from the start** if BRETT is meant to persist. It's the cheapest line item in the project and the only one holding irreplaceable data.
-- Regardless of tier: a **scheduled `pg_dump` to object storage**, and — this is the part people skip — **one verified restore** into a scratch database before Phase 5 is called done. An untested backup is not a backup.
-- Treat the DB as the system of record for the derived/manual data and Hevy as the system of record for workouts. Write down which is which; it determines what a restore actually costs.
-- Also watch: free web services get **750 instance-hours per workspace per month**, after which free services are suspended. Two always-on free services will exhaust that.
-
-**Warning signs:**
-- A free-tier Postgres instance older than ~20 days with production data in it.
-- No `pg_dump` anywhere in the repo or Render cron config.
-- Nobody can state what is lost if the DB disappears tonight.
-
-**Phase to address:** **Phase 1** (provision correctly), **Phase 5** (backup + verified restore as an exit criterion).
+**Phase to address:** Coaching-style phase, sequenced **after** all new tools exist so the rewrite happens once against the final registry.
 
 ---
 
@@ -568,17 +866,17 @@ Free tier is chosen for a personal project during Phase 1 local setup, and the e
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Full re-sync every run instead of the events endpoint | Skips all cursor logic; trivially "idempotent" | 10× request volume against an undocumented rate limit; deletions are **never** detected (phantom workouts accumulate forever) | Only as a manual `--force` repair path, never as the scheduled job |
-| Hard delete on `deleted` events | One line of code | Historical analytics silently rewrite; deletions become un-auditable; PR caches desync | Never |
-| Analytics logic inside MCP tool handlers | One less layer; faster to demo | Untestable without an MCP client; an SDK upgrade (which just happened, see Pitfall 10) rewrites your business logic; blocks reuse by a future iOS app | Never — the blueprint already forbids it; enforce with an import test |
-| `SUM(weight_kg * reps)` with no set-type or exercise-type filter | Ships in an hour; looks right on barbell fixtures | Every downstream metric (progression, plateau, muscle balance, recomp status) inherits the error; Claude reports it confidently | Never — this is the load-bearing calculation |
-| `rir` / `weight_unit` columns "for later" | Schema feels future-proof | Permanently-NULL columns invite conversion code that runs on already-normalized data; misleads future readers into thinking RIR analytics are possible | Never — add via migration if the API ever gains them |
-| Skipping the raw-payload column | Smaller rows, simpler model | The only way to distinguish an ingestion bug from a math bug, six months later, is gone | Never — `jsonb` is cheap at this scale |
-| Free Render Postgres | Zero cost | Data deleted at 30 days + 14 grace (Pitfall 18) | Only for a throwaway preview environment with no real data |
-| Free Render web service for MCP | Zero cost | 15-min spin-down + ~60s cold start vs Claude's ~60s initialize window → the connector feels broken (Pitfall 12) | For the API service maybe; for the MCP service, no |
-| Secret-in-URL as the MCP auth mechanism | Works with Claude's connector UI today, zero code | Blueprint §32 forbids it; leaks via proxy logs, screenshots, crash reports; no revocation short of changing the URL and re-adding the connector | Only layered *under* real auth, never alone |
-| Hardcoding `+07:00` for Jakarta | Correct output today (no DST) | Silently wrong for any other timezone; violates the configurability requirement; discovered only when someone else uses it | Never — the helper costs 5 lines |
-| Shipping all 15 blueprint tools at once | Feels complete | Schema bloat on every turn; overlapping tools cause wrong selection; 15 surfaces to keep correct | Never — start with 6–8 |
+| Delete `test_mcp_never_writes` to land the write tool | Green suite in one line | Silently reopens write capability for all 13 read tools; the guard's whole value was that it fails on the commit that introduces a violation | **Never.** Narrow it to a one-module allowlist and assert the allowlist length |
+| Add the write tool to the `_TOOLS` loop | No new registration code | Tool advertises `readOnlyHint: true, destructiveHint: false` to the client — an active lie, and `test_every_tool_is_annotated_read_only` keeps passing | **Never.** Register it separately with its own annotations |
+| `confirm: bool` instead of a server-issued token | Simpler schema, one fewer table | The model can set it on the first call; the "two-call design" becomes a naming convention | **Never** — this is the milestone's only write path |
+| Reuse `_dedupe_by_day`'s row-level shape for circumference columns | Symmetric with the weight path, no new concepts | Manual weight-only entries silently delete that day's Hevy circumference readings | **Never.** Per-column coalesce with explicit precedence |
+| Keep `build_freshness(provider=PROVIDER_HEVY)` default | Zero call sites to change | DQ-01 lies in both directions once a second provider writes; no test catches it | Only until the first non-Hevy write lands — i.e. not past the webhook phase |
+| `users.active_program` column instead of dated periods | One column, trivial write tool | Twelve weeks of history retroactively re-classified on every switch; past answers unreproducible | Acceptable **only** if recomposition drops to a window shorter than the shortest program — it does not (12 weeks) |
+| Reuse the global rate-limit bucket for the webhook | No new code | HAE has no retry; a 429 is permanent data loss for that window | Acceptable only for an initial spike, never for the shipped receiver |
+| Parse `export.xml` with `ElementTree.parse()` | Five lines | OOM on the real 182 MB file; only shows up against production data | Acceptable in a throwaway local exploration script only |
+| Raise `_PASTE_CEILING_CHARS` above 9,000 | Coaching doc test goes green | Converts a loud failure into silent truncation of the instructions Claude actually reads | **Never** — rewrite the doc instead |
+| Ship the strength switch without re-calibrating the three tuned constants | Small diff, green tests (fixtures move with the code) | Trend/plateau/recomposition verdicts change account-wide with no evidence they are right | **Never.** The constants were fitted to a distribution that no longer applies |
+| Skip writing a `sync_state` row for the webhook provider | One fewer write per delivery | `last_synced_at` is permanently `None`; Claude flags Apple Health as "never synced" forever | **Never** — it is one upsert |
 
 ---
 
@@ -586,43 +884,31 @@ Free tier is chosen for a personal project during Phase 1 local setup, and the e
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| Hevy auth | `Authorization: Bearer <key>` | `api-key: <uuid>` header — a *custom header*, and the value is UUID-formatted |
-| Hevy pagination | `pageSize=100` | Max **10** on workouts/events/routines/folders/measurements (400 "Invalid page size" otherwise); **100** only on `exercise_templates` |
-| Hevy pagination loop | Loop until an empty page | Use the `page_count` field in the response envelope; note `/v1/body_measurements` documents a **404** for out-of-range pages |
-| Hevy events ordering | Assume oldest-first, advance cursor per page | **Newest-first.** Drain all pages, apply oldest-first, commit cursor once, with a 5-minute overlap |
-| Hevy events cursor | `since = timestamp of last event seen` | `since = (time captured before the run) − 5 min`, written only on full success |
-| Hevy child objects | Upsert exercises/sets by `(parent, index)` | No stable IDs exist — delete-and-reinsert children inside one transaction |
-| Hevy exercise identity | Match on `exercise.title` | Match on `exercise_template_id`; get muscle groups from `/v1/exercise_templates`, not a hand-built name table |
-| Hevy set semantics | Treat all sets equally | Filter on `set.type` (`normal`/`warmup`/`dropset`/`failure`); branch on the template's exercise `type` (8 values) |
-| Hevy rate limits | Assume none (spec documents none) | Assume they exist: concurrency 1–2, `Retry-After`-aware 429 backoff, and **log observed limits** into the integration README |
-| Hevy body measurements `PUT` | Partial update | **"All fields are overwritten; omitted fields are set to null"** — read-modify-write, or don't write at all (v1 is read-only anyway) |
-| Hevy API stability | Treat as a stable contract | `version: 0.0.1`; Hevy's own docs say they may "completely change the structure or abandon the project entirely." Snapshot the OpenAPI spec, diff in CI, isolate in `integrations/hevy/` |
-| Claude custom connector | Paste a bearer token into connector settings | Not possible — OAuth-only UI ([#112](https://github.com/anthropics/claude-ai-mcp/issues/112), closed as not planned). Implement a minimal OAuth 2.1 shim or accept desktop-only |
-| MCP Python SDK | `from mcp.server.fastmcp import FastMCP` | `from mcp.server import MCPServer` in `mcp` 2.x — and **pin the version** |
-| MCP mounted in FastAPI | Just `app.mount("/mcp", mcp.streamable_http_app())` | Mounting disables the MCP lifespan — the host lifespan must enter `mcp.session_manager.run()` |
-| MCP transport security | Leave defaults; deploy | Default DNS-rebinding protection responds to **localhost only** — set `TransportSecuritySettings(allowed_hosts=["host", "host:*"])` |
-| MCP + reverse proxy | Assume SSE streams through | Send `X-Accel-Buffering: no`; test through the real proxy, not localhost |
-| MCP client compatibility | Require a strict `Accept` header | The spec requires clients to send `application/json, text/event-stream`; **many clients don't**, and strict servers return 406. Be lenient on input, correct on output |
-| MCP protocol version | Hand-roll the handshake | The `2026-07-28` revision removed `initialize`, sessions, and the GET stream — let the SDK handle multi-era negotiation |
-| Render start command | `uvicorn app:app` | `--host 0.0.0.0 --port $PORT` — without `0.0.0.0` Render cannot reach the container even though startup logs look fine |
-| Render Postgres | Use the free tier for real data | Free DBs expire 30 days after creation (+14-day grace, then deleted). Use `pool_pre_ping=True` for dropped idle connections |
-| Alembic on Render | Run migrations at app startup | Run in a release/pre-deploy command; startup migrations race across multiple workers and can deadlock |
+| **Health Auto Export → webhook** | Assuming each delivery is new data | Default period re-sends "full previous day plus data up to now" on **every** run, with no sender-side dedup. Upsert on a natural key `(user_id, source, metric, measured_at, interval)` — the `pg_insert(...).on_conflict_do_update(...)` pattern already in `integrations/hevy/body.py:97-120` |
+| **Health Auto Export → webhook** | Using the `session-id` header as an idempotency key | It is unique **per request**, so the same measurement arrives under a new `session-id` every run. It is the exact opposite of an idempotency key. Key on measurement identity |
+| **Health Auto Export → webhook** | Returning 4xx/5xx to signal "retry later" | No retry mechanism is documented. A non-2xx is a **dropped window**, surfaced only in the app's Activity Log. Accept-then-process, and make failures loud in your own logs and `sync_state.last_error` |
+| **Health Auto Export → webhook** | Leaving the route unauthenticated because "the URL is secret" | HAE supports custom headers (`Authorization: Bearer …`, `X-API-Key: …`). Use one. CLAUDE.md already rejects obscure-URL-as-auth for `/mcp`; the same reasoning applies here, more so — this one **writes** |
+| **Health Auto Export → webhook** | Accepting the default (fine-grained) aggregation | Docs warn payloads may reach "several hundred megabytes"; Cloud Run's HTTP/1 request cap is **32 MiB**. Require Batch Requests ON and a coarse interval, and document it as a setup prerequisite |
+| **Apple Health timestamps** | Storing the local wall-clock time HAE sends | Repo rule: timestamps stored UTC, grouped by local day via `ZoneInfo(user.timezone)`. HAE emits ISO-8601 with offset — parse the offset, convert to UTC, and let `app.core.time.local_day` do the grouping. `body_measurements.measured_on` is a `Date` by deliberate design (`body.py` docstring) — do not "upgrade" it to a timestamp |
+| **Apple Health → `body_measurements`** | Writing a new `source` string longer than 16 chars | Column is `VARCHAR(16)`. `'health_auto_export'` (18) raises `StringDataRightTruncation`. Use `'apple_health'` (12) |
+| **Cloud Run** | Assuming FastAPI-side routes inherit MCP auth | `RequireAuthMiddleware` wraps only the mounted `mcp_app`. The service is `--allow-unauthenticated`. Every FastAPI route needs its own dependency |
+| **Cloud Run** | Adding routes below `app.mount("/", mcp_app)` in `main.py:98` | Registration order decides matching. New routers go **above** the mount |
+| **WorkOS AuthKit + scheduled tasks** | Assuming a scheduled run can refresh an expired token | `AuthKitJWTVerifier` fails **closed** by design; a non-interactive session cannot complete a consent flow. Expect scheduled runs to fail after token expiry and design the report tools to be valuable on demand |
+| **MCP SDK 2.0.0** | Using `ctx.elicit()` as the confirmation gate | The SDK docstring states an agent client "might… automatically generate a response". `client_capabilities` is `None` under `stateless_http=True`. Elicitation is an enhancement, not a control |
 
 ---
 
 ## Performance Traps
 
-Expected scale is one user, a few hundred to a few thousand workouts, ~100k sets over a decade. Postgres will not break a sweat. The traps that matter here are **latency-under-cold-start** and **context-window**, not throughput.
-
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|----------------|
-| N+1 queries in MCP tool handlers (workout → exercises → sets via lazy loading) | Tool call takes seconds; hundreds of queries per call | `selectinload`/`joinedload`, or aggregate in SQL and never materialize ORM objects for analytics | ~50 workouts in one response — i.e. immediately |
-| Recomputing 12 weeks of volume from raw sets on every call | Tool latency creeps up; worsens as history grows | Aggregate in SQL with proper indexes; add a materialized view or a `weekly_volume_cache` table only if measured latency demands it | ~2–3 years of history, or sooner on a cold/small Render instance |
-| Missing indexes on the analytics access paths | Sequential scans; latency grows linearly with history | Index `workouts(user_id, start_time)` (with `deleted_at`), `workout_exercises(workout_id)`, `sets(workout_exercise_id)`, `workout_exercises(exercise_template_id)`. `EXPLAIN ANALYZE` the three heaviest analytics queries as a Phase 3 exit criterion | ~1,000 workouts |
-| Unbounded tool responses | 25k-token rejection or silent truncation | Hard server-side limits + `truncated`/`total_available` flags (Pitfall 13) | ~20 full workouts in one response |
-| Tool-schema bloat (15 tools × verbose schemas) | Context consumed before any data is fetched; wrong tool selected | 6–8 tools, terse descriptions, minimal schemas | Immediately — it's a fixed per-turn cost |
-| Cold start + connection pool warm-up inside Claude's ~60s initialize window | Intermittent connector failures with no server-side error | Paid instance or keepalive; small pool; `pool_pre_ping`; no heavy lifespan work | Every 15 minutes of idle on Render free |
-| Sequential full sync at `pageSize=10` | Bootstrap takes minutes; risks job timeouts | Bounded concurrency (1–2), resumable page cursor, request-count logging | ~500 workouts |
+| Full-DOM parse of `export.xml` | Exit 137 / SIGKILL; memory climbing monotonically | `iterparse` + `elem.clear()`, run from the CLI not the web service | Immediately — the file is already 182 MB |
+| Buffering a large webhook body on a 512 MiB instance | Cloud Run 503 with **no** application log line | Reject oversized bodies before parsing; require HAE Batch Requests | First large sync, or first backfill-shaped push |
+| Report tool fanning out across 5+ analytics entry points | Tool latency climbing; timeouts on cold instances | Reuse `get_training_summary`'s selected-field spine; add `MAX_REPORT_WEEKS`; measure in `test_mcp_tool_budget.py` | At `weeks=12`+ on a cold start with `MIN_INSTANCES=0` |
+| Naive composition of full analytics results into the report payload | Payload well past the ~24 KB shape Phase 6 already rejected | Set and test the byte budget before implementation | At the widest legal window — i.e. exactly when a monthly report is most wanted |
+| Per-day Apple Health metrics at second/minute aggregation | Row counts in the millions; `body_measurements`-adjacent queries slowing | Coarse aggregation at the source; store daily rollups, not raw samples, for anything analytics reads | Within weeks of continuous sync |
+| One global 30/min bucket arbitrating two traffic classes | `rate_limit_rejected` on the webhook path; MCP 429s during a health sync | Separate bucket per traffic class | First concurrent sync + conversation |
+| SQLAlchemy pool ≤10/instance × `MAX_INSTANCES=2` | Connection-pool timeouts under a webhook batch plus an MCP conversation | Keep the webhook handler's transaction short; do not compute analytics inline | When batch deliveries overlap active coaching |
 
 ---
 
@@ -630,62 +916,58 @@ Expected scale is one user, a few hundred to a few thousand workouts, ~100k sets
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Relying on an unguessable `/mcp` URL as the only auth | URLs leak via proxy logs, screenshots, crash reports; no revocation path | Real auth (OAuth shim or bearer) **plus** optionally a path secret; never the path alone (blueprint §32) |
-| Non-constant-time comparison of the MCP secret | Timing side channel on a public endpoint | `hmac.compare_digest`, never `==` |
-| Rate limiting applied *after* auth | Unauthenticated attackers can brute-force the token unthrottled | Rate limit by IP **before** the auth check; separately limit per authenticated token |
-| Accepting a token not issued for this server (if OAuth) | Token replay across services; the spec **forbids** passthrough | Validate the `aud`/resource claim against your own MCP URL (RFC 8707 resource indicators); reject tokens minted for anything else |
-| No `Origin` validation | DNS-rebinding class attacks | Spec: servers **MUST** validate `Origin` and return **403** when present and invalid — the SDK's `TransportSecuritySettings` does this; configure it, don't disable it blindly |
-| Hevy `api-key` echoed in debug logs or error responses | Full read/**write** access to the user's Hevy account leaks (the API has POST/PUT endpoints) | `httpx` log level above DEBUG in prod; a redaction log filter; a test asserting the secret never appears in captured logs |
-| DB DSN in an unhandled traceback | Database credentials leak to logs, or to Claude via an error response | Global exception handler returning a correlation ID only; detail logged server-side |
-| Health data in application logs "for debugging" | Sensitive data persisted in a third-party log store indefinitely | Log counts, IDs, and durations — never sample values (blueprint §44) |
-| Trusting Hevy free text as safe | Instruction-shaped content in `title`/`description`/`notes` reaches the model as context | Length-cap, strip control chars, nest under a clearly-data key, omit from list tools |
-| Enabling BRETT alongside browsing/other connectors in a session handling sensitive detail | Lethal trifecta: sensitive data + untrusted content + an exfiltration channel in one context | Minimise what tools return; document the risk; treat "read-only" as insufficient on its own |
-| Adding a write tool "just for nutrition entry" | Every write tool is a new destructive surface reachable via prompt injection | v1 stays read-only (blueprint §31). Manual entry goes through the REST API, not MCP |
-| No secret-rotation procedure | A leaked token can't be revoked in practice | Document and **rehearse** rotation in Phase 5; confirm the connector actually loses access |
-| `.env` or the OpenAPI snapshot containing a real key committed | Permanent credential exposure in git history | `.gitignore` + a pre-commit secret scanner; the Hevy key is a UUID, which is greppable |
+| Unauthenticated webhook route on an `--allow-unauthenticated` service | Anyone on the internet can write arbitrary health data into the database — poisoning every analytic and every coaching answer | Shared secret in an HAE custom header, verified with `secrets.compare_digest` over **bytes** (per `auth.py:37-46`), fail closed and silent |
+| Webhook secret in the URL path instead of a header | CLAUDE.md already rejects this for `/mcp` ("a credential in a URL is a security vulnerability"); URLs land in Cloud Run request logs in plaintext | `Authorization` or `X-API-Key` header |
+| New secret not added to `Settings.secret_values()` | The logging scrubber (`configure_logging`, wired in `main.py:26`) never learns to redact it; it leaks into logs on the first exception | Add to `secret_values()` in the same commit as the setting; `test_secret_redaction.py` is the existing pattern |
+| Echoing webhook validation errors back to the caller | An unauthenticated endpoint that reflects parse detail is a probing oracle — the same reasoning as `_RATE_LIMITED_BODY`'s single-key body (`middleware.py:62`) | Constant, detail-free error bodies; detail to the log, findable by correlation id |
+| `confirm: bool` on the write tool | A language model can mutate the user's training program without the user ever seeing a warning | Server-issued, single-use, target-bound, short-TTL confirmation token |
+| Write tool inheriting `required_scopes=None` | A read token authorises a write; no way to issue a read-only credential later | Revisit per `server.py:116`'s own note; consider a write-only scope checked in the tool body |
+| Write tool registered with `READ_ONLY` annotations | The client is told the tool is non-destructive; a user's "always allow" decision for read tools may extend to it | Distinct annotations, registered outside the `_TOOLS` loop |
+| Relaxing `read_only_session` to accommodate one write tool | Removes the *server-side* control protecting the other 13 tools — the control that exists precisely because annotations "should not be relied upon for security enforcement" | A separate writable-session helper, used by exactly one module, statically asserted |
+| Apple Health raw samples (HR, HRV, sleep) reaching logs | Blueprint §44's deny-list explicitly covers raw health samples | Log counts and metric names only, never values; extend the structlog processor and `test_secret_redaction.py` before the first ingest |
+| Manual-entry endpoint added to the FastAPI side without auth | A second unauthenticated write path, for the same reason as the webhook | Same header-auth dependency; the static "every route has an auth dependency" guard covers both |
 
 ---
 
 ## UX Pitfalls
 
-"User" here means the user *via Claude*. The UX surface is the shape of the tool responses.
-
 | Pitfall | User Impact | Better Approach |
 |---------|-------------|-----------------|
-| No freshness in responses | Claude confidently analyses three-week-old data; trust in the whole system collapses on discovery | Freshness envelope on **every** response + a loud warning above a staleness threshold (Pitfall 14) |
-| `0` used for "not applicable" | "Your lats are undertrained" when the user does pull-ups every session | Emit `null`/omit, plus an explicit `not_applicable_reason` where useful |
-| Metrics with no stated methodology | User can't reconcile BRETT's numbers with the Hevy app's and assumes BRETT is broken | Ship `docs/analytics-definitions.md`; put the definition in the tool description; return a `methodology` field |
-| Confident output from insufficient data | "You've plateaued" from 3 data points; "you're recomping" from 2 weigh-ins | Return `sample_size` / `weeks_of_data`; refuse to classify below a threshold and say why |
-| Partial current week counted as a real week | Every check-in looks like a volume decline; plateau detection fires constantly | Exclude or flag `is_partial` on the current week |
-| Recomposition status phrased as a diagnosis | Health advice framed with unearned authority | Keep the decision-support framing in the tool description and payload, not just an optional system prompt |
-| Overlapping tools with vague descriptions | Claude picks the wrong tool and answers a subtly different question | 6–8 tools with mutually exclusive, task-shaped descriptions stating when *not* to use them |
-| Silently truncated lists | Claude reasons over a subset believing it's the whole | `truncated: true` + `total_available` + a drill-down ID so it can fetch more deliberately |
-| Sync failures visible only in Render logs | User discovers the outage weeks later | Alert on N consecutive failures; expose `last_sync_succeeded_at` through the freshness envelope |
+| Silent strength-metric change | Every trend verdict, plateau and recomposition status shifts overnight with no explanation; the user's trust in the numbers is the product | Return **both** signals with the primary named, and note the change in the coaching document so Claude can explain it once |
+| Reporting max weight for bodyweight/duration exercises | "Your max weight on Plank is 0 kg" — a real number, in the right units, meaningless | Preserve a modality gate and the `_NO_WEIGHT_RANK` sentinel semantics; report "not applicable" with a reason |
+| A confirmation prompt that does not say what changes | "Switch program? yes/no" tells the user nothing about consequences | Warn call returns the current program, its duration, the target program, and **what thresholds change** — the write tool is the one place the user meets the program model directly |
+| A report that silently truncates lists | Claude reads "30 exercises" as "you train 30 exercises" and answers confidently from a partial picture | `truncate()` and carry both flags into the response model, per `_common.py:293`'s docstring |
+| Freshness that describes the wrong provider | Claude either warns about staleness that doesn't exist (erodes trust in the warnings) or stays silent about staleness that does (erodes trust in the answers) | Per-provider freshness; a response is as fresh as its stalest input |
+| A scheduled report that silently produces nothing | The user assumes no report means nothing to report | Verify the scheduling path with a spike; make the on-demand path the primary experience |
+| Manual body-measurement entry with no unit affordance | Repo internal units are kg/cm; a user entering 180 for height-in-cm vs lbs-vs-kg confusion corrupts trend analytics | Convert at the application boundary only (existing constraint); validate ranges and reject implausible values rather than storing them |
 
 ---
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Hevy sync:** often missing the *deletion* path — verify by deleting a real workout in the Hevy app, running sync, and asserting it's soft-deleted and excluded from analytics.
-- [ ] **Hevy sync:** often missing *mid-pagination failure* handling — verify with a mock that raises on page 2: cursor unchanged, DB unchanged, next run recovers everything.
-- [ ] **Hevy sync:** often missing *edit* handling — verify by editing a synced workout in Hevy (remove one exercise, reorder two, change a weight), re-syncing, and asserting exact child-row state with no orphans or duplicates.
-- [ ] **Idempotency:** often only asserted for workout count — verify total set count and total tonnage are byte-identical after 3 consecutive syncs.
-- [ ] **Rate limiting:** often untested because it never fired in dev — verify with a mock returning 429 + `Retry-After` that the client backs off and completes rather than aborting mid-sync.
-- [ ] **Exercise normalization:** often silently drops unmapped exercises — verify `SELECT DISTINCT exercise_template_id FROM workout_exercises` has zero rows without a template mapping, and that an unmapped ID raises a visible warning.
-- [ ] **Analytics:** often tested only on barbell fixtures — verify against a fixture set including bodyweight, assisted-bodyweight, duration-only, dropset, warm-up-heavy, and superset workouts.
-- [ ] **Analytics:** often timezone-correct only in the dev timezone — verify the whole suite with `user_tz = America/Los_Angeles` and with workouts at 23:30 / 00:15 local.
-- [ ] **Analytics:** often silently wrong on partial weeks — verify the current week is excluded or flagged in every trend/plateau output.
-- [ ] **MCP auth:** often verified only with MCP Inspector or `--header` — verify by **adding the connector in claude.ai and calling a tool from a phone**.
-- [ ] **MCP auth:** often missing the negative test — verify a request with no token, a wrong token, and an expired token each returns 401 (with a `WWW-Authenticate` challenge if OAuth) and leaks nothing.
-- [ ] **MCP transport:** often only tested on localhost — verify `curl` from outside your network against the deployed HTTPS URL with a correct `Accept` and `MCP-Protocol-Version` header returns a valid `tools/list`.
-- [ ] **MCP transport:** often missing the cold-start case — verify a tool call after 20+ minutes of idle succeeds within Claude's timeout.
-- [ ] **MCP responses:** often unbounded — verify serialized response size for the largest realistic dataset is under budget for every tool, with an automated assertion.
-- [ ] **MCP responses:** often missing freshness — verify **every** tool response includes `data_as_of` / staleness, including error responses where meaningful.
-- [ ] **Secrets:** often leak through debug logging — verify with a test that captures all log output during a full sync + tool call and asserts the Hevy key, DB password, and MCP secret never appear.
-- [ ] **Deployment:** often missing migrations in the release step — verify a fresh deploy against an empty database succeeds end to end.
-- [ ] **Deployment:** often missing a *verified* backup — verify a `pg_dump` actually restores into a scratch database.
-- [ ] **Scheduled sync:** often never observed running unattended — verify the cron job has run successfully at least 3 consecutive times, unattended, before calling Phase 5 done.
-- [ ] **End-to-end:** often stops at "the tool returns JSON" — verify the blueprint §43 test really runs mock-Hevy → sync → Postgres → analytics → MCP tool → asserted value in one test.
+- [ ] **Webhook receiver:** often missing *auth* — verify a request with **no** credential gets 401, in a test
+- [ ] **Webhook receiver:** often missing *idempotency* — verify POSTing the identical payload twice changes no row count and no computed average
+- [ ] **Webhook receiver:** often missing *route ordering* — verify the path resolves to the FastAPI route, not the catch-all mount, by asserting on FastAPI-shaped error bodies
+- [ ] **Webhook receiver:** often missing a *`sync_state` row* — verify `last_synced_at` for the new provider advances after a successful delivery
+- [ ] **Webhook receiver:** often missing its *own rate-limit bucket* — verify a burst of webhook requests does not 429 a concurrent `/mcp` call
+- [ ] **Apple Health backfill:** often missing *streaming* — verify against the real 182 MB `export.xml`, not a fixture
+- [ ] **Apple Health backfill:** often missing *convergence with the webhook path* — verify running the backfill after the webhook has been live is a no-op on overlapping days
+- [ ] **Strength metric shift:** often missing *re-calibration* — verify the three tuned constants against live data and record the new improving/stable/declining split
+- [ ] **Strength metric shift:** often missing the *blast-radius check* — verify what `fitness_get_recomposition_status` and `fitness_get_training_summary` return before and after; `recomposition.py` changes behaviour with **zero** lines edited in it
+- [ ] **Strength metric shift:** often missing the *"we could not tell" path* — verify `UNCLEAR` verdicts and a no-value-reason field still occur
+- [ ] **Body measurements:** often missing *per-column* source resolution — verify a manual weight-only row does not erase that day's Hevy circumference values
+- [ ] **Body measurements:** often missing *explicit third-source precedence* — verify a day with `apple_health` + `hevy` + `manual` resolves by a stated map, not by the alphabet
+- [ ] **Body measurements:** often missing the *`VARCHAR(16)` check* — verify the chosen source string inserts
+- [ ] **Write tool:** often missing a *real gate* — verify a single call with every parameter the model can supply cannot change the program
+- [ ] **Write tool:** often missing *token binding* — verify a token issued for "switch to Cut" cannot be used to switch to Recomp
+- [ ] **Write tool:** often missing *single use* — verify replaying the second call is a no-op, not a second switch
+- [ ] **Write tool:** often missing *honest annotations* — verify it advertises `readOnlyHint: false, destructiveHint: true`, and that the 13 read tools still advertise read-only
+- [ ] **Write tool:** often missing *narrowed guards* — verify `test_mcp_never_writes` still fails for any module other than the one allowlisted write module
+- [ ] **Write tool:** often missing *post-commit failure handling* — verify a failure after commit does not report "not applied"
+- [ ] **Programs:** often missing *effective dating* — verify a 12-week recomposition question spanning a program switch names the program(s) it classified against
+- [ ] **Report tools:** often missing a *measured budget* — verify structured and wire size at the widest legal window, in `test_mcp_tool_budget.py`
+- [ ] **Report tools:** often missing the *delivery spike* — verify a scheduled task can actually invoke `fitness_ping` autonomously
+- [ ] **Coaching doc:** often missing *budget discipline* — verify it is still under 9,000 characters **without** raising the constant, and that the bidirectional drift guard passes
 
 ---
 
@@ -693,16 +975,16 @@ Expected scale is one user, a few hundred to a few thousand workouts, ~100k sets
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Duplicate child rows from bad upsert (P2) | LOW | Truncate `workout_exercises`/`sets`, re-run full sync from `/v1/workouts` (workouts survive; nothing is lost because Hevy is the source of record for these) |
-| Events skipped by premature cursor advance (P4) | LOW–MEDIUM | Reset `last_hevy_event_cursor` far back (or to epoch) and re-drain; idempotency makes replay safe. **This is why the two-phase commit is worth building — the recovery only works if idempotency holds.** |
-| Phantom (undeleted) workouts from full-sync-only (P5) | LOW | Reconcile: fetch all IDs via `/v1/workouts`, soft-delete local rows not present. Do this as a periodic audit anyway |
-| Wrong volume definition shipped (P8) | MEDIUM | Analytics are computed, not stored — fix the query and everything recomputes. Cost is trust: any conclusion Claude previously stated is suspect, and the user has to be told |
-| Bearer-token auth unusable with the connector (P1) | MEDIUM | Add the OAuth shim (~1 day) *or* fall back to desktop-only. Cheap now, expensive after Phase 5 is declared done and the plan says "connected via connector" |
-| MCP SDK/spec version mismatch (P10) | LOW–MEDIUM | Pin and upgrade; low **only if** tool handlers are thin adapters over the analytics layer. If business logic lives in handlers, this becomes a rewrite |
-| Free Postgres expired and deleted (P18) | **HIGH** | Workouts: re-syncable from Hevy. Manual measurements, nutrition, exercise overrides, sync history: **unrecoverable without a backup.** This is the only genuinely irreversible failure in the project |
-| Hevy API breaking change (their stated possibility) | MEDIUM | Contained to `integrations/hevy/` **if** provider isolation held; the OpenAPI snapshot diff tells you exactly what changed. Sprawled assumptions turn this into a project-wide refactor |
-| Secret leaked in logs/git (P17) | MEDIUM–HIGH | Rotate the Hevy key at hevy.com, rotate `MCP_AUTH_SECRET`, re-add the connector. Git history requires rewriting or repo replacement |
-| Timezone bug found after months of use (P16) | MEDIUM | Fix the helper and recompute (analytics are derived, so no data migration) — but every past conclusion is invalidated |
+| Duplicate rows from a non-idempotent webhook | **LOW** while young, **MEDIUM** later | Dedup by natural key keeping the earliest `created_at`; add the unique constraint; backfill-verify averages against a Neon PITR branch (the drill from Phase 7 is already proven) |
+| Public unauthenticated webhook discovered live | **MEDIUM** | Redeploy with auth immediately; audit `body_measurements`/health tables for rows outside plausible ranges or delivered from unexpected times; rotate the (now-known) endpoint path as well as adding the secret |
+| Circumference data erased by row-level dedupe | **HIGH** if it reached the DB, **LOW** if only in the read path | If dedupe was read-only (as `_dedupe_by_day` is today) no data was lost — fix the function. If a write-side "merge" was implemented, restore from a Neon PITR branch |
+| Strength-metric switch shipped without re-calibration | **LOW–MEDIUM** | Constants are three literals in two files; revert or retune and redeploy. The **user-trust** cost of having given wrong verdicts is not recoverable by a redeploy — which is why this belongs in the phase's success criteria |
+| Write tool with a bypassable confirm | **MEDIUM** | Ship the token gate; audit `program_periods` (if effective-dated, the history is intact and auditable — a mutable column would leave no trace, which is Pitfall 16's second argument) |
+| Static write guards deleted | **LOW** to restore, **HIGH** to detect | Restore from git history and narrow rather than remove; add the allowlist-length assertion so the same shortcut fails next time |
+| Program modelled as a mutable column, history already accumulated | **HIGH** | Migrate to `program_periods` with a single synthetic period covering all prior history — but the actual switch dates are unrecoverable, so historical verdicts stay approximate forever |
+| Scheduled delivery proves impossible | **LOW** if spiked first, **HIGH** if discovered at phase end | With the on-demand-first design, degrade to "ask for your weekly report" and document the sub-agent workaround. Without it, the phase's headline criterion fails with no fallback |
+| `export.xml` backfill OOM | **LOW** | Rewrite as `iterparse` + CLI. No data damage — the failure is before any write, provided the ingest is transactional |
+| Coaching doc silently truncated in the Claude Project | **LOW** to fix, **HIGH** to detect | Invisible from this repo by design. Only prevention works: keep the ceiling, rewrite rather than append |
 
 ---
 
@@ -710,63 +992,75 @@ Expected scale is one user, a few hundred to a few thousand workouts, ~100k sets
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| 16 — Timezone / week boundaries | **Phase 1** | Analytics suite passes with `user_tz = America/Los_Angeles`; adversarial midnight-straddling fixtures assert exact buckets |
-| 9 — Body-weight source of truth | **Phase 1** (schema), Phase 2 (optional sync) | `(user_id, source, measured_on)` unique constraint exists; precedence resolved in one place |
-| 17 — Log leakage (partial) | **Phase 1** | Test captures all log output during sync + tool call; asserts no secret/DSN/health-sample appears |
-| 18 — Expiring Postgres | **Phase 1** (provision), Phase 5 (backup) | Paid DB tier confirmed; `pg_dump` restored into a scratch DB successfully |
-| 2 — Child-row idempotency | **Phase 2** | 3× re-sync → byte-identical set count and tonnage; edit-and-resync fixture asserts exact child state |
-| 3 — pageSize=10 / rate limits | **Phase 2** | Scheduled job makes O(events) not O(history) requests; 429 mock test passes; observed limits documented in `integrations/hevy/README.md` |
-| 4 — Events cursor / ordering | **Phase 2** | Failure-on-page-2 mock → cursor and DB unchanged; new-event-mid-drain mock → nothing lost |
-| 5 — Soft delete | **Phase 2** | Full create/update/delete lifecycle test; grep confirms every analytics query filters `deleted_at IS NULL` |
-| 6 — Schema matches the real API | **Phase 2** | Pydantic models generated from / diffed against the committed OpenAPI snapshot in CI; no all-NULL columns after full sync |
-| 7 — Exercise normalization | **Phase 2** | Zero `exercise_template_id` values without a template mapping; no name-based matching in the codebase |
-| 14 — Silent staleness (tracking) | **Phase 2** | `sync_runs` table records failures; post-sync invariant check compares `/v1/workouts/count` to local count |
-| 8 — Volume math | **Phase 3** | Golden fixtures covering all 8 exercise types + warm-ups + dropsets + supersets, hand-computed expected values |
-| 15 — No sync in tool calls (analytics separation) | **Phase 3/4** | Import test: `app/mcp/` does not import `app/integrations/` |
-| 1 — Connector auth mechanism | **Phase 4** (design), Phase 5 (verify) | Tool call succeeds from claude.ai **on a phone**, through the real connector-add flow |
-| 10 — SDK/spec version | **Phase 4** | `mcp` pinned exactly; SDK docs re-read at phase start; version recorded in Key Decisions |
-| 11 — Lifespan + transport security | **Phase 4** (lifespan), Phase 5 (hosts) | No "Task group is not initialized"; external `curl` to the deployed `/mcp` returns valid `tools/list` |
-| 13 — Response size / tool sprawl | **Phase 4** | Automated per-tool response-size assertion; ≤8 tools at launch with non-overlapping descriptions |
-| 14 — Freshness in responses | **Phase 4** | Every tool response carries `data_as_of`; forced-stale test produces a visible warning |
-| 17 — Data minimisation / text neutralisation / rate limiting | **Phase 4** | Response fields audited against tool descriptions; free-text capped and nested; rate limit fires before auth |
-| 12 — Proxy buffering / cold start | **Phase 5** | Tool call after 20 min idle succeeds; verified from cellular, not LAN |
-| 17 — Rotation / revocation | **Phase 5** | Rotation rehearsed; connector confirmed to lose access |
-| 14 — Alerting | **Phase 5** | Cron runs unattended 3× successfully; a forced failure produces an actual alert |
+| 1. Route below the catch-all mount | Apple Health webhook ingest | Test asserts FastAPI-shaped (not MCP-shaped) response on the webhook path |
+| 2. Shared rate-limit bucket | Apple Health webhook ingest | Burst of webhook requests does not 429 a concurrent `/mcp` call |
+| 3. Unauthenticated FastAPI route | Apple Health webhook ingest | No-credential request → 401; static guard that every non-`/health` route has an auth dependency |
+| 4. Non-idempotent ingest | Apple Health webhook ingest | Identical payload POSTed twice → identical row count and identical computed averages |
+| 5. Payload size / cold start | Apple Health webhook ingest | Oversized body rejected before parse; deployment flags reviewed and changed before first live sync |
+| 6. `export.xml` OOM | Apple Health backfill | Real 182 MB file parses within the memory budget; backfill-after-webhook is a no-op on overlapping days |
+| 7. Freshness provider default | Apple Health webhook ingest (write `sync_state`) + health-analytics extension (remove the default) | `provider` has no default; `FreshnessMetadata.resources` names every writing provider |
+| 8. `VARCHAR(16)` source | Apple Health webhook ingest (migration plan) | Chosen source constant inserts against real PostgreSQL |
+| 9. Row-level dedupe / implicit precedence | Historical body measurements — fix must land **with or before** the webhook phase | Three-source, partially-overlapping-column test; explicit `MappingProxyType` precedence map |
+| 10. Max-weight flattens rep progression | Strength-metric shift | Both signals returned; a rep-progression fixture is not classified `stable` |
+| 11. Ungated max weight destroys the honesty path | Strength-metric shift | `UNCLEAR` verdicts and a no-value reason still occur; modality gate retained |
+| 12. Tuned constants mis-calibrated | Strength-metric shift | Before/after verdict table on live data recorded in the phase context |
+| 13. `confirm=true` bypass | Training programs / write tool | A single tool call cannot change the program; token is target-bound and single-use |
+| 14. Guards disarmed | Training programs / write tool | `test_mcp_never_writes` narrowed with an allowlist-length assertion; annotation partition test (13 read / 1 write) |
+| 15. `safe_tool` masks write outcome | Training programs / write tool | Three-state result; post-commit failure does not report "not applied" |
+| 16. Mutable program column | Training programs / write tool (schema plan) | Recomposition response names the program(s) it classified against; a straddling window says so |
+| 17. Scheduled-task connector failure | Report tools — **spike plan first** | A scheduled task autonomously invokes `fitness_ping`; on-demand path valuable independently |
+| 18. Report fan-out budget | Report tools | Measured structured/wire size at the widest window, asserted in `test_mcp_tool_budget.py` |
+| 19. Coaching doc ceiling | Coaching style — **sequenced last** | Under 9,000 chars without raising the constant; bidirectional drift guard green |
 
-**Phase-ordering implication:** the auth decision (Pitfall 1) is the only item that can invalidate the plan's *stated* deliverable, and it lands in Phase 4. Consider spiking it early — a 30-minute experiment adding a trivial "hello world" MCP server as a Claude custom connector, during or immediately after Phase 1, de-risks the entire back half of the roadmap and would let Phase 4 be scoped correctly.
+### Suggested phase-ordering consequences
+
+- **Pitfall 9 forces an ordering constraint:** the source-precedence fix must land *with or before* the Apple Health webhook phase, because Apple Health is the third source that silently activates the alphabetical-precedence bug. If the roadmap puts body measurements after Apple Health, the precedence map must be pulled forward into the webhook phase.
+- **Pitfall 17 argues for sequencing the report-tools spike early**, ahead of its implementation plans and possibly ahead of other phases — a negative result should reshape the milestone, not sink a phase at its end.
+- **Pitfall 19 argues for sequencing the coaching-style phase last**, so the document is rewritten once against the final tool registry rather than edited N times against a moving one.
+- **Pitfalls 13–16 cluster into a single write-tool phase** that is more security-shaped than feature-shaped. Its success criteria should read like a threat model, not a feature list.
+- **Phases likely needing their own deeper research:** the write-tool phase (confirmation-token design, scope strategy, AuthKit implications) and the strength-metric-shift phase (re-calibration methodology against live data). The webhook phase is mostly *verification* work against facts already established here.
 
 ---
 
 ## Sources
 
-**Primary / authoritative (HIGH confidence)**
+**Repository source, read directly (HIGH confidence — this is the strongest evidence in this document):**
+- `backend/app/main.py` — bootstrap order, middleware registration order, catch-all mount at line 98, open `/health`
+- `backend/app/middleware.py` — single global `TokenBucket`, `EXEMPT_PREFIXES`, no-client-header policy
+- `backend/app/mcp/server.py` — `required_scopes=None` with "revisit when the first write tool ships", the `READ_ONLY` annotation loop, `stateless_http=True`, `_INSTRUCTIONS`
+- `backend/app/mcp/auth.py` — `StaticTokenVerifier` bytes-compare rationale, `AuthKitJWTVerifier` fail-closed design
+- `backend/app/mcp/tools/_common.py` — `read_only_session`, `safe_tool`, `truncate`, response-cap constants
+- `backend/app/analytics/progression.py` — the max-weight-is-wrong paragraph (lines 7–10), `TREND_STABLE_BAND_PERCENT_PER_WEEK`, `PLATEAU_IMPROVEMENT_TOLERANCE`, D-18's derivation, D-07a skip semantics, `_NO_WEIGHT_RANK`
+- `backend/app/analytics/estimates.py` — `MAX_TRUSTED_REPS`, `E1RM_EXERCISE_TYPE`, `NoEstimateReason`, live-data gate statistics
+- `backend/app/analytics/recomposition.py` — hardcoded lean-bulk constants, `RECOMP_PROGRESSION_NET_BAND`, `RECOMP_LOOKBACK_WEEKS`, `aggregate_progression`'s `unclear` exclusion
+- `backend/app/analytics/bodyweight.py` — `_dedupe_by_day` (lines 129–155), `MANUAL_SOURCE`, D-14
+- `backend/app/analytics/metadata.py` — `build_freshness(provider=PROVIDER_HEVY)` default, `FRESHNESS_RESOURCES_*`
+- `backend/app/db/models/body.py` + `backend/migrations/versions/0004_hevy_reference_tables.py` — `source` `VARCHAR(16)`, `(user_id, source, measured_on)` natural key
+- `backend/app/integrations/hevy/body.py` — the proven `on_conflict_do_update` upsert pattern
+- `backend/tests/test_mcp_isolation.py` — `test_mcp_never_writes`, `test_mcp_uses_no_raw_sql_text`'s by-name exemption pattern
+- `backend/tests/test_mcp_tool_schemas.py` — `test_every_tool_is_annotated_read_only`
+- `backend/tests/test_coaching_doc.py` — `_PASTE_CEILING_CHARS = 9_000`, bidirectional drift guard
+- `backend/tests/test_analytics_isolation.py` — write ban in `app/analytics/`
+- `scripts/deploy-cloud-run.sh` — `--allow-unauthenticated`, `--memory=512Mi`, `--max=2`, `--timeout=300`, `MIN_INSTANCES=0`
+- `docs/coaching-instructions.md` — 7,216 characters measured
+- `export.xml` — 182 MB measured on disk
 
-- Hevy public API OpenAPI specification — extracted 2026-08-23 from `https://api.hevyapp.com/docs/swagger-ui-init.js` (the embedded `swaggerDoc`; the Swagger UI HTML at `https://api.hevyapp.com/docs/` renders no content to fetchers). Source of all endpoint, parameter, limit, and schema facts above. Recommend committing a snapshot to `integrations/hevy/openapi-snapshot.json`.
-- MCP specification, versioning page — https://modelcontextprotocol.io/specification/versioning (current revision **2026-07-28**)
-- MCP specification 2026-07-28, Streamable HTTP transport — https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http (Origin MUST/403, `Accept` requirement, `X-Accel-Buffering: no`, removal of sessions/GET stream/`Last-Event-ID`, backward-compatibility rules)
-- MCP Python SDK v2 documentation, via Context7 (`/websites/py_sdk_modelcontextprotocol_io_v2`) — ASGI mounting + lifespan, `TransportSecuritySettings`, `TokenVerifier` / `BearerAuthBackend`, `create_protected_resource_routes`, `stateless_http`, `FastMCP` → `MCPServer` migration
-- PyPI `mcp` package metadata — 2.0.0 released 2026-07-28; 1.9.4 released 2025-06-12
-- Anthropic Help Center, "Get started with custom connectors using remote MCP" — https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp (OAuth-only auth; connections originate from Anthropic's cloud IP ranges)
-- anthropics/claude-ai-mcp issue #112, "Cannot configure Authorization: Bearer for custom remote MCP" — https://github.com/anthropics/claude-ai-mcp/issues/112 (**closed as not planned**)
+**Installed package introspection (HIGH confidence):**
+- `mcp 2.0.0` — `Context.elicit` signature and docstring ("if the client is an agent, it might… automatically generate a response"), `Context.client_capabilities` (`None` for anonymous stateless requests), `Context.headers` ("never treat one as an identity assertion"), elicitation type surface
 
-**Corroborating (MEDIUM confidence)**
+**Official third-party documentation (HIGH confidence):**
+- [Sync Apple Health Data to REST API — HealthyApps Help Center](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api/) — export periods and overlap, batch requests, custom auth headers, automatic headers including `session-id`, no documented retry, iOS 30-second background budget, "several hundred megabytes" payload warning
+- [Cloud Run quotas and limits — Google Cloud](https://docs.cloud.google.com/run/quotas) — 32 MiB max HTTP/1 request size
+- [health-auto-export — GitHub (Lybron)](https://github.com/Lybron/health-auto-export) — 150+ metrics, format overview
 
-- Sunpeak, "Claude Connector Authentication: How OAuth Works and When You Need It" (July 2026) — https://sunpeak.ai/blogs/claude-connector-oauth-authentication/ (401 + `WWW-Authenticate` discovery, PRM probing fallback, `static_headers` beta scoped to org administrators)
-- WorkOS, "The biggest MCP spec update ships July 28" — https://workos.com/blog/mcp-2026-spec-agent-authentication (six authorization requirements; breaking changes vs 2025-11-25)
-- chrisdoc/hevy-mcp — https://github.com/chrisdoc/hevy-mcp (independent confirmation: implemented OAuth 2.1 specifically for "Claude.ai and remote clients unable to send fixed headers"; also notes Hevy exposes no delete endpoints)
-- anthropics/claude-code issue #45368 and related client issues — the `Accept: application/json, text/event-stream` / HTTP 406 interop class of bug across multiple MCP clients
-- anthropics/claude-code issues #9152, #45770 — tool result caps (~25,000 tokens, `MAX_MCP_OUTPUT_TOKENS`); Claude Desktop ~150,000-character cap
-- Render free-tier documentation and 2026 pricing summaries — 15-minute spin-down, ~1-minute spin-up, 750 instance-hours/month, free Postgres 1 GB expiring 30 days after creation with a 14-day grace period
-- MCP connection-troubleshooting write-ups — ~60-second initialize timeout, proxy SSE buffering, idle timeouts, ZTNA/VPN interference
-- Training-volume methodology references (JTS, Cressey, N1 Training) — warm-up sets excluded from volume; hard sets (≤4 RIR) as the practical proxy; tonnage-only measurement is misleading across differing set/rep schemes
+**GitHub issues, fetched directly (MEDIUM-HIGH confidence):**
+- [anthropics/claude-code#43397](https://github.com/anthropics/claude-code/issues/43397) — "Cloud scheduled tasks cannot access MCP connectors — tools not loaded into session", 2026-04-04, **closed as not planned**, 100% reproducible, sub-agent workaround
+- [anthropics/claude-code#45306](https://github.com/anthropics/claude-code/issues/45306) — "Scheduled task MCP connector tools unavailable in execution environment", 2026-04-08, **closed as not planned**, silent failures
 
-**Unverified — validate during execution (LOW confidence)**
-
-- Whether Hevy stores dumbbell `weight_kg` per dumbbell or as a combined total (Pitfall 8). Verify against the user's own account during Phase 2 and record the answer.
-- Hevy's actual rate limits — undocumented. Discover empirically during the first full sync and document.
-- Whether `GET /v1/workouts` guarantees a stable sort order (the spec states ordering only for `/v1/workouts/events`). Assume it does not; reconcile with `/v1/workouts/count`.
-- Which MCP protocol revision Anthropic's connector infrastructure currently negotiates. Log the received `MCP-Protocol-Version` on first connection and record it.
+**Community / secondary (MEDIUM–LOW confidence, flagged inline where used):**
+- [Get started with custom connectors using remote MCP — Anthropic Help Center](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) — tool approval guidance, "only click Allow always when you trust the server to run unsupervised"
+- [How to make Claude Desktop auto-approve MCP tools](https://kahunam.com/articles/web-development/how-to-make-claude-desktop-auto-approve-mcp-tools-a-power-users-guide/) — report that "Always approve" cannot be undone (**LOW** — single community source, treat as a risk to design against rather than a verified fact)
 
 ---
-*Pitfalls research for: personal fitness data backend + remote MCP server*
-*Researched: 2026-08-23*
+*Pitfalls research for: adding five v2.0 capabilities to a shipped read-only fitness MCP backend*
+*Researched: 2026-09-02*
