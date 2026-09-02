@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 import structlog
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -73,6 +74,7 @@ from app.db.repositories.sync_state import (
     ensure_sync_state,
     record_sync_error,
 )
+from app.integrations.health_auto_export.errors import HAEPayloadError
 from app.integrations.health_auto_export.normalize import (
     SOURCE_APPLE_HEALTH,
     NormalizedRow,
@@ -183,6 +185,33 @@ async def _user_timezone(session: AsyncSession, *, user_id: uuid.UUID) -> str:
     if tz is None:
         raise ValueError("unknown user")
     return tz
+
+
+def parse_payload(raw: bytes) -> HAEPayload:
+    """Validate raw webhook bytes into the wire model. The FRONT of the inbound path.
+
+    This lives here rather than in ``app/api/routes/health_ingest.py`` because the boundary is
+    one-directional and ``test_health_auto_export_isolation.py`` enforces it by name: nothing
+    outside this package may import ``schemas``. That rule names routes explicitly, and it is
+    the reason a route can hold the RESULT of a parse without ever naming the type that
+    produced it -- so an HAE envelope change stays a one-package change, exactly as this
+    package's ``__init__`` promises.
+
+    Raises :class:`HAEPayloadError`, never a bare ``ValidationError`` (T-08-21, FOUND-05).
+    ``ValidationError.__str__`` renders ``input_value=...`` -- this person's calorie counts and
+    macro grams -- into a string that a caller would reasonably put in a log line. The wrapper
+    carries a fixed ``safe_message`` and is constructed from NOTHING, so there is no parameter
+    a future edit could interpolate the payload into. ``from None``, because chaining would
+    re-attach the very exception whose message is the problem.
+
+    An unparseable body is the one HAE failure that should reject the whole request rather than
+    be salvaged: it means a broken envelope -- a misconfigured exporter, or something that is
+    not HAE at all -- as opposed to the odd datapoint ``normalize.py`` drops one at a time.
+    """
+    try:
+        return HAEPayload.model_validate_json(raw)
+    except ValidationError:
+        raise HAEPayloadError from None
 
 
 async def ingest_payload(

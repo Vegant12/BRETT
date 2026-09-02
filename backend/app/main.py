@@ -15,7 +15,7 @@ from asgi_correlation_id import CorrelationIdMiddleware, correlation_id
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api.routes import health
+from app.api.routes import health, health_ingest
 from app.config import get_settings
 from app.db.session import make_engine, make_sessionmaker
 from app.logging import configure_logging
@@ -92,6 +92,16 @@ app.add_middleware(CorrelationIdMiddleware)
 
 # D-04: no auth dependency -- /health is open so platform health checks reach it.
 app.include_router(health.router)
+
+# HEALTH-07: registered HERE, ABOVE the catch-all mount below. A route registered after that
+# mount is DEAD in production -- the mount matches everything -- while every test that builds
+# its own app still passes. `test_health_ingest_route.py` asserts this ORDER against the live
+# router, not against this file's text: two comments above already spell the mount call, so a
+# positional text search reports the wrong answer on a correct file.
+#
+# This route carries its own credential check and inherits none from the MCP sub-app, whose
+# RequireAuthMiddleware wraps only `mcp_app`.
+app.include_router(health_ingest.router)
 
 # MCP-01: mounted at "/" and NOT at "/mcp". The sub-app owns BOTH `/mcp` and
 # `/.well-known/oauth-protected-resource/mcp` at its own root; a `/mcp` prefix
