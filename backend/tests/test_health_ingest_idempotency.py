@@ -27,11 +27,29 @@ import sqlalchemy as sa
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.analytics.metadata import (
+    FRESHNESS_RESOURCES_APPLE_HEALTH,
+    FRESHNESS_RESOURCES_WORKOUTS,
+    build_freshness,
+)
 from app.config import Settings
+from app.core.time import utc_now
 from app.db.models import HealthDailyMetric, SyncState
-from app.db.repositories.sync_state import PROVIDER_APPLE_HEALTH
+from app.db.repositories.sync_state import (
+    PROVIDER_APPLE_HEALTH,
+    PROVIDER_HEVY,
+    RESOURCE_ACTIVITY,
+    RESOURCE_BODY_MEASUREMENTS,
+    RESOURCE_EXERCISE_TEMPLATES,
+    RESOURCE_NUTRITION,
+    RESOURCE_WORKOUTS,
+    complete_sync,
+    ensure_sync_state,
+    get_sync_state,
+)
 from app.integrations.health_auto_export import ingest, normalize
 from app.integrations.health_auto_export.ingest import ingest_payload
+from app.integrations.health_auto_export.registry import METRIC_REGISTRY
 from app.integrations.health_auto_export.schemas import HAEPayload
 from app.logging import configure_logging
 from tests.conftest import DEFAULT_USER_ID, hae_fixture
@@ -125,17 +143,20 @@ async def _read_one(
 
 
 async def _cleanup(maker: async_sessionmaker[AsyncSession]) -> None:
-    """Remove everything this module writes, pass or fail."""
+    """Remove everything this module writes, pass or fail.
+
+    EVERY `sync_state` row for this user goes, not only the two Apple Health ones. The D-03
+    section below seeds real Hevy rows in order to prove an Apple Health ingest leaves them
+    alone, and a surviving `provider='hevy'` row would make the next module's "never synced
+    reports None" assertion depend on execution order -- which is the exact class of failure
+    this file's per-test `finally` exists to prevent. `test_hevy_body.py` deletes the same
+    scope for the mirror-image reason.
+    """
     async with maker() as session:
         await session.execute(
             sa.delete(HealthDailyMetric).where(HealthDailyMetric.user_id == DEFAULT_USER_ID)
         )
-        await session.execute(
-            sa.delete(SyncState).where(
-                SyncState.user_id == DEFAULT_USER_ID,
-                SyncState.provider == PROVIDER_APPLE_HEALTH,
-            )
-        )
+        await session.execute(sa.delete(SyncState).where(SyncState.user_id == DEFAULT_USER_ID))
         await session.commit()
 
 
@@ -550,3 +571,377 @@ async def test_an_empty_payload_commits_nothing_and_returns_zeroes(engine: Async
         assert await _read_all_rows(maker) == []
     finally:
         await _cleanup(maker)
+
+
+# ---------------------------------------------------------------------------
+# HEALTH-11 / NUTR-05 / D-03: activity and nutrition freshness move INDEPENDENTLY
+#
+# These live beside the idempotency cases rather than in their own file because they need the
+# same container, the same fixtures and the same per-test `finally` cleanup; splitting them
+# would duplicate that machinery and give two places for the purge scope to drift apart.
+# ---------------------------------------------------------------------------
+
+# A distinct, obviously-not-now instant for the Hevy bookkeeping rows, so "unchanged" is an
+# observable statement rather than an artefact of two NULLs comparing equal.
+HEVY_SYNCED_AT = dt.datetime(2026, 7, 4, 9, 15, tzinfo=dt.UTC)
+
+HEVY_RESOURCES = (RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES, RESOURCE_BODY_MEASUREMENTS)
+
+
+def _payload_of_kind(kind: str) -> HAEPayload:
+    """The captured fixture, filtered to ONE data kind by the registry's own `kind` field.
+
+    Filtered rather than transcribed into two more fixture files, deliberately: this keeps the
+    fixtures and the registry from drifting apart, and it means a metric that ever changes kind
+    fails these tests instead of quietly moving to the other resource. The subscript is a
+    subscript and not a `.get()` for the same reason -- a fixture metric that fell out of the
+    registry is a `KeyError` here rather than a silently smaller payload.
+    """
+    raw = hae_fixture("activity_and_nutrition")
+    metrics = [
+        metric for metric in raw["data"]["metrics"] if METRIC_REGISTRY[metric["name"]].kind == kind
+    ]
+    assert metrics, f"the fixture carries no {kind} metrics, so this test would prove nothing"
+    return HAEPayload.model_validate({"data": {"metrics": metrics}})
+
+
+async def _apple_state(
+    maker: async_sessionmaker[AsyncSession], resource: str
+) -> dt.datetime | None:
+    async with maker() as session:
+        state = await get_sync_state(
+            session, user_id=DEFAULT_USER_ID, provider=PROVIDER_APPLE_HEALTH, resource=resource
+        )
+    return state.last_synced_at if state is not None else None
+
+
+async def _seed_hevy(maker: async_sessionmaker[AsyncSession], *, synced: bool) -> None:
+    """Create Hevy's three bookkeeping rows, optionally already synced.
+
+    They must EXIST before the ingest runs. Without that, a later assertion that they are
+    untouched would hold just as well because the rows were never created -- a vacuous pass over
+    exactly the leakage it is meant to detect.
+    """
+    async with maker() as session:
+        for resource in HEVY_RESOURCES:
+            await ensure_sync_state(
+                session, user_id=DEFAULT_USER_ID, provider=PROVIDER_HEVY, resource=resource
+            )
+            if synced:
+                await complete_sync(
+                    session,
+                    user_id=DEFAULT_USER_ID,
+                    provider=PROVIDER_HEVY,
+                    resource=resource,
+                    last_synced_at=HEVY_SYNCED_AT,
+                )
+        await session.commit()
+
+
+@pytest.mark.integration
+async def test_activity_only_payload_does_not_freshen_nutrition(engine: AsyncEngine) -> None:
+    """D-03 / NUTR-05: the split exists so a PARTIAL failure is visible.
+
+    Both kinds arrive in one webhook POST, so the tempting implementation advances both on every
+    successful delivery. That reports nutrition "fresh" while the logging app has stopped writing
+    to HealthKit -- which is the exact blind spot D-03 exists to remove, and it is invisible
+    without this test.
+    """
+    maker = _maker(engine)
+    before = utc_now()
+    try:
+        result = await ingest_payload(
+            maker, user_id=DEFAULT_USER_ID, payload=_payload_of_kind("activity")
+        )
+
+        assert result.rows_upserted == 5, (
+            f"the activity-only payload wrote {result.rows_upserted} rows; the assertions below "
+            f"would be vacuous if it had written none"
+        )
+        activity = await _apple_state(maker, RESOURCE_ACTIVITY)
+        assert activity is not None
+        assert activity >= before
+        assert activity.tzinfo is not None, "FOUND-04: freshness is stored timezone-aware"
+        assert await _apple_state(maker, RESOURCE_NUTRITION) is None, (
+            "D-03 / NUTR-05 violated: an activity-only delivery marked NUTRITION fresh. Claude "
+            "would then report this user's calorie and macro history as current while the "
+            "logging app had silently stopped writing to HealthKit -- a plausible answer that "
+            "is quietly wrong, which is this project's stated primary risk"
+        )
+    finally:
+        await _cleanup(maker)
+
+
+@pytest.mark.integration
+async def test_nutrition_only_payload_does_not_freshen_activity(engine: AsyncEngine) -> None:
+    """HEALTH-11, the mirror image. Both directions are asserted because one guard is not a rule.
+
+    A `_KIND_TO_RESOURCE` map that returned `activity` for everything would pass the previous
+    test unchanged: activity fresh, nutrition absent. It fails here.
+    """
+    maker = _maker(engine)
+    before = utc_now()
+    try:
+        result = await ingest_payload(
+            maker, user_id=DEFAULT_USER_ID, payload=_payload_of_kind("nutrition")
+        )
+
+        assert result.rows_upserted == 7
+        nutrition = await _apple_state(maker, RESOURCE_NUTRITION)
+        assert nutrition is not None
+        assert nutrition >= before
+        assert await _apple_state(maker, RESOURCE_ACTIVITY) is None, (
+            "D-03 / HEALTH-11 violated: a nutrition-only delivery marked ACTIVITY fresh. Step "
+            "and energy data would then report as current while the phone had stopped exporting"
+        )
+    finally:
+        await _cleanup(maker)
+
+
+@pytest.mark.integration
+async def test_a_mixed_payload_advances_both_resources_to_the_same_instant(
+    engine: AsyncEngine,
+) -> None:
+    """The ordinary case: one POST carrying both kinds advances both, at ONE instant.
+
+    Equality rather than "both are recent": two `utc_now()` calls inside the loop would make a
+    mixed delivery report activity and nutrition as fractionally different ages, which is a
+    difference with no meaning that a future reader would eventually try to interpret.
+    """
+    maker = _maker(engine)
+    try:
+        await ingest_payload(
+            maker, user_id=DEFAULT_USER_ID, payload=_payload("activity_and_nutrition")
+        )
+
+        activity = await _apple_state(maker, RESOURCE_ACTIVITY)
+        nutrition = await _apple_state(maker, RESOURCE_NUTRITION)
+
+        assert activity is not None
+        assert nutrition is not None
+        assert activity == nutrition, (
+            f"one delivery produced two freshness instants: {activity!r} vs {nutrition!r}"
+        )
+    finally:
+        await _cleanup(maker)
+
+
+@pytest.mark.integration
+async def test_an_apple_health_ingest_leaves_every_hevy_resource_untouched(
+    engine: AsyncEngine,
+) -> None:
+    """HEVY-09 must survive Phase 8. All three Hevy rows exist and are already synced first.
+
+    Pre-seeding at a distinct past instant is what makes "untouched" observable: with fresh rows
+    the timestamps would be NULL before and after, and the assertion would hold no matter what
+    the ingest did to them.
+    """
+    maker = _maker(engine)
+    try:
+        await _seed_hevy(maker, synced=True)
+        await ingest_payload(
+            maker, user_id=DEFAULT_USER_ID, payload=_payload("activity_and_nutrition")
+        )
+
+        async with maker() as session:
+            for resource in HEVY_RESOURCES:
+                state = await get_sync_state(
+                    session,
+                    user_id=DEFAULT_USER_ID,
+                    provider=PROVIDER_HEVY,
+                    resource=resource,
+                )
+                assert state is not None
+                assert state.last_synced_at == HEVY_SYNCED_AT, (
+                    f"an Apple Health ingest moved Hevy's {resource!r} freshness. The two "
+                    f"providers share one table and the provider column is the only thing "
+                    f"keeping them apart; a lookup that ignores it reports a Hevy sync that "
+                    f"never happened. Got {state.last_synced_at!r}"
+                )
+    finally:
+        await _cleanup(maker)
+
+
+@pytest.mark.integration
+async def test_apple_health_freshness_is_reported_separately_from_hevy(
+    engine: AsyncEngine,
+) -> None:
+    """ROADMAP criterion #5: 'when Apple Health data last arrived, reported SEPARATELY from when
+    Hevy last synced, through the existing freshness envelope.'
+
+    Asserted through `build_freshness` rather than by reading `sync_state` directly, because the
+    envelope is what Claude actually receives -- a correct bookkeeping row behind a builder that
+    resolved it under the wrong provider would satisfy a direct read and still answer wrongly.
+    """
+    maker = _maker(engine)
+    try:
+        await _seed_hevy(maker, synced=True)
+        await ingest_payload(
+            maker, user_id=DEFAULT_USER_ID, payload=_payload("activity_and_nutrition")
+        )
+
+        async with maker() as session:
+            freshness = await build_freshness(
+                session,
+                user_id=DEFAULT_USER_ID,
+                resources=FRESHNESS_RESOURCES_WORKOUTS + FRESHNESS_RESOURCES_APPLE_HEALTH,
+            )
+
+        assert set(freshness.resources) == {
+            RESOURCE_WORKOUTS,
+            RESOURCE_ACTIVITY,
+            RESOURCE_NUTRITION,
+        }, f"expected three separately-reported resources, got {sorted(freshness.resources)}"
+        assert freshness.resources[RESOURCE_WORKOUTS] == HEVY_SYNCED_AT, (
+            "the Hevy timestamp moved when Apple Health data arrived. Claude could then no "
+            "longer tell a stale workout sync from a fresh one, which is the whole point of a "
+            "per-resource envelope"
+        )
+        activity = freshness.resources[RESOURCE_ACTIVITY]
+        nutrition = freshness.resources[RESOURCE_NUTRITION]
+        assert activity is not None
+        assert nutrition is not None
+        assert activity > HEVY_SYNCED_AT, (
+            "the Apple Health resources answered with the Hevy timestamp -- RESEARCH Pitfall 7, "
+            "a plausible freshness figure resolved under the wrong provider"
+        )
+    finally:
+        await _cleanup(maker)
+
+
+@pytest.mark.integration
+async def test_apple_health_freshness_reports_a_kind_that_never_arrived_as_none(
+    engine: AsyncEngine,
+) -> None:
+    """The envelope must be able to SAY "nutrition has never arrived", not omit the key.
+
+    `None` is the answer to "when did this last arrive"; a missing key is indistinguishable from
+    "that resource does not exist", and Phase 13's nutrition tool has to be able to tell a user
+    who has never logged food from one whose logging app broke last week.
+    """
+    maker = _maker(engine)
+    try:
+        await ingest_payload(maker, user_id=DEFAULT_USER_ID, payload=_payload_of_kind("activity"))
+
+        async with maker() as session:
+            freshness = await build_freshness(
+                session, user_id=DEFAULT_USER_ID, resources=FRESHNESS_RESOURCES_APPLE_HEALTH
+            )
+
+        assert set(freshness.resources) == {RESOURCE_ACTIVITY, RESOURCE_NUTRITION}
+        assert freshness.resources[RESOURCE_ACTIVITY] is not None
+        assert freshness.resources[RESOURCE_NUTRITION] is None
+    finally:
+        await _cleanup(maker)
+
+
+@pytest.mark.integration
+async def test_a_wholly_unrecognised_payload_advances_nothing(engine: AsyncEngine) -> None:
+    """Open Question 2: a kind is present only when a metric of that kind was ACCEPTED.
+
+    A delivery in which every metric was dropped is exactly the case where advancing on
+    "the POST succeeded" instead of "a row landed" reports both kinds fresh while nothing at all
+    was stored. The bookkeeping rows must not even be created.
+    """
+    maker = _maker(engine)
+    payload = _built(
+        _wire("sleep_analysis", "hr", [{"qty": 6.75, "date": MORNING, "source": "iPhone"}]),
+        _wire("weight_body_mass", "kg", [{"qty": 74.35, "date": MORNING, "source": "Hevy"}]),
+    )
+    try:
+        result = await ingest_payload(maker, user_id=DEFAULT_USER_ID, payload=payload)
+
+        assert result.metrics_unrecognized == 2
+        assert result.rows_upserted == 0
+        assert await _read_all_rows(maker) == []
+        async with maker() as session:
+            for resource in (RESOURCE_ACTIVITY, RESOURCE_NUTRITION):
+                state = await get_sync_state(
+                    session,
+                    user_id=DEFAULT_USER_ID,
+                    provider=PROVIDER_APPLE_HEALTH,
+                    resource=resource,
+                )
+                assert state is None, (
+                    f"a payload whose every metric was dropped created the {resource!r} "
+                    f"bookkeeping row. Freshness would then track DELIVERIES rather than DATA, "
+                    f"and a device exporting nothing but unrecognised metrics would read as "
+                    f"perfectly healthy"
+                )
+    finally:
+        await _cleanup(maker)
+
+
+# ---------------------------------------------------------------------------
+# T-08-39 / FOUND-05: no stored value may reach the log sink
+# ---------------------------------------------------------------------------
+
+
+def _qty_origins(name: str) -> dict[str, str]:
+    """Map every `qty` spelling in a fixture to the metric it came from.
+
+    Walked out of the parsed fixture rather than listed by hand, so the forbidden set cannot
+    drift away from the files it exists to protect. The VALUE is the key and the ORIGIN is the
+    payload, so a failure can name the metric without printing the measurement.
+    """
+    origins: dict[str, str] = {}
+    for metric in hae_fixture(name)["data"]["metrics"]:
+        for point in metric.get("data", []):
+            if "qty" not in point:
+                continue
+            for spelling in (str(point["qty"]), str(Decimal(str(point["qty"])))):
+                origins[spelling] = f"{name}:{metric['name']}"
+    return origins
+
+
+@pytest.mark.integration
+async def test_no_stored_value_reaches_the_log_stream(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blueprint 44 / FOUND-05 / T-08-39, across a FULL ingest rather than a pure normalize.
+
+    This is the run that actually touches the database, so it is the one where a driver
+    exception could render bound parameters -- this person's calorie counts -- into a log line.
+    The forbidden set is walked out of the fixtures' own `qty` values, and the assertion reports
+    the leaking payload:metric pairs rather than the measurements, so a failure is actionable
+    without itself printing what it is protecting.
+    """
+    maker = _maker(engine)
+    origins: dict[str, str] = {}
+    payloads: list[HAEPayload] = []
+    for name in ("activity_and_nutrition", "hevy_active_energy", "unrecognized_and_sourceless"):
+        origins |= _qty_origins(name)
+        payloads.append(_payload(name))
+    # A fourth delivery whose only job is to exercise the ingest module's own skip path, which
+    # the three captured fixtures never reach.
+    payloads.append(
+        _built(_wire("protein", "g", [{"qty": 155.7, "date": MORNING, "source": LONG_SOURCE}]))
+    )
+
+    async def _ingest_all() -> None:
+        for payload in payloads:
+            await ingest_payload(maker, user_id=DEFAULT_USER_ID, payload=payload)
+
+    try:
+        _, entries = await _run_capturing_logs(monkeypatch, _ingest_all)
+    finally:
+        await _cleanup(maker)
+
+    # Without these the whole test passes trivially on an empty buffer, which is exactly what a
+    # mis-wired capture produces.
+    for expected in (
+        "health_ingest_completed",
+        "health_ingest_row_skipped",
+        "health_ingest_hevy_source_excluded",
+        "health_ingest_unrecognized_metric",
+    ):
+        assert _events(entries, expected), f"log capture is not wired: no {expected} event"
+
+    scanned = _scan(entries)
+    leaked = sorted({origin for spelling, origin in origins.items() if spelling in scanned})
+
+    assert not leaked, (
+        f"FOUND-05 / T-08-39 violated: a measured quantity reached the log stream. Sync "
+        f"lifecycle logs carry a metric name, a local_day, a source_name, a count or an "
+        f"exception class name -- never a measurement. Leaking payload:metric pair(s): {leaked}"
+    )
