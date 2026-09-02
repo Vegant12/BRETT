@@ -279,13 +279,32 @@ def normalize_payload(payload: HAEPayload, *, tz: str) -> NormalizeResult:
     # SAVEPOINT sequences -- a difference that only ever shows up under a partial failure.
     for (name, source_name, day), values in sorted(buckets.items()):
         row_spec = METRIC_REGISTRY[name]
+        if len(values) > 1:
+            # Pitfall N-2. More than one datapoint for a key means HAE's aggregation interval is
+            # not daily, so a batch boundary CAN fall inside a day and replace semantics has
+            # become lossy. Under a correct device configuration this never fires; when it does,
+            # the device setting has drifted. Never a value -- only the shape of the problem.
+            log.warning(
+                "health_ingest_multi_point_day",
+                metric=name,
+                source_name=source_name,
+                local_day=day.isoformat(),
+                points=len(values),
+            )
+        total = sum(values, Decimal(0))
+        if row_spec.aggregation == "avg":
+            # The Decimal mean, for a RATE. Summing a rate makes it grow with sampling
+            # frequency, so a shorter HAE interval would read as the user walking faster. No
+            # `avg` metric is in the Phase 8 registry; the branch exists so Phase 13 does not
+            # have to reopen this function to add one.
+            total = total / Decimal(len(values))
         rows.append(
             NormalizedRow(
                 metric=name,
                 kind=row_spec.kind,
                 source_name=source_name,
                 local_day=day,
-                value=sum(values, Decimal(0)),
+                value=total,
                 units=row_spec.canonical_unit,
                 sample_count=len(values),
             )
