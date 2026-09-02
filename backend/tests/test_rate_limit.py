@@ -24,12 +24,21 @@ carries that marker on every test, so that second constraint is spent.)
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.types import Receive, Scope, Send
 
 from app.config import Settings
-from app.middleware import EXEMPT_PREFIXES, TokenBucket, build_limiter
+from app.middleware import (
+    EXEMPT_PREFIXES,
+    INGEST_PATH_PREFIX,
+    RateLimitMiddleware,
+    TokenBucket,
+    build_ingest_limiter,
+    build_limiter,
+)
 
 DB_URL = "postgresql://u:pw@localhost:5432/brett"
 
@@ -223,6 +232,207 @@ def test_exempt_prefixes_cover_health_and_well_known() -> None:
         f"T-07-04 violated: the exemption list changed. Removing an entry makes the limiter "
         f"able to fail the Cloud Run health probe or Claude's connector discovery; adding one "
         f"opens an unthrottled path. Got: {EXEMPT_PREFIXES!r}"
+    )
+
+
+# --- The ingest bucket (Phase 8, RESEARCH Pitfall 2) -------------------------
+#
+# Unit-level, against `RateLimitMiddleware._bucket` directly, and in the fast half.
+# The route these paths name does not exist yet -- plan 08-07 builds it -- so an HTTP
+# test could not be written here at all; and even once it can, bucket SELECTION is a
+# pure function of the path and `app.state`, so driving it through the transport
+# would only add ways for the test to fail for reasons that are not the one under test.
+
+INGEST_PATH = f"{INGEST_PATH_PREFIX}health-auto-export"
+
+
+async def _unreached_app(scope: Scope, receive: Receive, send: Send) -> None:
+    """The downstream app. `_bucket` must never call it -- it only resolves an object."""
+    raise AssertionError("_bucket must not dispatch downstream")
+
+
+def _app_state(**buckets: TokenBucket) -> SimpleNamespace:
+    """Stand in for the FastAPI app the middleware reaches through ``scope["app"]``.
+
+    ``SimpleNamespace`` rather than a real ``FastAPI``: the middleware reads exactly
+    two attributes off ``app.state`` and nothing else, and constructing the real app
+    here would drag in its settings, its lifespan and its mounted MCP sub-app for a
+    test about two ``getattr`` calls. Omitting a keyword leaves the attribute genuinely
+    absent, which is the bare-router case below.
+    """
+    return SimpleNamespace(state=SimpleNamespace(**buckets))
+
+
+def _http_scope(path: str, app: SimpleNamespace | None = None) -> Scope:
+    scope: Scope = {"type": "http", "path": path}
+    if app is not None:
+        scope["app"] = app
+    return scope
+
+
+def _frozen(capacity: int) -> TokenBucket:
+    """A bucket whose clock never moves, so nothing here can refill mid-assertion."""
+    return TokenBucket(capacity=capacity, refill_per_second=0.5, clock=_FakeClock())
+
+
+def test_ingest_path_uses_its_own_bucket() -> None:
+    """RESEARCH Pitfall 2: the ingest prefix selects the ingest bucket, not the shared one.
+
+    If this fails the second bucket exists but nothing routes to it, so every Health
+    Auto Export delivery still spends tokens Claude's connector needs -- the exact
+    coupling the second bucket was added to remove.
+    """
+    shared, ingest = _frozen(3), _frozen(3)
+    app = _app_state(rate_limit_bucket=shared, ingest_rate_limit_bucket=ingest)
+    middleware = RateLimitMiddleware(_unreached_app, bucket=_frozen(1))
+
+    resolved = middleware._bucket(_http_scope(INGEST_PATH, app))
+
+    assert resolved is ingest, (
+        f"HEALTH-07 violated: a request to {INGEST_PATH} resolved to a bucket that is not "
+        f"app.state.ingest_rate_limit_bucket, so ingest traffic is still drawing from the "
+        f"bucket /mcp shares. Resolved the shared bucket: {resolved is shared}"
+    )
+
+
+def test_draining_the_ingest_bucket_leaves_the_shared_bucket_full() -> None:
+    """RESEARCH Pitfall 2, the defining assertion: a burst of exports cannot 429 Claude.
+
+    Health Auto Export has no documented retry, so the pressure to exempt the ingest
+    path is real -- and the answer is this separation instead. Drained THROUGH the
+    middleware's own resolution rather than by taking from the object directly: taking
+    from a bucket a test hand-picked would pass even if `_bucket` returned the shared
+    one for every path in existence.
+    """
+    shared, ingest = _frozen(3), _frozen(3)
+    app = _app_state(rate_limit_bucket=shared, ingest_rate_limit_bucket=ingest)
+    middleware = RateLimitMiddleware(_unreached_app, bucket=_frozen(1))
+    ingest_scope = _http_scope(INGEST_PATH, app)
+
+    drained = [middleware._bucket(ingest_scope).take() for _ in range(3)]
+    over_limit = middleware._bucket(ingest_scope).take()
+
+    assert drained == [None, None, None], (
+        f"the drain is broken: the ingest bucket refused one of its own capacity-3 takes, so "
+        f"the assertion below would pass for the wrong reason. Got: {drained}"
+    )
+    assert isinstance(over_limit, float), (
+        f"HEALTH-07 violated: the ingest path is not throttled at all -- a fourth take against "
+        f"a capacity-3 bucket was allowed, which means `_bucket` handed out a fresh object each "
+        f"time or the path is exempt. Got: {over_limit!r}"
+    )
+    mcp_take = middleware._bucket(_http_scope("/mcp", app)).take()
+    assert mcp_take is None, (
+        f"RESEARCH Pitfall 2 violated: draining the ingest bucket also drained the bucket /mcp "
+        f"uses, so a burst of phone exports 429s Claude's next tool call in the middle of a "
+        f"coaching turn. The two buckets are the same object or the prefix check is inverted. "
+        f"Got: {mcp_take!r}"
+    )
+
+
+def test_mcp_path_never_uses_the_ingest_bucket() -> None:
+    """The other direction: the ingest carve-out must not widen to everything else.
+
+    A prefix check written against the wrong string -- or against `in` instead of
+    `startswith` -- would quietly move ALL traffic onto the ingest bucket, and every
+    assertion about the ingest side would still pass.
+    """
+    shared, ingest = _frozen(3), _frozen(3)
+    app = _app_state(rate_limit_bucket=shared, ingest_rate_limit_bucket=ingest)
+    middleware = RateLimitMiddleware(_unreached_app, bucket=_frozen(1))
+
+    for path in ("/mcp", "/api/v1/sync", "/", "/api/v1/ingestion-report"):
+        assert middleware._bucket(_http_scope(path, app)) is shared, (
+            f"HEALTH-07 violated: {path!r} resolved to the INGEST bucket. Only paths under "
+            f"{INGEST_PATH_PREFIX!r} may, or the ingest allowance silently becomes the "
+            f"allowance for the whole service"
+        )
+
+
+def test_ingest_prefix_is_not_exempt() -> None:
+    """T-08-12: the ingest path is rate-limited, never exempted.
+
+    The temptation is documented and real -- a 429 to Health Auto Export is permanent
+    data loss because it does not retry. But `/api/v1/ingest/` is an internet-reachable
+    WRITE path on a service deployed --allow-unauthenticated, and adding it here would
+    make it the one unbounded surface in the process: anyone on the internet could then
+    drive unlimited request bodies into the JSON parser. The separate bucket is the
+    answer; the exemption never is.
+    """
+    assert INGEST_PATH_PREFIX not in EXEMPT_PREFIXES, (
+        f"T-08-12 violated: {INGEST_PATH_PREFIX!r} was added to EXEMPT_PREFIXES, making an "
+        f"internet-reachable write path the only unthrottled surface on an "
+        f"--allow-unauthenticated service. Got: {EXEMPT_PREFIXES!r}"
+    )
+    assert not INGEST_PATH_PREFIX.startswith(EXEMPT_PREFIXES), (
+        f"T-08-12 violated: {INGEST_PATH_PREFIX!r} falls under an existing exemption in "
+        f"{EXEMPT_PREFIXES!r}, so the ingest route would be unthrottled without anyone having "
+        f"edited the exemption tuple at all"
+    )
+    assert not INGEST_PATH.startswith(EXEMPT_PREFIXES), (
+        f"T-08-12 violated: the real ingest path {INGEST_PATH!r} is exempt from rate limiting"
+    )
+
+
+def test_ingest_bucket_falls_back_when_none_is_published() -> None:
+    """The middleware must keep working mounted under a bare router, as it does today.
+
+    `_bucket` resolves through `scope["app"]`, and neither that key nor either bucket
+    attribute is guaranteed to exist -- Starlette sets `scope["app"]` only when the
+    request travels through an application object. A `_bucket` that assumed the ingest
+    attribute was there would raise AttributeError INSIDE the limiter, which is a 500
+    on every ingest request from a middleware whose entire job is to answer 429.
+    """
+    shared, fallback = _frozen(3), _frozen(1)
+    middleware = RateLimitMiddleware(_unreached_app, bucket=fallback)
+
+    only_shared = middleware._bucket(_http_scope(INGEST_PATH, _app_state(rate_limit_bucket=shared)))
+    no_app_at_all = middleware._bucket(_http_scope(INGEST_PATH))
+
+    assert only_shared is shared, (
+        "HEALTH-07 violated: with no ingest bucket published, the ingest path must fall back to "
+        "the shared bucket -- an unresolvable bucket must never mean an unlimited one"
+    )
+    assert no_app_at_all is fallback, (
+        "HEALTH-07 violated: with no `app` in the scope at all, `_bucket` must fall back to the "
+        "constructor argument. Anything else is an AttributeError inside the limiter, i.e. a 500 "
+        "from the component whose job is to answer 429"
+    )
+
+
+def test_build_ingest_limiter_maps_ingest_settings_to_bucket_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ingest factory must read the INGEST_* pair, not the shared one.
+
+    All four numbers are given different values on purpose. A factory that read
+    `rate_limit_burst` instead of `ingest_rate_limit_burst` is invisible against the
+    shipped configuration, where both pairs are deliberately 30/30 -- it would only
+    surface the day someone retuned one of them and the other silently moved too.
+    """
+    settings = _settings(
+        monkeypatch,
+        RATE_LIMIT_PER_MINUTE="600",
+        RATE_LIMIT_BURST="99",
+        INGEST_RATE_LIMIT_PER_MINUTE="60",
+        INGEST_RATE_LIMIT_BURST="12",
+    )
+
+    bucket = build_ingest_limiter(settings)
+
+    assert bucket._refill == pytest.approx(1.0), (
+        f"HEALTH-07 violated: INGEST_RATE_LIMIT_PER_MINUTE=60 must become 1.0 tokens/second. A "
+        f"refill of 10.0 means the factory read RATE_LIMIT_PER_MINUTE instead. Got: "
+        f"{bucket._refill!r}"
+    )
+    assert bucket._capacity == 12, (
+        f"HEALTH-07 violated: INGEST_RATE_LIMIT_BURST=12 must become the bucket capacity. A "
+        f"capacity of 99 means the factory read RATE_LIMIT_BURST instead. Got: "
+        f"{bucket._capacity!r}"
+    )
+    assert build_limiter(settings)._capacity == 99, (
+        "the two factories must stay independent: the shared limiter still reads the shared "
+        "burst, so neither factory can be a rename of the other"
     )
 
 

@@ -30,6 +30,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "MCP_ALLOWED_HOSTS",
         "RATE_LIMIT_PER_MINUTE",
         "RATE_LIMIT_BURST",
+        "HEALTH_INGEST_SECRET",
+        "INGEST_RATE_LIMIT_PER_MINUTE",
+        "INGEST_RATE_LIMIT_BURST",
+        "INGEST_MAX_BODY_BYTES",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
@@ -191,3 +195,124 @@ def test_mcp_auth_mode_rejects_unknown_value(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_health_ingest_secret_is_masked_and_scrubbed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HEALTH-07/T-08-14: the webhook credential gets both layers, not just one.
+
+    Layer 1 is the ``SecretStr`` rendering (``repr`` and ``model_dump_json`` show
+    ``**********``). Layer 3 is membership in ``_SECRET_FIELDS``, which is the ONLY
+    wiring that puts a value into ``secret_values()`` and therefore into the log
+    value scrubber. Both are asserted here because either alone leaks: a plain
+    ``str`` field would print itself into a validation error, and a ``SecretStr``
+    outside ``_SECRET_FIELDS`` is invisible to the scrubber the moment any call
+    site does ``get_secret_value()`` near a log line.
+    """
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("HEALTH_INGEST_SECRET", "ingest-secret-4c1d-must-not-be-logged")
+    settings = Settings(_env_file=None)
+
+    rendered = repr(settings) + settings.model_dump_json()
+
+    assert "ingest-secret-4c1d-must-not-be-logged" not in rendered, (
+        f"T-08-14 violated: HEALTH_INGEST_SECRET rendered its own value. It must be a "
+        f"SecretStr so repr/model_dump_json show ********** instead. Got: {rendered}"
+    )
+    assert "**********" in rendered, (
+        "T-08-14 violated: nothing in the rendered settings is masked at all, so the "
+        "SecretStr layer is not doing its job"
+    )
+    assert "ingest-secret-4c1d-must-not-be-logged" in settings.secret_values(), (
+        f"T-08-14 violated: health_ingest_secret is absent from _SECRET_FIELDS, so the log "
+        f"value scrubber never learns the literal and one careless log call publishes the "
+        f"webhook credential. _SECRET_FIELDS: {_SECRET_FIELDS}"
+    )
+
+
+def test_health_ingest_secret_is_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-08-16: an unconfigured deployment has a DISABLED ingest path, not a dead process.
+
+    Requiring the secret at boot would break every developer machine, every test
+    environment and the Hevy sync job -- all of which never touch the ingest route --
+    for a guarantee that belongs to the deploy script instead. The route fails CLOSED
+    at request time (plan 08-07); ``test_cloud_run_deploy.py`` is what guarantees
+    production actually has the binding.
+    """
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    settings = Settings(_env_file=None)
+
+    assert settings.health_ingest_secret is None, (
+        f"T-08-16 violated: health_ingest_secret must default to None so an unset credential "
+        f"is a disabled path rather than a boot failure. Got: {settings.health_ingest_secret!r}"
+    )
+    assert settings.secret_values(), "the DATABASE_URL secret must still be scrubbed"
+
+
+def test_ingest_tuning_numbers_default_correctly_and_are_not_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RESEARCH Pitfalls 2 and 5: operational numbers must stay readable in logs.
+
+    The three values are the ingest bucket's geometry and the pre-parse body cap.
+    They are asserted to be plain ``int`` AND absent from ``_SECRET_FIELDS`` for the
+    same reason ``test_mcp_config_is_not_secret`` asserts it of the public MCP
+    config: a number added to the value scrubber gets replaced by ``***REDACTED***``
+    in every log line that happens to contain it -- ``30`` would redact timestamps,
+    counts and IDs across the whole stream and make the logs unreadable.
+    """
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    settings = Settings(_env_file=None)
+
+    assert settings.ingest_rate_limit_per_minute == 30, (
+        f"RESEARCH Pitfall 2 violated: the ingest bucket's refill default changed. "
+        f"Got: {settings.ingest_rate_limit_per_minute!r}"
+    )
+    assert settings.ingest_rate_limit_burst == 30, (
+        f"RESEARCH Pitfall 2 violated: the ingest bucket's burst default changed. "
+        f"Got: {settings.ingest_rate_limit_burst!r}"
+    )
+    assert settings.ingest_max_body_bytes == 10_485_760, (
+        f"RESEARCH Pitfall 5 violated: the pre-parse body cap is not 10 MiB. Measured peak "
+        f"resident memory decoding a 10 MB body is ~235 MB, and the cap is what keeps the 1Gi "
+        f"instance from OOMing into a 503 with no log line. Got: {settings.ingest_max_body_bytes!r}"
+    )
+
+    for name in (
+        "ingest_rate_limit_per_minute",
+        "ingest_rate_limit_burst",
+        "ingest_max_body_bytes",
+    ):
+        assert name not in _SECRET_FIELDS, (
+            f"RESEARCH Pitfall 2 violated: operational tuning field {name!r} was added to "
+            f"_SECRET_FIELDS; the log value scrubber would then redact that plain number "
+            f"everywhere it appears and make the log stream unreadable"
+        )
+        assert isinstance(getattr(settings, name), int), (
+            f"{name!r} must be a plain int, not a SecretStr or a str"
+        )
+
+
+def test_ingest_tuning_numbers_are_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEPLOY-01: deploy/cloud-run.env.yaml must be able to retune without a commit.
+
+    Deliberately distinct values, so a field that silently ignored its environment
+    variable -- a typo'd name, a ``validation_alias`` that does not match the key the
+    env file sets -- fails here instead of shipping a service whose real limits differ
+    from the file that claims to configure them.
+    """
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("INGEST_RATE_LIMIT_PER_MINUTE", "12")
+    monkeypatch.setenv("INGEST_RATE_LIMIT_BURST", "7")
+    monkeypatch.setenv("INGEST_MAX_BODY_BYTES", "2048")
+    settings = Settings(_env_file=None)
+
+    assert (
+        settings.ingest_rate_limit_per_minute,
+        settings.ingest_rate_limit_burst,
+        settings.ingest_max_body_bytes,
+    ) == (12, 7, 2048), (
+        f"DEPLOY-01 violated: an INGEST_* environment variable is not read into its Settings "
+        f"field, so deploy/cloud-run.env.yaml would describe limits the process does not use. "
+        f"Got: {settings.ingest_rate_limit_per_minute}, {settings.ingest_rate_limit_burst}, "
+        f"{settings.ingest_max_body_bytes}"
+    )

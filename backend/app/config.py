@@ -22,7 +22,7 @@ from sqlalchemy.engine import make_url
 
 _SSL_REQUIRING_MODES = ("require", "verify-ca", "verify-full")
 
-_SECRET_FIELDS = ("database_url", "hevy_api_key", "mcp_auth_secret")
+_SECRET_FIELDS = ("database_url", "hevy_api_key", "mcp_auth_secret", "health_ingest_secret")
 
 # The single v1 user, fixed by migration 0002. A plain module constant and deliberately NOT a
 # `Settings` field: this is a migration-fixed identity, not configuration, and making it
@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     hevy_api_key: SecretStr | None = None
     mcp_auth_secret: SecretStr | None = None
 
+    # HEALTH-07. The Health Auto Export webhook's shared secret. `SecretStr | None` and NOT
+    # required at boot, deliberately: the route fails CLOSED at request time when it is unset
+    # (a bare 401, writing nothing), so an unconfigured deployment has a DISABLED ingest path
+    # rather than an unauthenticated one. Production is guaranteed by
+    # `test_cloud_run_deploy.py`, which asserts the --set-secrets binding exists.
+    health_ingest_secret: SecretStr | None = None
+
     # MCP transport/auth configuration. NOT secrets: these are public hostnames
     # and URLs that appear in the RFC 9728 metadata document Claude fetches
     # anonymously. They must stay OUT of `_SECRET_FIELDS` -- adding a public
@@ -104,6 +111,22 @@ class Settings(BaseSettings):
     # (07-RESEARCH.md Pitfalls 9 and 10, Open Question 2).
     rate_limit_per_minute: int = 30
     rate_limit_burst: int = 30
+
+    # RESEARCH Pitfall 2. The ingest path gets its OWN bucket rather than an exemption: Health
+    # Auto Export has no documented retry, so a 429 is permanent data loss -- but exempting an
+    # internet-reachable write path on an --allow-unauthenticated service would leave it the one
+    # unbounded surface in the process. Same numbers as the shared bucket, deliberately: the
+    # point of the second bucket is SEPARATION (an ingest burst must not drain the /mcp bucket
+    # mid-coaching-turn), not a different limit.
+    ingest_rate_limit_per_minute: int = 30
+    ingest_rate_limit_burst: int = 30
+
+    # RESEARCH Pitfall 5 / STATE.md. Rejected with 413 BEFORE the JSON parse. Measured peak
+    # resident memory on a 10 MB body is ~235 MB, which is why scripts/deploy-cloud-run.sh moves
+    # to --memory=1Gi in this same plan; without the cap the instance OOMs and Cloud Run answers
+    # 503 with no log line to explain it. Cloud Run's own request ceiling is 32 MiB, so this is
+    # the tighter of the two limits and the one that produces a diagnosable response.
+    ingest_max_body_bytes: int = 10_485_760
 
     @field_validator("database_url")
     @classmethod

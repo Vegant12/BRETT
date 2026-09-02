@@ -86,6 +86,11 @@ def _settings_env_names() -> set[str]:
     return names
 
 
+def _deploy_script_text() -> str:
+    """The deploy script as text. Read, never executed -- running it would deploy."""
+    return DEPLOY_SCRIPT.read_text()
+
+
 def _secret_bindings() -> dict[str, str]:
     """``{ENV_NAME: SECRET_REF}`` parsed out of the script's ``--set-secrets``.
 
@@ -232,6 +237,71 @@ def test_deploy_script_carries_every_required_flag() -> None:
         )
 
 
+def test_service_has_enough_memory_for_json_ingest() -> None:
+    """RESEARCH Pitfall 5: 512Mi OOMs on a 10 MB ingest body and Cloud Run reports only a 503.
+
+    Asserted in both directions. The presence check alone would pass a script that
+    somehow carried two ``--memory`` flags, and the absence check alone would pass a
+    script that had dropped the flag entirely and inherited Cloud Run's own default.
+    """
+    script = _deploy_script_text()
+    memory_flags = [line.strip() for line in script.splitlines() if "--memory" in line]
+
+    assert "--memory=1Gi" in script, (
+        f"HEALTH-06 violated: the deploy no longer requests 1Gi. Measured peak resident memory "
+        f"decoding a 10 MB Health Auto Export body is ~235 MB; at 512Mi the instance OOMs and "
+        f"Cloud Run answers 503 with no application log line, so a whole sync window is lost "
+        f"with no diagnosable cause. Found memory flag: {memory_flags}"
+    )
+    assert "--memory=512Mi" not in script, (
+        f"HEALTH-06 violated: --memory=512Mi is back in scripts/deploy-cloud-run.sh. That is "
+        f"the measured-too-small value this plan replaced, and the failure it produces (a 503 "
+        f"with no log line) looks like an outage rather than a capacity problem. Found memory "
+        f"flag: {memory_flags}"
+    )
+
+
+def test_deploy_script_has_no_comment_inside_the_gcloud_call() -> None:
+    """A `#` between two continued lines truncates the command, and `bash -n` says nothing.
+
+    Backslash continuation is removed during tokenization, so a comment line inside the
+    invocation is joined onto the previous one, swallows the rest of that logical line,
+    and the unescaped newline then ENDS the command. Everything below the comment --
+    ``--env-vars-file``, ``--set-secrets``, ``--memory`` -- becomes a separate line that
+    bash tries to run as its own command. The script exits non-zero eventually, but only
+    AFTER ``gcloud run deploy`` has already deployed a revision with no environment, no
+    secrets and default memory.
+
+    Nothing else catches this. ``bash -n`` reports the file as syntactically valid
+    (verified), and ``test_deploy_script_carries_every_required_flag`` greps the file as
+    TEXT, so every flag it looks for is still present in a script that no longer passes
+    any of them. Documenting the hazard in a comment is not enough either -- the comment
+    would sit right next to the place someone is about to add another one.
+    """
+    lines = _deploy_script_text().splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("exec gcloud run deploy")]
+    assert len(starts) == 1, (
+        f"DEPLOY-01 violated: expected exactly one `exec gcloud run deploy` invocation in "
+        f"scripts/deploy-cloud-run.sh, found {len(starts)}"
+    )
+
+    offenders: list[str] = []
+    for line in lines[starts[0] :]:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            offenders.append(stripped)
+        if not line.rstrip().endswith("\\"):
+            break
+
+    assert not offenders, (
+        f"DEPLOY-01 violated: scripts/deploy-cloud-run.sh has a comment INSIDE the "
+        f"backslash-continued gcloud invocation. That silently truncates the command at the "
+        f"comment -- the deploy still runs, but without every flag below it (no --env-vars-file, "
+        f"no --set-secrets, no --memory) and `bash -n` reports the file as valid. Move the "
+        f"comment above `exec gcloud run deploy`. Offending lines: {offenders}"
+    )
+
+
 def test_every_secret_binding_is_a_secret_manager_reference() -> None:
     """T-02-10, Cloud Run edition: a literal on the right-hand side is a committed secret.
 
@@ -264,7 +334,7 @@ def test_env_file_and_secret_bindings_partition_the_environment(env_file: dict[s
         f"--set-secrets; Cloud Run rejects a deploy that binds one name in both places"
     )
 
-    for required in ("DATABASE_URL", "MCP_AUTH_SECRET"):
+    for required in ("DATABASE_URL", "MCP_AUTH_SECRET", "HEALTH_INGEST_SECRET"):
         assert required in bindings, (
             f"T-02-10 violated: {required} is not bound by --set-secrets. It is a credential, "
             f"so Secret Manager is its only legitimate source -- it must never move into "

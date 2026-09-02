@@ -56,6 +56,13 @@ log = structlog.get_logger()
 #                       server" with no further detail.
 EXEMPT_PREFIXES: tuple[str, ...] = ("/health", "/.well-known/")
 
+# RESEARCH Pitfall 2. This prefix is deliberately NOT in EXEMPT_PREFIXES. Health Auto Export has
+# no documented retry, so a 429 here is permanent data loss -- which is an argument for a
+# SEPARATE bucket, never for an exemption: this is an internet-reachable write path on an
+# --allow-unauthenticated service, and exempting it would leave one unbounded surface in the
+# process. Separate buckets mean a burst of exports cannot make Claude's next tool call 429.
+INGEST_PATH_PREFIX = "/api/v1/ingest/"
+
 # The exact key set of the 429 body. One key, asserted by test: this endpoint can
 # be made to emit this body by anyone on the internet, so it must never grow a
 # field that echoes the presented credential or an exception detail (T-07-02).
@@ -108,12 +115,20 @@ class RateLimitMiddleware:
         self._default_bucket = bucket
 
     def _bucket(self, scope: Scope) -> TokenBucket:
-        # `app/main.py` also publishes the bucket at `app.state.rate_limit_bucket`
-        # so there is exactly one live bucket object and a test can replace it
-        # without rebuilding the middleware stack. Falls back to the constructor
-        # argument if `scope["app"]` is absent, so the middleware still works
-        # mounted under a bare Starlette router.
+        # `app/main.py` publishes both buckets on `app.state` so there is exactly one
+        # live object per bucket with one owner, and a test can replace either without
+        # rebuilding the middleware stack. Falls back to the constructor argument if
+        # `scope["app"]` is absent, so the middleware still works mounted under a bare
+        # Starlette router.
+        #
+        # Every unresolvable case falls back to a real bucket rather than to no limit:
+        # this component's failure mode must be "throttled by the wrong bucket", never
+        # "unthrottled" (RESEARCH Pitfall 2, T-08-11).
         state = getattr(scope.get("app"), "state", None)
+        if scope.get("path", "").startswith(INGEST_PATH_PREFIX):
+            ingest = getattr(state, "ingest_rate_limit_bucket", None)
+            if isinstance(ingest, TokenBucket):
+                return ingest
         bucket = getattr(state, "rate_limit_bucket", None)
         return bucket if isinstance(bucket, TokenBucket) else self._default_bucket
 
@@ -159,4 +174,16 @@ def build_limiter(settings: Settings) -> TokenBucket:
     return TokenBucket(
         capacity=settings.rate_limit_burst,
         refill_per_second=settings.rate_limit_per_minute / 60.0,
+    )
+
+
+def build_ingest_limiter(settings: Settings) -> TokenBucket:
+    """Build the process-wide bucket for the health-ingest path (RESEARCH Pitfall 2).
+
+    A second bucket rather than a second limiter: `RateLimitMiddleware` already resolves a
+    bucket per request, so this is additive wiring and not new dispatch logic.
+    """
+    return TokenBucket(
+        capacity=settings.ingest_rate_limit_burst,
+        refill_per_second=settings.ingest_rate_limit_per_minute / 60.0,
     )
