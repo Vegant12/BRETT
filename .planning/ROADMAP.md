@@ -48,9 +48,9 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 **Plans**: 8 plans in 6 waves
 
 Plans:
-- [ ] 08-01-PLAN.md — `health_daily_metrics` table, migration 0005, and the HAE test fixtures (wave 1)
-- [ ] 08-02-PLAN.md — freshness envelope takes `(provider, resource)` pairs; two Apple Health resources (wave 1)
-- [ ] 08-03-PLAN.md — ingest secret, dedicated rate-limit bucket, body cap, `--memory=1Gi` (wave 1)
+- [x] 08-01-PLAN.md — `health_daily_metrics` table, migration 0005, and the HAE test fixtures (wave 1)
+- [x] 08-02-PLAN.md — freshness envelope takes `(provider, resource)` pairs; two Apple Health resources (wave 1)
+- [x] 08-03-PLAN.md — ingest secret, dedicated rate-limit bucket, body cap, `--memory=1Gi` (wave 1)
 - [ ] 08-04-PLAN.md — HAE package core: metric registry, wire quarantine, errors, bearer verifier (wave 2)
 - [ ] 08-05-PLAN.md — normalize: Hevy-source exclusion, unit conversion, whole-payload aggregation (wave 3)
 - [ ] 08-06-PLAN.md — idempotent upsert + independent activity/nutrition freshness bookkeeping (wave 4)
