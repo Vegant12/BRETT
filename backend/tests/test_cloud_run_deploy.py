@@ -261,6 +261,47 @@ def test_service_has_enough_memory_for_json_ingest() -> None:
     )
 
 
+def test_deploy_script_has_no_comment_inside_the_gcloud_call() -> None:
+    """A `#` between two continued lines truncates the command, and `bash -n` says nothing.
+
+    Backslash continuation is removed during tokenization, so a comment line inside the
+    invocation is joined onto the previous one, swallows the rest of that logical line,
+    and the unescaped newline then ENDS the command. Everything below the comment --
+    ``--env-vars-file``, ``--set-secrets``, ``--memory`` -- becomes a separate line that
+    bash tries to run as its own command. The script exits non-zero eventually, but only
+    AFTER ``gcloud run deploy`` has already deployed a revision with no environment, no
+    secrets and default memory.
+
+    Nothing else catches this. ``bash -n`` reports the file as syntactically valid
+    (verified), and ``test_deploy_script_carries_every_required_flag`` greps the file as
+    TEXT, so every flag it looks for is still present in a script that no longer passes
+    any of them. Documenting the hazard in a comment is not enough either -- the comment
+    would sit right next to the place someone is about to add another one.
+    """
+    lines = _deploy_script_text().splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("exec gcloud run deploy")]
+    assert len(starts) == 1, (
+        f"DEPLOY-01 violated: expected exactly one `exec gcloud run deploy` invocation in "
+        f"scripts/deploy-cloud-run.sh, found {len(starts)}"
+    )
+
+    offenders: list[str] = []
+    for line in lines[starts[0] :]:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            offenders.append(stripped)
+        if not line.rstrip().endswith("\\"):
+            break
+
+    assert not offenders, (
+        f"DEPLOY-01 violated: scripts/deploy-cloud-run.sh has a comment INSIDE the "
+        f"backslash-continued gcloud invocation. That silently truncates the command at the "
+        f"comment -- the deploy still runs, but without every flag below it (no --env-vars-file, "
+        f"no --set-secrets, no --memory) and `bash -n` reports the file as valid. Move the "
+        f"comment above `exec gcloud run deploy`. Offending lines: {offenders}"
+    )
+
+
 def test_every_secret_binding_is_a_secret_manager_reference() -> None:
     """T-02-10, Cloud Run edition: a literal on the right-hand side is a committed secret.
 
