@@ -222,4 +222,48 @@ one bad element is that element.
 
 ## 9. Verification record
 
-_Populated by plan 08-08 Task 2 (deployment smoke tests) and Task 3 (first real device export)._
+### 2026-09-02 — deployment and endpoint contract
+
+Service `brett`, project `brett-fitness`, region `us-central1`, gcloud SDK 578.0.0, deploying
+account `hovegant12@gmail.com`. Requests issued against the deterministic host
+`https://brett-792870654598.us-central1.run.app`.
+
+This section records what the endpoint **actually does**, observed from the outside, not what it is
+supposed to do.
+
+| Before | After |
+|---|---|
+| revision `brett-00009-fsm` | revision **`brett-00010-kln`**, 100% of traffic |
+| `--memory=512Mi` | **`1Gi`** (RESEARCH Pitfall 5: ~235 MB peak decoding a 10 MB body) |
+| no `HEALTH_INGEST_SECRET`, no `INGEST_*` | `HEALTH_INGEST_SECRET` bound from Secret Manager, plus `INGEST_MAX_BODY_BYTES`, `INGEST_RATE_LIMIT_PER_MINUTE`, `INGEST_RATE_LIMIT_BURST` |
+
+`brett-health-ingest-secret` was created the same way `brett-mcp-auth-secret` was — automatic
+replication, `roles/secretmanager.secretAccessor` granted on the **secret** (not per version) to
+`serviceAccount:brett-run@brett-fitness.iam.gserviceaccount.com`, verified by reading the live
+policy of both. The value was piped to `gcloud --data-file=-` from `secrets.token_urlsafe(48)` and
+never written to disk. `access latest | wc -c` returns `64`, which confirms no trailing newline —
+a newline in the stored value would make every correctly-copied token fail `compare_digest` with a
+401 and no diagnostic.
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | `GET /health` | `200` | `200`, body exactly `{"status":"ok","database":"connected"}` | **PASS** |
+| 2 | `POST /api/v1/ingest/health-auto-export`, no `Authorization` | `401`, bare body | `401`, `content-type: application/json`, `content-length: 24`, body exactly `{"error":"unauthorized"}` | **PASS** |
+| 3 | Same POST with a deliberately wrong bearer token | byte-identical to row 2 | `cmp` of the two bodies reports **identical**; the response header set is identical too, modulo the per-request `x-request-id`, `x-cloud-trace-context` and `date`. The presented token appears **0 times** across the response body and every response header | **PASS** |
+| 4 | `GET /.well-known/oauth-protected-resource/mcp` | `200` | `200`, advertising `resource` `…/mcp` and the AuthKit authorization server — the MCP connector is unaffected by the new route (RESEARCH Pitfall 1) | **PASS** |
+| 5 | Cloud Run logs for rows 2 and 3 | `health_ingest_unauthorized`, no credential | Both requests logged `health_ingest_unauthorized` with `correlation_id` matching the `x-request-id` returned to the caller. The presented token appears **0 times** in the log export | **PASS** |
+| 6 | Secret value in the repository | absent | `git grep` and a full working-tree `grep` both find it nowhere; `git status --porcelain` empty | **PASS** |
+
+Row 5 matters more than it looks. A `401` on its own could have come from the Cloud Run edge, from
+the MCP sub-app's `RequireAuthMiddleware`, or from BRETT's own handler — three very different
+things, one of which would mean the route is not reachable at all. The matching correlation ID
+proves the rejection came from `health_ingest.py`.
+
+The wrong-token request in row 3 is deliberately **not** reproduced verbatim in this document: a
+long token-shaped string after the word `Bearer` is exactly the pattern this file is checked for.
+To repeat it, substitute any long string of your own into the `-H 'authorization: Bearer …'` header
+of the row 2 command.
+
+### First real device export
+
+_Pending — plan 08-08 Task 3._
