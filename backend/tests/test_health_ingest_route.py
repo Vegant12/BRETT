@@ -22,6 +22,7 @@ import logging
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -50,6 +51,14 @@ INGEST_PATH = "/api/v1/ingest/health-auto-export"
 # The whole FastAPI-owned route inventory. `/health` is the ONLY intentionally open route
 # (D-04: platform health checks must reach it without a token).
 EXPECTED_FASTAPI_ROUTES = frozenset({"/health", INGEST_PATH})
+
+# Routes some OTHER test module registers on the shared `app` object at import time, which are
+# therefore visible to the inventory guard for the whole session. `test_secret_redaction.py`
+# adds `/__test_boom__` because exercising the D-05 handler needs a route that raises, and it
+# says so at the point it does it. Subtracted rather than ignored, and the guard first asserts
+# each of these is absent from `app/main.py` -- so a PRODUCTION route sneaking in under one of
+# these names still fails the test rather than being waved through.
+TEST_ONLY_ROUTES = frozenset({"/__test_boom__"})
 
 # The exact key set of the 202. Pinned here rather than spelled inline so a handler that starts
 # returning a stored VALUE beside the counts fails one assertion with a readable diff (ASVS V8).
@@ -567,7 +576,17 @@ def test_no_unauthenticated_fastapi_route_was_added() -> None:
     `/api/v1/ingest/health-auto-export` is on it because this plan's handler authenticates as
     its first statement.
     """
-    paths = _fastapi_route_paths()
+    main_source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(
+        encoding="utf-8"
+    )
+    for path in TEST_ONLY_ROUTES:
+        assert path not in main_source, (
+            f"T-08-42: {path!r} is registered by `app/main.py` and therefore SHIPS. It is "
+            f"subtracted below on the understanding that it is a test artefact; a production "
+            f"route under that name would otherwise be waved through by this guard"
+        )
+
+    paths = _fastapi_route_paths() - TEST_ONLY_ROUTES
 
     assert paths == set(EXPECTED_FASTAPI_ROUTES), (
         f"T-08-42: the FastAPI route inventory changed. Expected "
