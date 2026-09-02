@@ -12,13 +12,27 @@
 This file never touches Postgres and never opens a socket.
 """
 
+import datetime as dt
 import re
 from decimal import Decimal
+from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from app.integrations.health_auto_export.errors import HAEError, UnknownUnitError
+from app.integrations.health_auto_export.errors import (
+    HAEDateFormatError,
+    HAEError,
+    UnknownUnitError,
+)
 from app.integrations.health_auto_export.registry import METRIC_REGISTRY, to_canonical
+from app.integrations.health_auto_export.schemas import (
+    HAEDataPoint,
+    HAEMetric,
+    HAEPayload,
+    parse_hae_datetime,
+)
+from tests.conftest import hae_fixture
 
 # ---------------------------------------------------------------------------
 # The registry: names
@@ -230,3 +244,278 @@ def test_unit_conversion_error_truncates_an_attacker_controlled_unit() -> None:
 
     assert len(error.unit) == 32
     assert len(str(error)) < 200
+
+
+# ---------------------------------------------------------------------------
+# The wire models
+# ---------------------------------------------------------------------------
+
+JAKARTA = dt.timezone(dt.timedelta(hours=7))
+TOKYO = dt.timezone(dt.timedelta(hours=9))
+
+# Distinctive on purpose, and planted in the field that actually FAILS validation: pydantic
+# only renders the offending field's input, so putting this in a valid neighbouring field
+# would make the assertion pass for the wrong reason.
+LEAKY_QTY = "919293-must-not-be-echoed"
+
+# Written as an ESCAPE, never as a literal, for the reason the parser's own constant is:
+# a bare U+202F is invisible in every diff and every review.
+NARROW_NO_BREAK_SPACE = "\u202f"
+
+
+def test_the_real_captured_payload_yields_all_twelve_metrics() -> None:
+    """The whole point of the fixture: HAE's real envelope round-trips into typed Python."""
+    payload = HAEPayload.model_validate(hae_fixture("activity_and_nutrition"))
+
+    names = [metric.name for metric in payload.data.metrics]
+
+    assert len(names) == 12
+    assert set(names) == set(EXPECTED_METRICS)
+    for metric in payload.data.metrics:
+        assert metric.units, f"{metric.name!r} lost its metric-level units field"
+        assert metric.data, f"{metric.name!r} lost its datapoints"
+
+
+def test_units_are_read_from_the_metric_level_not_the_datapoint() -> None:
+    """The vendor's own TypeScript declares `units` per datapoint; no real payload has it there.
+
+    The vendor's `mapMetric` reads `metric.units`. Reading a datapoint-level field would find
+    nothing in every real payload and silently make every unit unknown.
+    """
+    payload = HAEPayload.model_validate(hae_fixture("activity_and_nutrition"))
+    by_name = {metric.name: metric for metric in payload.data.metrics}
+
+    assert by_name["sodium"].units == "mg"
+    assert by_name["dietary_energy"].units == "kcal"
+    assert by_name["flights_climbed"].units == "count"
+    assert not hasattr(by_name["sodium"].data[0], "units")
+
+
+def test_a_datapoint_with_no_source_key_validates() -> None:
+    """`source` is ABSENT ENTIRELY for gait metrics in every real captured payload.
+
+    The vendor's interface declares it required. A model that agreed would raise here, and
+    because pydantic validates atomically that would cost the whole window -- including the
+    `step_count` metric sitting beside it, which is perfectly good data.
+    """
+    payload = HAEPayload.model_validate(hae_fixture("unrecognized_and_sourceless"))
+    by_name = {metric.name: metric for metric in payload.data.metrics}
+
+    walking_speed = by_name["walking_speed"]
+
+    assert walking_speed.data, "the sourceless metric lost its datapoints"
+    for point in walking_speed.data:
+        assert point.source is None
+    assert by_name["step_count"].data[0].source == "iPhone"
+
+
+def test_a_metric_with_no_units_key_validates_as_empty_string() -> None:
+    """A units-less metric must not fail the whole payload.
+
+    `to_canonical` rejects `""` per datapoint, loudly and one row at a time, which is the
+    correct blast radius for this failure.
+    """
+    metric = HAEMetric.model_validate(
+        {"name": "protein", "data": [{"qty": 155.7, "date": "2025-08-15 00:00:00 +0900"}]}
+    )
+
+    assert metric.units == ""
+
+    with pytest.raises(UnknownUnitError):
+        to_canonical(Decimal("155.7"), metric.units, METRIC_REGISTRY["protein"], metric="protein")
+
+
+def test_a_heart_rate_shaped_metric_without_qty_does_not_fail_the_payload() -> None:
+    """The sharpest case D-04 exists for.
+
+    A user toggling heart rate on in the phone app produces datapoints carrying Min/Max/Avg and
+    NO `qty` at all. Health Auto Export has no documented retry, so a rejected batch is
+    permanent data loss -- one required field here would destroy a whole day of steps AND
+    nutrition because of a metric BRETT does not even want.
+    """
+    payload = HAEPayload.model_validate(
+        {
+            "data": {
+                "metrics": [
+                    {
+                        "name": "heart_rate",
+                        "units": "count/min",
+                        "data": [
+                            {
+                                "date": "2025-08-15 08:00:00 +0900",
+                                "source": "iPhone",
+                                "Min": 48,
+                                "Max": 131,
+                                "Avg": 62.5,
+                            }
+                        ],
+                    },
+                    {
+                        "name": "step_count",
+                        "units": "count",
+                        "data": [{"qty": 4821.0, "date": "2025-08-15 08:00:00 +0900"}],
+                    },
+                ]
+            }
+        }
+    )
+
+    heart_rate, step_count = payload.data.metrics
+
+    assert heart_rate.data[0].qty is None
+    assert step_count.data[0].qty == Decimal("4821.0")
+
+
+def test_the_workouts_sibling_is_structurally_ignored() -> None:
+    """D-02, implemented by `extra="ignore"` rather than by a filter someone must remember.
+
+    218 of 221 Apple Health workouts in the user's real export are Hevy re-exports. The array
+    sits right beside `metrics` inside `data`; not modelling it is what makes it unreachable.
+    """
+    raw = hae_fixture("unrecognized_and_sourceless")
+    assert "workouts" in raw["data"], "the fixture no longer exercises D-02"
+
+    payload = HAEPayload.model_validate(raw)
+
+    assert not hasattr(payload.data, "workouts")
+    assert "workouts" not in payload.data.model_dump()
+
+
+def test_qty_round_trips_exactly() -> None:
+    """Finding C: HAE prorates `count` metrics, so a fraction with a long mantissa is REAL.
+
+    `json.loads` hands pydantic a Python float and pydantic converts float->Decimal via the
+    value's STRING form. If it went through the binary representation instead,
+    `0.20163697817574894` would gain a 50-digit tail and every summed day would carry it.
+    """
+    payload = HAEPayload.model_validate(hae_fixture("activity_and_nutrition"))
+    by_name = {metric.name: metric for metric in payload.data.metrics}
+
+    assert by_name["flights_climbed"].data[0].qty == Decimal("0.20163697817574894")
+    assert by_name["sodium"].data[0].qty == Decimal("3177.165354330709")
+
+
+def test_the_date_stays_a_raw_wire_string() -> None:
+    """Parsing inside the model would make one malformed timestamp a whole-payload failure."""
+    payload = HAEPayload.model_validate(hae_fixture("activity_and_nutrition"))
+
+    first = payload.data.metrics[0].data[0]
+
+    assert first.date == "2025-08-15 08:00:00 +0900"
+    assert isinstance(first.date, str)
+
+
+# --- parse_hae_datetime ------------------------------------------------------
+
+
+def test_parse_hae_datetime_handles_the_24_hour_wire_format() -> None:
+    """The format all five real captured payloads use. Not ISO 8601."""
+    parsed = parse_hae_datetime("2025-08-15 00:00:00 +0900")
+
+    assert parsed == dt.datetime(2025, 8, 15, 0, 0, 0, tzinfo=TOKYO)
+    assert parsed.utcoffset() == dt.timedelta(hours=9)
+
+
+def test_parse_hae_datetime_handles_the_12_hour_locale_variant() -> None:
+    """A 12-hour-locale phone sends AM/PM. Same data, different device settings."""
+    parsed = parse_hae_datetime("2025-08-15 08:02:00 AM +0900")
+
+    assert parsed == dt.datetime(2025, 8, 15, 8, 2, 0, tzinfo=TOKYO)
+
+
+def test_parse_hae_datetime_handles_the_narrow_no_break_space_before_am() -> None:
+    """Newer iOS inserts U+202F NARROW NO-BREAK SPACE before AM/PM, not a plain space.
+
+    Built from an ESCAPE for the same reason the parser writes it as one: a bare U+202F is
+    invisible in every diff and every review, and one editor normalising it to a plain space
+    would silently turn this into a duplicate of the test above -- still green, testing nothing.
+    The two guard assertions below fail loudly if that ever happens.
+    """
+    wire = f"2025-08-15 08:02:00{NARROW_NO_BREAK_SPACE}AM +0900"
+    assert NARROW_NO_BREAK_SPACE in wire, "the narrow no-break space was normalised away"
+    assert wire != "2025-08-15 08:02:00 AM +0900", "this is now a duplicate of the test above"
+
+    parsed = parse_hae_datetime(wire)
+
+    assert parsed == dt.datetime(2025, 8, 15, 8, 2, 0, tzinfo=TOKYO)
+
+
+def test_parse_hae_datetime_handles_the_iso_variant() -> None:
+    """A third-party receiver reports seeing a true ISO form; accepting it costs nothing."""
+    parsed = parse_hae_datetime("2024-01-01T12:00:00+00:00")
+
+    assert parsed == dt.datetime(2024, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+
+
+def test_parse_hae_datetime_handles_the_users_own_records_csv_format() -> None:
+    """The SAME parser serves Phase 9. Two parsers produce two shapes and a silent disagreement."""
+    parsed = parse_hae_datetime("2026-08-21 12:35:53 +0700")
+
+    assert parsed == dt.datetime(2026, 8, 21, 12, 35, 53, tzinfo=JAKARTA)
+
+
+def test_parse_hae_datetime_rejects_an_unknown_format_without_echoing_it() -> None:
+    """FOUND-04. A naive or unparsed timestamp silently mis-buckets a whole local day."""
+    with pytest.raises(HAEDateFormatError) as excinfo:
+        parse_hae_datetime("15/08/2025")
+
+    assert "15/08/2025" not in str(excinfo.value)
+    assert isinstance(excinfo.value, HAEError)
+
+
+def test_parse_hae_datetime_rejects_a_naive_timestamp() -> None:
+    """`core.time._require_aware` exists for exactly this reason.
+
+    An ISO string with no offset parses fine and is WRONG: it would be bucketed against the
+    server's idea of a day rather than the user's.
+    """
+    with pytest.raises(HAEDateFormatError):
+        parse_hae_datetime("2024-01-01T12:00:00")
+
+
+# --- failing in the right direction ------------------------------------------
+
+
+def test_a_payload_missing_data_is_a_validation_error() -> None:
+    """The one field that IS required. Its absence is a broken envelope, not an odd datapoint."""
+    with pytest.raises(ValidationError):
+        HAEPayload.model_validate({"metrics": []})
+
+
+def test_metrics_that_is_not_a_list_is_a_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        HAEPayload.model_validate({"data": {"metrics": "not-a-list"}})
+
+
+def test_validation_error_does_not_echo_the_payload() -> None:
+    """T-08-21: `ValidationError.__str__` renders `input_value=...` unless told not to.
+
+    That is this person's calorie counts and macro grams, in a string that reaches a log line
+    and `sync_state.last_error`.
+    """
+    bad: dict[str, Any] = {
+        "data": {
+            "metrics": [
+                {"name": "dietary_energy", "units": "kcal", "data": LEAKY_QTY},
+            ]
+        }
+    }
+
+    with pytest.raises(ValidationError) as excinfo:
+        HAEPayload.model_validate(bad)
+
+    rendered = str(excinfo.value)
+    assert "input_value" not in rendered
+    assert LEAKY_QTY not in rendered, (
+        f"the ValidationError echoed the offending input. `hide_input_in_errors=True` is what "
+        f"keeps health data out of this message. Got: {rendered!r}"
+    )
+
+
+def test_a_datapoint_accepts_every_field_being_absent() -> None:
+    """Every field optional is a DELIBERATE deviation, so it is asserted rather than inferred."""
+    point = HAEDataPoint.model_validate({})
+
+    assert point.qty is None
+    assert point.date is None
+    assert point.source is None
