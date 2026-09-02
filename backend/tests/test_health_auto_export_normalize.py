@@ -37,6 +37,7 @@ from app.integrations.health_auto_export.normalize import (
     is_hevy_sourced,
     normalize_payload,
 )
+from app.integrations.health_auto_export.registry import METRIC_REGISTRY, MetricSpec
 from app.integrations.health_auto_export.schemas import HAEPayload
 from app.logging import configure_logging
 
@@ -447,3 +448,326 @@ def test_row_units_are_canonical_never_the_wire_unit() -> None:
     assert result.rows[0].value == Decimal("100")
     assert result.rows[0].local_day == DAY
     assert result.rows[0].kind == "activity"
+
+
+# ---------------------------------------------------------------------------
+# Aggregation: one delivery -> one row per (metric, source_name, local_day)
+# ---------------------------------------------------------------------------
+
+
+def _minute_series(count: int, *, start_hour: int = 8) -> list[str]:
+    """`count` HAE timestamps one minute apart, all inside one local day in every zone used
+    here. Generated rather than transcribed: the point of the 189-point case is the COUNT."""
+    base = dt.datetime(2025, 8, 15, start_hour, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
+    return [
+        (base + dt.timedelta(minutes=offset)).strftime("%Y-%m-%d %H:%M:%S %z")
+        for offset in range(count)
+    ]
+
+
+def test_many_datapoints_for_one_metric_day_collapse_into_exactly_one_row() -> None:
+    """Finding B: a real payload carries 189 datapoints of `walking_running_distance` for a
+    single day (1-minute buckets) and the table holds ONE row.
+
+    Aggregating the whole payload before any write is what lets plan 08-06 use replace
+    semantics unconditionally -- the first half of Pitfall N-2.
+    """
+    quantities = [Decimal("0.001") * step for step in range(1, 190)]
+    points = [
+        _point(qty=str(qty), date=stamp)
+        for qty, stamp in zip(quantities, _minute_series(189), strict=True)
+    ]
+
+    result = normalize_payload(
+        _payload(_metric("walking_running_distance", units="km", points=points)), tz=TZ
+    )
+
+    assert len(result.rows) == 1, (
+        f"HEALTH-06 violated: 189 datapoints for one metric-day produced {len(result.rows)} "
+        f"rows. The table holds one row per (metric, source_name, local_day); anything else "
+        f"either violates the unique constraint or silently overwrites itself"
+    )
+    row = result.rows[0]
+    assert row.sample_count == 189, (
+        f"sample_count must be truthful -- it is the only signal that a day was built from 189 "
+        f"fragments rather than from one daily total. Got {row.sample_count}"
+    )
+    assert row.value == sum(quantities, Decimal(0))
+    assert result.datapoints_seen == 189
+    assert result.datapoints_dropped == 0
+
+
+def test_fractional_count_fragments_survive_aggregation_without_truncation() -> None:
+    """Finding C. HAE PRORATES `count` metrics across aggregation buckets, so a real
+    `flights_climbed` datapoint arrives as 0.20163697817574894 and 59 of them are one day.
+
+    An integer column or a truncating cast anywhere in this path reads that day as zero flights
+    with no error and no failing test -- which is why every value below is under 1.
+    """
+    fragment = Decimal("0.20163697817574894")
+    points = [_point(qty=str(fragment), date=stamp) for stamp in _minute_series(59)]
+
+    result = normalize_payload(
+        _payload(_metric("flights_climbed", units="count", points=points)), tz=TZ
+    )
+
+    row = result.rows[0]
+    assert row.value == fragment * 59, (
+        f"HEALTH-06 violated: 59 prorated fragments did not sum to their exact total. Expected "
+        f"{fragment * 59}, got {row.value} -- a truncating cast reads this day as 0 flights"
+    )
+    assert row.value > 1, "a truncated day would land at 0; this one must not"
+    assert row.sample_count == 59
+    assert isinstance(row.value, Decimal)
+
+
+def test_two_nutrition_sources_on_one_day_produce_two_rows() -> None:
+    """Finding D, measured in the user's own export: on 2026-08-23 BOTH `Foodvisor` (1040 + 504
+    + 670) and `Built With Science` (105 + 295.62) wrote `DietaryEnergyConsumed`.
+
+    Blindly blending them yields 2,614.62 kcal, which is right only if the two apps logged
+    disjoint food. `source_name` is in the natural key so the ingest can express the ambiguity
+    instead of hiding it -- and so a later phase can decide with the evidence still present.
+    """
+    day = "2026-08-23"
+    points = [
+        _point(qty=1040, date=f"{day} 12:35:00 +0700", source="Foodvisor"),
+        _point(qty=504, date=f"{day} 15:54:00 +0700", source="Foodvisor"),
+        _point(qty=670, date=f"{day} 18:23:00 +0700", source="Foodvisor"),
+        _point(qty=105, date=f"{day} 13:02:00 +0700", source="Built With Science"),
+        _point(qty="295.62", date=f"{day} 19:40:00 +0700", source="Built With Science"),
+    ]
+
+    result = normalize_payload(
+        _payload(_metric("dietary_energy", units="kcal", points=points)), tz=TZ
+    )
+
+    assert len(result.rows) == 2, (
+        f"NUTR-02 violated: two sources on one day collapsed into {len(result.rows)} row(s). "
+        f"Provenance is part of identity here; blending it is unrecoverable"
+    )
+    assert [row.source_name for row in result.rows] == ["Built With Science", "Foodvisor"]
+    assert [row.value for row in result.rows] == [Decimal("400.62"), Decimal("2214")]
+    assert [row.sample_count for row in result.rows] == [2, 3]
+
+
+def test_nutrition_sodium_converts_from_grams_to_milligrams() -> None:
+    """NUTR-02. `sodium` accepts both `g` and `mg` on the wire and is stored in `mg`, so the
+    aggregation must run on CONVERTED values -- summing wire units and converting afterwards
+    would be right only while a day never mixes them."""
+    result = normalize_payload(
+        _payload(
+            _metric(
+                "sodium",
+                units="g",
+                points=[_point(qty="1.5"), _point(qty="0.75", date=EVENING)],
+            )
+        ),
+        tz=TZ,
+    )
+
+    assert result.rows[0].units == "mg"
+    assert result.rows[0].value == Decimal("2250")
+    assert result.rows[0].kind == "nutrition"
+
+
+def test_an_avg_metric_produces_the_mean_rather_than_the_sum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No `avg` metric is in the Phase 8 registry. The branch exists so Phase 13 does not have
+    to reopen this code to add `walking_speed`, and this test is what keeps it honest -- an
+    unexercised branch is one that silently sums a rate."""
+    fake = {
+        **METRIC_REGISTRY,
+        "walking_speed": MetricSpec("km/hr", frozenset({"km/hr"}), "avg", "activity"),
+    }
+    monkeypatch.setattr(normalize, "METRIC_REGISTRY", fake)
+
+    result = normalize_payload(
+        _payload(
+            _metric(
+                "walking_speed",
+                units="km/hr",
+                points=[_point(qty="4.0"), _point(qty="5.0", date=EVENING)],
+            )
+        ),
+        tz=TZ,
+    )
+
+    assert result.rows[0].value == Decimal("4.5"), (
+        f"an aggregation='avg' metric was summed instead of averaged: got "
+        f"{result.rows[0].value}. A summed rate grows with sampling frequency, which reads as "
+        f"the user walking faster every time HAE's interval shrinks"
+    )
+    assert result.rows[0].sample_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Open Question 2: kinds_present drives which D-03 sync_state resource advances
+# ---------------------------------------------------------------------------
+
+
+def test_kinds_present_is_activity_only_for_an_activity_payload() -> None:
+    result = normalize_payload(
+        _payload(_metric("step_count", units="count", points=[_point(qty=2044)])), tz=TZ
+    )
+
+    assert result.kinds_present == frozenset({"activity"})
+
+
+def test_kinds_present_is_nutrition_only_for_a_nutrition_payload() -> None:
+    result = normalize_payload(
+        _payload(_metric("protein", units="g", points=[_point(qty="155.7")])), tz=TZ
+    )
+
+    assert result.kinds_present == frozenset({"nutrition"})
+
+
+def test_kinds_present_covers_activity_and_nutrition_for_a_mixed_payload() -> None:
+    result = normalize_payload(
+        _payload(
+            _metric("step_count", units="count", points=[_point(qty=2044)]),
+            _metric("protein", units="g", points=[_point(qty="155.7")]),
+        ),
+        tz=TZ,
+    )
+
+    assert result.kinds_present == frozenset({"activity", "nutrition"})
+
+
+def test_kinds_present_is_empty_when_every_datapoint_was_dropped() -> None:
+    """Open Question 2. A payload that PARSED but yielded nothing must not advance either
+    `sync_state` resource: reporting nutrition "fresh" while the logging app has stopped
+    writing to HealthKit is precisely the blind spot D-03 exists to remove."""
+    result = normalize_payload(
+        _payload(
+            _metric("protein", units="furlongs", points=[_point(qty="155.7")]),
+            _metric("step_count", units="count", points=[_point(qty=None)]),
+        ),
+        tz=TZ,
+    )
+
+    assert result.rows == ()
+    assert result.kinds_present == frozenset(), (
+        f"Open Question 2 violated: a payload whose every datapoint was dropped reported "
+        f"kinds {sorted(result.kinds_present)} as present, which would advance a sync_state "
+        f"cursor over data that was never stored"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Determinism, ordering, and the multi-point-day guard
+# ---------------------------------------------------------------------------
+
+
+def test_rows_are_sorted_by_metric_then_source_name_then_local_day() -> None:
+    """The order is part of the CONTRACT: plan 08-06 writes rows in it, and a nondeterministic
+    order would make two runs over one payload produce different SAVEPOINT sequences -- a
+    difference that only ever surfaces under a partial failure."""
+    result = normalize_payload(
+        _payload(
+            _metric(
+                "step_count",
+                units="count",
+                points=[
+                    _point(qty=1, source="iPhone", date=EVENING),
+                    _point(qty=2, source="Apple Watch", date=MORNING),
+                    _point(qty=3, source="iPhone", date="2025-08-14 08:00:00 +0900"),
+                ],
+            ),
+            _metric("protein", units="g", points=[_point(qty=10)]),
+        ),
+        tz=TZ,
+    )
+
+    assert [(row.metric, row.source_name, row.local_day) for row in result.rows] == [
+        ("protein", "iPhone", DAY),
+        ("step_count", "Apple Watch", DAY),
+        ("step_count", "iPhone", dt.date(2025, 8, 14)),
+        ("step_count", "iPhone", DAY),
+    ]
+
+
+def test_multi_point_day_warns_once_per_key_and_never_with_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pitfall N-2's silent failure made observable.
+
+    More than one datapoint for a key means HAE's aggregation interval is not daily, so a batch
+    boundary CAN fall inside a day and replace-semantics has become lossy. Under a correct
+    device configuration this warning never fires.
+    """
+    payload = _payload(
+        _metric(
+            "step_count",
+            units="count",
+            points=[_point(qty=1000), _point(qty=2044, date=EVENING)],
+        ),
+        _metric("protein", units="g", points=[_point(qty="155.7")]),
+    )
+
+    result, entries = run_capturing_logs(monkeypatch, lambda: normalize_payload(payload, tz=TZ))
+
+    warnings = _events(entries, "health_ingest_multi_point_day")
+    assert len(warnings) == 1, (
+        f"Pitfall N-2: expected exactly one multi-point warning -- one for the two-point "
+        f"step_count key and none for the single-point protein key. Got {len(warnings)}"
+    )
+    assert warnings[0]["metric"] == "step_count"
+    assert warnings[0]["source_name"] == "iPhone"
+    assert warnings[0]["local_day"] == DAY.isoformat()
+    assert warnings[0]["points"] == 2
+    for forbidden in ("1000", "2044", "3044", "155.7"):
+        assert forbidden not in json.dumps(warnings), (
+            f"T-08-30 violated: the quantity {forbidden} reached the multi-point warning. This "
+            f"line reports the SHAPE of a device misconfiguration, never the measurement"
+        )
+    assert result.rows[0].sample_count == 1  # protein sorts first
+
+
+def test_normalize_payload_is_deterministic() -> None:
+    """Pure and order-independent: two runs over one payload must be indistinguishable, or the
+    idempotency plan 08-06 builds on top is only accidental."""
+    payload = _payload(
+        _metric(
+            "step_count",
+            units="count",
+            points=[_point(qty=1000), _point(qty=2044, date=EVENING)],
+        ),
+        _metric("dietary_energy", units="kcal", points=[_point(qty=1857, source="Foodvisor")]),
+        _metric("sleep_analysis", units="hr", points=[_point(qty="6.75")]),
+    )
+
+    assert normalize_payload(payload, tz=TZ) == normalize_payload(payload, tz=TZ)
+
+
+def test_every_datapoint_is_either_inside_a_row_or_explained_by_a_drop() -> None:
+    """The accounting identity `NormalizeResult` documents. Without it a datapoint could vanish
+    between the registry gate and the bucket with nothing to show for it."""
+    payload = _payload(
+        _metric(
+            "active_energy",
+            units="kcal",
+            points=[
+                _point(qty="666.5", source="Hevy"),
+                _point(qty="31.4", source=DEVICE_NAME),
+                _point(qty=None),
+                _point(qty="42.8", date="not a date"),
+            ],
+        ),
+        _metric("sleep_analysis", units="hr", points=[_point(qty="6.75"), _point(qty="1.0")]),
+        _metric("protein", units="g", points=[_point(qty="155.7")]),
+    )
+
+    result = normalize_payload(payload, tz=TZ)
+
+    assert sum(row.sample_count for row in result.rows) == (
+        result.datapoints_seen - result.datapoints_dropped
+    ), (
+        f"accounting identity broken: rows account for "
+        f"{sum(row.sample_count for row in result.rows)} datapoints but "
+        f"{result.datapoints_seen - result.datapoints_dropped} were accepted"
+    )
+    assert result.datapoints_seen == 7
+    assert result.datapoints_dropped == 5
+    assert result.metrics_unrecognized == 1
