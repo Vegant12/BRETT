@@ -638,9 +638,7 @@ def _mcp_purge_statements() -> list[Executable]:
     exercise_ids = select(WorkoutExercise.id).where(WorkoutExercise.workout_id.in_(workout_ids))
 
     by_table: dict[str, Executable] = {
-        "workout_sets": delete(WorkoutSet).where(
-            WorkoutSet.workout_exercise_id.in_(exercise_ids)
-        ),
+        "workout_sets": delete(WorkoutSet).where(WorkoutSet.workout_exercise_id.in_(exercise_ids)),
         "workout_exercises": delete(WorkoutExercise).where(
             WorkoutExercise.workout_id.in_(workout_ids)
         ),
@@ -648,9 +646,7 @@ def _mcp_purge_statements() -> list[Executable]:
         "exercise_muscle_overrides": delete(ExerciseMuscleOverride).where(
             ExerciseMuscleOverride.user_id == DEFAULT_USER_ID
         ),
-        "exercise_muscles": delete(ExerciseMuscle).where(
-            ExerciseMuscle.user_id == DEFAULT_USER_ID
-        ),
+        "exercise_muscles": delete(ExerciseMuscle).where(ExerciseMuscle.user_id == DEFAULT_USER_ID),
         "exercise_templates": delete(ExerciseTemplate).where(
             ExerciseTemplate.user_id == DEFAULT_USER_ID
         ),
