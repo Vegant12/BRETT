@@ -95,6 +95,49 @@ def test_body_measurement_unique_key_is_user_source_and_date() -> None:
     ]
 
 
+def test_health_daily_metric_key_includes_source_name() -> None:
+    """HEALTH-08: Hevy's active_energy must stay a separately-excludable row (Pitfall N-1).
+
+    Hevy writes `ActiveEnergyBurned` to Apple Health on 209 training days and is 70-88% of that
+    day's total. Drop `source_name` from the key and the iPhone's records and Hevy's are summed
+    into one row, after which Hevy's contribution cannot be filtered out at read time at all.
+    """
+    table = Base.metadata.tables["health_daily_metrics"]
+    constraint = next(
+        c
+        for c in table.constraints
+        if getattr(c, "name", None) == "uq_health_daily_metrics_user_source_metric_source_name_day"
+    )
+    columns = [column.name for column in constraint.columns]
+    assert columns == ["user_id", "source", "metric", "source_name", "local_day"], (
+        "HEALTH-08: the natural key must carry source_name, or Hevy's 70-88% share of a "
+        f"training day's active_energy is blended into the iPhone's row. Observed: {columns}"
+    )
+    assert table.c.source_name.nullable is False, (
+        "HEALTH-08: source_name must be NOT NULL with an 'unknown' sentinel. PostgreSQL treats "
+        "NULLs as DISTINCT inside a UNIQUE constraint, so a nullable key column lets every "
+        "sourceless datapoint (real HAE payloads omit `source` for gait metrics) insert an "
+        "unbounded duplicate row instead of upserting. Observed nullable: "
+        f"{table.c.source_name.nullable}"
+    )
+
+
+def test_health_daily_metric_value_is_fractional_safe() -> None:
+    """Finding C: `count` metrics arrive fractional, so an integer column reads a day as 0.
+
+    HAE prorates samples across aggregation buckets -- a real `flights_climbed` datapoint is
+    `0.20163697817574894`. 59 such fragments make up one real day, and every one of them
+    truncates to 0 under an INTEGER column with no error raised anywhere.
+    """
+    column = Base.metadata.tables["health_daily_metrics"].c.value
+    assert type(column.type).__name__ == "Numeric", (
+        "Finding C: `value` must be NUMERIC. A plausible-looking number that is quietly wrong "
+        f"is this project's primary risk. Observed: {type(column.type).__name__}"
+    )
+    assert (column.type.precision, column.type.scale) == (14, 4)
+    assert column.nullable is False
+
+
 def test_sync_state_unique_constraint_enables_upsert() -> None:
     """HEVY-09: one cursor row per (user, provider, resource), enforced by the DB.
 
@@ -159,6 +202,7 @@ def test_reference_models_declare_no_relationships() -> None:
         ExerciseMuscle,
         ExerciseMuscleOverride,
         ExerciseTemplate,
+        HealthDailyMetric,
         SyncState,
     )
 
@@ -167,6 +211,7 @@ def test_reference_models_declare_no_relationships() -> None:
         ExerciseMuscle,
         ExerciseMuscleOverride,
         ExerciseTemplate,
+        HealthDailyMetric,
         SyncState,
     ):
         assert list(model.__mapper__.relationships) == [], model.__name__
@@ -179,6 +224,9 @@ def test_reference_tables_are_scoped_to_a_user() -> None:
         "exercise_muscles",
         "exercise_muscle_overrides",
         "body_measurements",
+        # T-08-04: the HAE payload never supplies a tenant -- the ingest resolves `user_id`
+        # server-side. This model must offer no path for a payload-supplied one.
+        "health_daily_metrics",
         "sync_state",
     ):
         table = Base.metadata.tables[table_name]

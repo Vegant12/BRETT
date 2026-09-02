@@ -48,6 +48,7 @@ from testcontainers.community.postgres import PostgresContainer
 from app.core.time import utc_now
 from app.db.models.body import BodyMeasurement
 from app.db.models.exercise import ExerciseMuscle, ExerciseMuscleOverride, ExerciseTemplate
+from app.db.models.health import HealthDailyMetric
 from app.db.models.sync_state import SyncState
 from app.db.models.user import User
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
@@ -132,6 +133,31 @@ def hevy_fixture(name: str) -> dict[str, Any]:
     """
     payload: dict[str, Any] = json.loads(
         (HEVY_FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8")
+    )
+    return payload
+
+
+HAE_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "hae"
+
+
+def hae_fixture(name: str) -> dict[str, Any]:
+    """Load a canned Health Auto Export webhook payload.
+
+    Provenance matters here and is recorded on purpose. These files are transcribed from FIVE
+    REAL captured device payloads (`bunya-gap/health-management-free`, parsed during Phase 8
+    research) plus the user's own `records.csv`. They are NOT derived from
+    `jare0014/obsidian-health-connect`'s sample, which is hand-written and WRONG -- it uses
+    `dietary_protein`, a name HAE never sends and which D-04 would silently drop with no test
+    failure.
+
+    `encoding="utf-8"` is load-bearing, not decoration: the real source names include
+    `カロミル` and `Vegant’s iPhone`, the latter carrying U+2019 RIGHT SINGLE QUOTATION MARK
+    rather than an ASCII apostrophe (Pitfall N-3). Reading under a locale default would either
+    mangle them or raise, and a mangled source name is exactly the failure that makes the
+    HEALTH-08 exclusion predicate stop matching.
+    """
+    payload: dict[str, Any] = json.loads(
+        (HAE_FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8")
     )
     return payload
 
@@ -588,6 +614,9 @@ _MCP_PURGE_TABLES: tuple[str, ...] = (
     "exercise_muscles",
     "exercise_templates",
     "body_measurements",
+    # A child of `users` only, like `body_measurements` -- nothing references it, so it sits
+    # beside its sibling rather than earlier in the chain.
+    "health_daily_metrics",
     "sync_state",
 )
 
@@ -627,6 +656,9 @@ def _mcp_purge_statements() -> list[Executable]:
         ),
         "body_measurements": delete(BodyMeasurement).where(
             BodyMeasurement.user_id == DEFAULT_USER_ID
+        ),
+        "health_daily_metrics": delete(HealthDailyMetric).where(
+            HealthDailyMetric.user_id == DEFAULT_USER_ID
         ),
         "sync_state": delete(SyncState).where(SyncState.user_id == DEFAULT_USER_ID),
     }

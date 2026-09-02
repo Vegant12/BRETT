@@ -1,0 +1,36 @@
+{
+  "data": {
+    "metrics": [
+      {
+        "name": "step_count",
+        "units": "count",
+        "data": [
+          {"qty": 2044.0, "date": "2025-08-15 09:30:00 +0900", "source": "iPhone"}
+        ]
+      },
+      {
+        "name": "walking_speed",
+        "units": "km/hr",
+        "data": [
+          {"qty": 4.68, "date": "2025-08-15 07:30:00 +0900"},
+          {"date": "2025-08-15 07:31:00 +0900", "qty": 4.51}
+        ]
+      },
+      {
+        "name": "sleep_analysis",
+        "units": "hr",
+        "data": [
+          {"qty": 6.75, "date": "2025-08-15 00:00:00 +0900", "source": "iPhone"}
+        ]
+      },
+      {
+        "name": "weight_body_mass",
+        "units": "kg",
+        "data": [
+          {"qty": 74.35, "date": "2025-08-15 06:12:00 +0900", "source": "Hevy"}
+        ]
+      }
+    ],
+    "workouts": []
+  }
+}

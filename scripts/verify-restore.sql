@@ -71,6 +71,10 @@ UNION ALL
          md5(string_agg(md5(x::text), ',' ORDER BY x.id))
     FROM body_measurements x
 UNION ALL
+  SELECT 'health_daily_metrics', count(*),
+         md5(string_agg(md5(x::text), ',' ORDER BY x.id))
+    FROM health_daily_metrics x
+UNION ALL
   SELECT 'sync_state', count(*),
          md5(string_agg(md5(x::text), ',' ORDER BY x.id))
     FROM sync_state x

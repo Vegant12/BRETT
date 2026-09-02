@@ -1,0 +1,16 @@
+{
+  "data": {
+    "metrics": [
+      {
+        "name": "active_energy",
+        "units": "kcal",
+        "data": [
+          {"qty": 666.5, "source": "Hevy", "date": "2026-01-02 18:30:00 +0700"},
+          {"date": "2026-01-02 07:14:00 +0700", "source": "Vegant’s iPhone", "qty": 31.4},
+          {"source": "Vegant’s iPhone", "qty": 42.8, "date": "2026-01-02 12:05:00 +0700"},
+          {"qty": 20.0, "date": "2026-01-02 20:41:00 +0700", "source": "Vegant’s iPhone"}
+        ]
+      }
+    ]
+  }
+}
