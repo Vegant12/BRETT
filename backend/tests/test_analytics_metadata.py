@@ -27,9 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics import schemas
 from app.analytics.metadata import (
+    FRESHNESS_RESOURCES_ACTIVITY,
     FRESHNESS_RESOURCES_ALL,
+    FRESHNESS_RESOURCES_APPLE_HEALTH,
     FRESHNESS_RESOURCES_BODY,
     FRESHNESS_RESOURCES_MUSCLE,
+    FRESHNESS_RESOURCES_WORKOUTS,
     INSUFFICIENT_DATA_SESSION_THRESHOLD,
     MEASURED_DAY_FLOORS,
     build_coverage,
@@ -42,10 +45,15 @@ from app.analytics.metadata import (
 from app.analytics.schemas import FreshnessMetadata, RecompositionStatus, _AnalyticsModel
 from app.core.time import local_range_bounds
 from app.db.repositories.sync_state import (
+    APPLE_HEALTH_RESOURCES,
+    PROVIDER_APPLE_HEALTH,
     PROVIDER_HEVY,
+    RESOURCE_ACTIVITY,
     RESOURCE_BODY_MEASUREMENTS,
     RESOURCE_EXERCISE_TEMPLATES,
+    RESOURCE_NUTRITION,
     RESOURCE_WORKOUTS,
+    SYNC_RESOURCES,
     complete_sync,
     get_sync_state,
     record_sync_error,
@@ -66,6 +74,11 @@ from tests.conftest import (
 # database between the workouts sync and the exercise_templates sync.
 _SYNCED_WORKOUTS_AT = dt.datetime(2026, 8, 30, 5, 43, 18, tzinfo=dt.UTC)
 _SYNCED_TEMPLATES_AT = dt.datetime(2026, 8, 30, 6, 8, 4, tzinfo=dt.UTC)
+
+# Apple Health's activity sync (D-03). Distinct from BOTH Hevy timestamps above, so a builder
+# that ignored the pair's provider and read a Hevy row instead would produce a visibly wrong
+# value rather than a coincidentally equal one.
+_SYNCED_ACTIVITY_AT = dt.datetime(2026, 8, 30, 7, 31, 52, tzinfo=dt.UTC)
 
 # Distinctive on purpose, so a leak is unambiguous rather than a coincidence.
 _LEAK_SENTINEL = "zz-analytics-leak-canary-9f3a"
@@ -200,6 +213,131 @@ async def test_freshness_never_leaks_last_error(
         f"MCP-06 violated: {_LEAK_SENTINEL!r} reached an analytics return model. "
         f"sync_state's stored error text is bounded by format_sync_error precisely so it "
         f"does not travel"
+    )
+
+
+# HEALTH-11 / NUTR-05 / D-03: Apple Health's two resources, and the per-provider lookup that
+# makes them answerable at all (RESEARCH Pitfall 7).
+
+
+@pytest.mark.integration
+async def test_apple_health_activity_and_nutrition_are_independent(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-03 / NUTR-05: nutrition that never synced must report None, not activity's timestamp.
+
+    Only the `activity` row is seeded. That is the shape of the real partial failure D-03 was
+    written to expose: both kinds arrive in ONE Health Auto Export POST, but the phone's
+    nutrition-logging app can stop writing to HealthKit while step counts keep flowing.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await complete_sync(
+        session,
+        user_id=ANALYTICS_SECOND_USER_ID,
+        provider=PROVIDER_APPLE_HEALTH,
+        resource=RESOURCE_ACTIVITY,
+        last_synced_at=_SYNCED_ACTIVITY_AT,
+    )
+    await session.flush()
+
+    freshness = await build_freshness(
+        session, user_id=ANALYTICS_SECOND_USER_ID, resources=FRESHNESS_RESOURCES_APPLE_HEALTH
+    )
+
+    assert freshness.resources == {
+        RESOURCE_ACTIVITY: _SYNCED_ACTIVITY_AT,
+        RESOURCE_NUTRITION: None,
+    }, (
+        "D-03/NUTR-05 violated: Apple Health's two resources are not independent. Nutrition was "
+        "never synced, so it must report None. Anything else -- activity's timestamp, or a "
+        "collapsed combined `apple_health` value -- reports 'fresh' during exactly the partial "
+        "failure this split exists to expose, and Claude then coaches off calorie data that "
+        f"stopped days ago without ever caveating it. Got: {freshness.resources}"
+    )
+
+
+@pytest.mark.integration
+async def test_apple_health_and_hevy_resources_resolve_per_provider(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """HEALTH-11: one call, two providers, each resource reading its OWN provider's row.
+
+    This is the Pitfall 7 regression guard. While `build_freshness` defaulted the provider to
+    Hevy, `activity` was looked up under the Hevy provider -- where no row exists -- and came
+    back None, so an Apple Health answer would have silently claimed "never synced" forever.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await complete_sync(
+        session,
+        user_id=ANALYTICS_SECOND_USER_ID,
+        provider=PROVIDER_HEVY,
+        resource=RESOURCE_WORKOUTS,
+        last_synced_at=_SYNCED_WORKOUTS_AT,
+    )
+    await complete_sync(
+        session,
+        user_id=ANALYTICS_SECOND_USER_ID,
+        provider=PROVIDER_APPLE_HEALTH,
+        resource=RESOURCE_ACTIVITY,
+        last_synced_at=_SYNCED_ACTIVITY_AT,
+    )
+    await session.flush()
+
+    freshness = await build_freshness(
+        session,
+        user_id=ANALYTICS_SECOND_USER_ID,
+        resources=FRESHNESS_RESOURCES_WORKOUTS + FRESHNESS_RESOURCES_ACTIVITY,
+    )
+
+    # Guard against a vacuous pass: two equal timestamps would let a single-provider lookup
+    # satisfy the assertion below by accident.
+    assert _SYNCED_WORKOUTS_AT != _SYNCED_ACTIVITY_AT
+
+    assert freshness.resources == {
+        RESOURCE_WORKOUTS: _SYNCED_WORKOUTS_AT,
+        RESOURCE_ACTIVITY: _SYNCED_ACTIVITY_AT,
+    }, (
+        "HEALTH-11 violated (RESEARCH Pitfall 7): a (provider, resource) pair did not read its "
+        "OWN provider's bookkeeping row. A single provider applied to every pair reports one "
+        "source's freshness as another's -- Hevy's sync time presented as Apple Health's, or a "
+        "never-synced None for data that is actually current. Both are plausible-looking numbers "
+        f"that are quietly wrong, which is this project's primary failure mode. "
+        f"Got: {freshness.resources}"
+    )
+
+
+def test_resource_names_are_unique_across_providers() -> None:
+    """The precondition for keying FreshnessMetadata by the BARE resource name.
+
+    No marker and no fixtures: this guards a response-shape invariant, so it must keep running
+    when Docker does not.
+    """
+    assert len(SYNC_RESOURCES | APPLE_HEALTH_RESOURCES) == len(SYNC_RESOURCES) + len(
+        APPLE_HEALTH_RESOURCES
+    ), (
+        "HEALTH-11 violated: a resource name is now used by two providers. "
+        "`build_freshness` keys its output dict by the bare resource name, so a shared name "
+        "makes one provider's timestamp silently overwrite the other's in every analytics "
+        "response. Either rename the resource or switch the key to a composite -- and if you "
+        f"switch, every MCP tool response shape changes too. Overlap: "
+        f"{sorted(SYNC_RESOURCES & APPLE_HEALTH_RESOURCES)}"
+    )
+
+
+def test_build_freshness_has_no_provider_default() -> None:
+    """Pitfall 7: a default provider made every Apple Health lookup silently read Hevy's row.
+
+    Structural rather than behavioural, and deliberately markerless -- restoring the default
+    would not fail any single-provider test, so only the signature itself can guard it.
+    """
+    parameters = inspect.signature(build_freshness).parameters
+
+    assert "provider" not in parameters, (
+        "HEALTH-11 violated: `build_freshness` accepts a `provider` argument again. A "
+        "per-call provider re-creates the bug the pair signature removed -- every resource in "
+        "one call resolves against ONE provider, so the first Apple Health resource passed "
+        "alongside a Hevy one is answered from the wrong bookkeeping row. The provider belongs "
+        f"to the pair, not to the call. Parameters: {sorted(parameters)}"
     )
 
 
