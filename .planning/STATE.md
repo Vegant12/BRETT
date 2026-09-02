@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: MVP
-status: milestone_complete
-stopped_at: v1.0 milestone archived
-last_updated: "2026-09-02T02:23:12.349Z"
+milestone: v2.0
+milestone_name: Apple Health, Strength Tracking & Coaching Programs
+status: defining_requirements
+stopped_at: milestone started, defining requirements
+last_updated: "2026-09-02T00:00:00.000Z"
 last_activity: 2026-09-02
 progress:
-  total_phases: 7
-  completed_phases: 7
-  total_plans: 65
-  completed_plans: 65
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -21,24 +21,26 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-02)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Planning next milestone — run `/gsd-new-milestone`
+**Current focus:** Milestone v2.0 — defining requirements
 
 ## Current Position
 
-Milestone: v1.0 MVP — SHIPPED 2026-09-02 (all 7 phases, 65/65 plans complete)
-Status: Milestone archived; awaiting `/gsd-new-milestone`
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-09-02 — Milestone v2.0 started
 
-Progress: [██████████] 100%
+Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
-**Velocity:**
+**Velocity (v1.0, for reference):**
 
 - Total plans completed: 65 (v1.0 milestone, all phases)
 - Average duration: —
 - Total execution time: —
 
-**By Phase:**
+**By Phase (v1.0):**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
@@ -90,6 +92,6 @@ Items acknowledged and deferred at v1.0 milestone close on 2026-09-02:
 
 ## Session Continuity
 
-Last session: 2026-09-02 (milestone close)
-Stopped at: v1.0 milestone archived; ready for `/gsd-new-milestone`
-Resume file: none — start next milestone fresh
+Last session: 2026-09-02 (v2.0 milestone kickoff — PROJECT.md updated, requirements next)
+Stopped at: `/gsd-new-milestone` in progress; requirements not yet written
+Resume file: none — continue `/gsd-new-milestone` or resume with `/gsd-resume-work`

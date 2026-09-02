@@ -2,11 +2,25 @@
 
 ## What This Is
 
-A personal fitness data platform that normalizes Hevy workout data, Apple Health data, body-composition measurements, and nutrition data into PostgreSQL, calculates fitness analytics (volume, progression, plateaus, PRs, trends), and exposes it through a remote MCP server so Claude can act as a long-term, data-driven body recomposition coach. v1 is backend-first: Hevy sync, analytics, and a read-only remote MCP server. The native iOS HealthKit app (and full Apple Health integration) is deferred to a second milestone.
+A personal fitness data platform that normalizes Hevy workout data, Apple Health data, body-composition measurements, and nutrition data into PostgreSQL, calculates fitness analytics (volume, progression, plateaus, PRs, trends), and exposes it through a remote MCP server so Claude can act as a long-term, data-driven body recomposition coach. v1.0 (shipped) was backend-first: Hevy sync, analytics, and a read-only remote MCP server. v2.0 adds Apple Health data (via a Health Auto Export webhook, not a native app), a max-weight-based strength metric, scheduled report tools, richer body-measurement history, and switchable training programs — with one narrow, confirm-gated MCP write tool as the sole exception to read-only.
 
 ## Core Value
 
 Claude can retrieve real, normalized workout data through the MCP server and answer training questions ("Am I progressing?", "Which muscles are undertrained?") from actual data instead of guessing. This end-to-end path — Hevy → PostgreSQL → analytics → MCP → Claude — must work before anything else matters.
+
+## Current Milestone: v2.0 Apple Health, Strength Tracking & Coaching Programs
+
+**Goal:** Extend BRETT beyond Hevy-only into a full recomposition coach — ingesting Apple Health data, tracking strength the way the user actually trains (max weight, not just 1RM), remembering physical progress over time, adapting to the active program, and answering with concise, report-ready summaries Claude can deliver on a schedule.
+
+**Target features:**
+- Apple Health integration via a Health Auto Export webhook receiver, no native app or Apple Developer Program needed
+- One-time historical Apple Health backfill from `export.xml`
+- Health analytics extension (activity/sleep/recovery trends) feeding recomposition status
+- Strength tracking metric shift: max-weight-lifted primary, estimated-1RM secondary
+- Weekly/monthly report MCP tools built for Claude scheduled-task delivery
+- Concise, simple coaching response style
+- Historical body measurements: manual entry + trend/comparison beyond weight-only
+- Training programs (Lean Bulk/Cut/Recomp) as real data, with a confirm-gated MCP write tool to switch programs
 
 ## Requirements
 
@@ -22,19 +36,25 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 - [x] Claude fitness-coach system prompt/instructions document (`docs/coaching-instructions.md`) defining the body-recomposition coaching behavior and decision framework, drift-guarded against the live tool registry — Validated in Phase 7: Production Hardening & Coaching Layer (2026-09-01); a real Claude Project answered "Am I progressing?" and "Which muscles are undertrained?" from real synced data and correctly surfaced a freshness/sparsity signal unprompted when asked a question that could trigger it
 - [x] Test coverage: Hevy sync (auth, pagination, incremental events, duplicates, deletions, failures), analytics calculations against known workouts, MCP tool schemas/auth/structured output, end-to-end mock-Hevy-to-MCP integration test — Validated in Phase 7: Production Hardening & Coaching Layer (2026-09-01); 687 tests green
 - [x] Production-grade deployment: full backup/restore drill against real Neon PITR branching (byte-identical digests across all 9 tables), a real `MCP_AUTH_SECRET` rotation with old-token-rejected/new-token-accepted and a working post-rotation connector round-trip, and live production Hevy sync scheduling (6-hourly Cloud Run Job + Scheduler, first real sync of 327 workouts/463 templates/125 body measurements) — Validated in Phase 7: Production Hardening & Coaching Layer (2026-09-01)
+- [x] Data freshness surfaced per source (`last_synced_at`) so Claude knows when data may be stale — resolved at the v2.0 boundary: satisfied by the Phase 4 freshness/coverage metadata envelope (DQ-01/DQ-02) and confirmed live via Phase 7's `freshness.resources` evidence in the coaching UAT
 
 ### Active
 
-- [ ] Body measurements: manual entry model (weight minimum viable; body fat %, waist, chest, arm, thigh optional) — not part of Phase 7's scope; not represented in REQUIREMENTS.md's v1 list, and Hevy sync already populates `body_measurements` automatically (125 measurements as of Phase 7), so this may be redundant rather than outstanding — worth a scope decision at the next milestone boundary rather than silently carrying it forward
-- [ ] Nutrition: manual entry model (calories, protein, carbs, fat) — no scraping/auto-import in v1 — not part of Phase 7's scope; REQUIREMENTS.md lists only an automatic nutrition provider (NUTR-01) under v2, with no v1 nutrition requirement, so this item's status is ambiguous against the authoritative requirements list and should be resolved (validated, built, or formally moved to Out of Scope) at the next milestone boundary
-- [ ] Data freshness surfaced per source (last_synced_at) so Claude knows when data may be stale — likely already satisfied by the Phase 4 freshness/coverage metadata envelope (DQ-01/DQ-02) and Phase 7's live `freshness.resources` evidence in the coaching UAT, but left here rather than silently removed since this document's evolution rules call for that check at a phase/milestone transition, not a mid-edit assumption
+- [ ] Apple Health integration via a Health Auto Export webhook receiver (body weight, steps, active energy, workouts, sleep, resting heart rate, HRV where available) — no native iOS app, no Apple Developer Program enrollment required; BRETT exposes a normalized ingest endpoint the same way `integrations/hevy/` is isolated
+- [ ] One-time historical Apple Health backfill from the user's existing `export.xml` export, alongside ongoing Health Auto Export sync going forward
+- [ ] Health analytics extension: activity/sleep/recovery trends, integrated into recomposition status alongside existing Hevy-based analytics
+- [ ] Strength tracking: max-weight-lifted becomes the primary signal for progression trend and plateau detection (`progression.py`, `recomposition.py`); estimated-1RM stays available as a secondary data point where it's already gated/valid, not removed
+- [ ] Weekly/monthly report MCP tools (composing volume, strength, measurements, trends, and recommendations into one structured payload) — designed to be driven by a Claude scheduled task for periodic delivery, since MCP itself has no push channel
+- [ ] Coaching response style: tighten `docs/coaching-instructions.md` further toward concise, simple answers that still use real numbers (builds on guidance already present)
+- [ ] Historical body measurements: manual-entry path for measurements Hevy doesn't populate (the `body_measurements` schema already supports `source='manual'` but no endpoint writes it), plus trend/comparison analytics across weight *and* circumference/composition columns — not weight-only as today
+- [ ] Training programs: Lean Bulk / Cut / Recomp as real data (replacing the hardcoded "lean bulk" threshold constants in `recomposition.py`), with program-aware recomposition thresholds and recommendations, and a confirm-gated MCP write tool (two-call design: first call warns, second call with `confirm=true` switches) so the active program can be changed by chatting with Claude
 
 ### Out of Scope
 
-- iOS HealthKit app and all Apple Health data sync (steps, sleep, HRV, resting HR, Apple Health workouts, activity) — deferred to milestone 2; requires an Apple Developer account, which isn't set up yet
 - Self-hosted / hand-rolled OAuth authorization servers — WorkOS AuthKit *is* the authorization server; BRETT is only a resource server that validates its tokens. *(This replaces the original scope note, which deferred OAuth for MCP auth on the grounds that a bearer token was sufficient for private v1 development. That note was overturned in Phase 2: a Claude custom connector cannot authenticate with a static bearer at all, so OAuth 2.1 was implemented rather than deferred — see the "MCP connector auth" row in Key Decisions. What stays out of scope is building the authorization server ourselves.)*
-- Automatic/scraped nutrition data integration — manual entry only for v1; schema designed so a provider can be added later
-- Write/delete MCP tools (modifying or deleting Hevy workouts, health data, nutrition, or measurements) — explicitly excluded; MCP is read-only in v1 to minimize security risk
+- A native iOS HealthKit app — superseded for v2.0 by the Health Auto Export webhook approach (no Apple Developer Program needed); the blueprint's native `FitnessSync` app design remains a documented option if a native app is ever wanted later
+- Automatic/scraped nutrition data integration, and nutrition manual entry generally — no nutrition work is in v2.0 scope; REQUIREMENTS.md's v2-deferred `NUTR-01` (automatic provider) remains deferred, and manual entry was not selected for this milestone either — revisit at the next milestone boundary
+- Write/delete MCP tools beyond the one confirm-gated program-switch tool — MCP otherwise stays read-only; this is a narrow, deliberate exception, not a general opening of write access
 - Multi-user product features (accounts for other people, per-user auth flows beyond schema readiness) — schema must not preclude multi-user later, but no multi-user UX is built now
 
 ## Context
@@ -42,7 +62,8 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 - Source spec: [`BRETT blueprint.md`](../BRETT%20blueprint.md) in this repo — a detailed architecture/requirements document the user authored. Treat it as the authoritative reference for schema shapes, endpoint lists, MCP tool names, and phase ordering; this PROJECT.md scopes v1 to blueprint Phases 1–5 (backend foundation → Hevy → analytics → MCP → remote deployment).
 - Hevy Pro subscription and API key are already available — no blocker to starting Hevy integration work.
 - Google Cloud account, gcloud SDK 578.0.0 and an open billing account are already set up; the BRETT-specific GCP project and the Neon Postgres project are created during Phase 2. The previously-provisioned Render account is unused.
-- User has an iPhone but no Apple Developer account yet — relevant when milestone 2 (HealthKit) is scoped; HealthKit does not work in the iOS Simulator, so real-device testing will be needed then.
+- User has an iPhone but no Apple Developer Program enrollment (a free Apple ID alone doesn't grant the HealthKit entitlement) — no longer a blocker for v2.0 since Apple Health ingestion goes through a Health Auto Export webhook receiver instead of a native app; a native `FitnessSync` app stays a documented future option if enrollment ever happens.
+- User already has a manual Apple Health export (`export.xml`, `export_cda.xml`, gitignored/untracked at the repo root) intended as the one-time historical backfill source for v2.0.
 - Default user timezone is Asia/Jakarta (must be configurable, not hard-coded); daily fitness calculations should group by local day, with timestamps stored in UTC.
 - Internal units: kilograms, meters, kcal, seconds, centimeters — convert at the application boundary only.
 - This is a self-paced personal project with no external deadline.
@@ -51,7 +72,7 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 
 - **Tech stack**: Python 3.12+, FastAPI, PostgreSQL, SQLAlchemy 2.x, Alembic, Pydantic, httpx, MCP Python SDK, pytest, Ruff (mypy where practical) — specified in the blueprint, not open for re-litigation without cause
 - **Repo layout**: Flat at the BRETT repo root (`backend/`, `ios/`, `docs/` as top-level dirs) — no extra `fitness-platform/` nesting, since this repo already is the project root
-- **Security**: MCP tools read-only in v1; never expose API keys, DB credentials, or internal tokens through MCP responses or logs; HTTPS everywhere; secrets only via environment/secret storage, never committed
+- **Security**: MCP tools read-only in v1; from v2.0, exactly one narrow, confirm-gated write tool (program switching) is permitted as a deliberate exception, not a general opening of write access; never expose API keys, DB credentials, or internal tokens through MCP responses or logs; HTTPS everywhere; secrets only via environment/secret storage, never committed
 - **Data integrity**: Hevy sync must be idempotent and must never corrupt existing data on partial/failed sync
 - **Provider isolation**: Hevy-specific logic confined to `backend/app/integrations/hevy/` so the API surface can change or a new provider can be added without spreading assumptions through the app
 - **Deployment**: Google Cloud Run for v1 (supersedes Render as of 2026-08-27, revised D-06), with external managed Postgres (Neon) and Google Secret Manager; architecture stays portable to another host later
@@ -66,19 +87,14 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 | Repo layout = flat at BRETT repo root, no `fitness-platform/` nesting | Project already lives at the root of this repo | ✓ Good — held flat through all 7 phases, no nesting introduced |
 | ~~Deploy target = Render~~ | Account already provisioned; blueprint recommends it; architecture stays portable | — Superseded 2026-08-27 by the row below |
 | Deploy target = Google Cloud Run + Neon Postgres + Google Secret Manager | The original Cloud Run rejection (cost parity with a paid always-on tier, plus Cloud SQL provisioning surface) was re-presented on 2026-08-27 and the user chose to switch anyway. Neon replaces Cloud SQL, so the service needs only outbound egress and zero code change — `Settings.async_database_url` already translates the libpq DSN | ✓ Good — live in production through Phase 7: real Neon PITR backup/restore drill (byte-identical across all 9 tables), a real `MCP_AUTH_SECRET` rotation, and a 6-hourly Cloud Run Job sync, with zero incidents |
+| Apple Health ingestion = Health Auto Export webhook receiver, not a native iOS app | No Apple Developer Program enrollment exists; HealthKit's entitlement requires a paid membership even under a free personal-team Xcode setup. A third-party app already holds that entitlement and can push normalized JSON to a URL on a schedule, so BRETT only needs a webhook receiver isolated the same way `integrations/hevy/` is | — Pending, decided 2026-09-02 for v2.0 |
+| Strength progression signal = max-weight-lifted (primary), estimated-1RM (secondary) | User trains and thinks in terms of the heaviest weight moved, not a derived 1RM estimate; `PersonalRecordType.MAX_WEIGHT` already exists ungated in `records.py`, but `progression.py`/`recomposition.py` classify trend and plateaus off e1RM today | — Pending, decided 2026-09-02 for v2.0 |
+| Weekly/monthly reports = on-demand MCP tools driven by Claude's own scheduled-tasks feature, not a BRETT-side scheduler | MCP tools only run when Claude is asked something in-session; there is no push channel from BRETT to the user. Claude Desktop/mobile's scheduled-tasks feature (settable per Project) already solves periodic delivery without new backend infrastructure | — Pending, decided 2026-09-02 for v2.0 |
+| Training program (Lean Bulk/Cut/Recomp) modeled as real data, switched via a confirm-gated MCP write tool (two-call: warn, then `confirm=true`) | v1.0 deliberately hardcoded "lean bulk" as five constants in `recomposition.py` rather than adding a `users.goal` column; that non-decision no longer holds once programs must be switchable. A two-call confirm contract guarantees an in-conversation confirmation step regardless of which Claude client's connector settings are in play | — Pending, decided 2026-09-02 for v2.0 |
 
 ## Current State
 
 **Shipped: v1.0 MVP (2026-09-02).** All 39 v1 requirements complete across 7 phases (65 plans, 151 tasks, ~34k LOC in `backend/`). The full Hevy → PostgreSQL → analytics → MCP → Claude loop is live in production on Google Cloud Run: idempotent Hevy sync runs 6-hourly, the analytics layer is deterministic and fully tested (687 tests), thirteen read-only MCP tools are deployed behind WorkOS AuthKit OAuth with live rate limiting, and a real Claude Project answers real training questions from real synced data. See `.planning/milestones/v1.0-ROADMAP.md` and `.planning/milestones/v1.0-REQUIREMENTS.md` for full milestone detail, and `.planning/MILESTONES.md` for the shipped summary.
-
-## Next Milestone Goals
-
-Not yet formally scoped — run `/gsd-new-milestone` to define v1.1/v2 requirements. Candidate directions surfaced during v1.0:
-
-- **Resolve the three ambiguous Active items** (below) at the requirements-definition stage rather than carrying them forward again: body-measurement manual entry, nutrition manual entry, and freshness surfacing — each may already be satisfied by Hevy auto-sync and the DQ-01/DQ-02 envelope and should be explicitly validated or moved to Out of Scope.
-- **Milestone 2 (HealthKit)**: iOS app + Apple Health sync (steps, sleep, HRV, resting HR, workouts) — blocked on an Apple Developer account, which does not exist yet.
-- **v1.x analytics enhancements** already captured in the archived v1.0 requirements' "v2 Requirements" section (volume landmark bands, muscle balance ratios, RPE-derived stimulus quality, exercise substitution grouping, routine adherence, session density trends) — candidates for a lighter v1.1 before the full HealthKit milestone.
-- **Nutrition auto-import** (`NUTR-01`) — deferred provider integration, manual entry only so far.
 
 ## Evolution
 
@@ -98,4 +114,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-02 after v1.0 milestone*
+*Last updated: 2026-09-02 after v2.0 milestone kickoff*
