@@ -97,40 +97,51 @@ Which phases cover which requirements. Populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| HEALTH-06 | TBD | Pending |
-| HEALTH-07 | TBD | Pending |
-| HEALTH-08 | TBD | Pending |
-| HEALTH-09 | TBD | Pending |
-| HEALTH-10 | TBD | Pending |
-| HEALTH-11 | TBD | Pending |
-| HEALTH-12 | TBD | Pending |
-| NUTR-02 | TBD | Pending |
-| NUTR-03 | TBD | Pending |
-| NUTR-04 | TBD | Pending |
-| NUTR-05 | TBD | Pending |
-| NUTR-06 | TBD | Pending |
-| STR-01 | TBD | Pending |
-| STR-02 | TBD | Pending |
-| STR-03 | TBD | Pending |
-| STR-04 | TBD | Pending |
-| RPT-01 | TBD | Pending |
-| RPT-02 | TBD | Pending |
-| RPT-03 | TBD | Pending |
-| BODY-03 | TBD | Pending |
-| BODY-04 | TBD | Pending |
-| BODY-05 | TBD | Pending |
-| GOAL-01 | TBD | Pending |
-| GOAL-02 | TBD | Pending |
-| GOAL-03 | TBD | Pending |
-| GOAL-04 | TBD | Pending |
-| COACH-02 | TBD | Pending |
-| COACH-03 | TBD | Pending |
+| HEALTH-06 | Phase 8 | Pending |
+| HEALTH-07 | Phase 8 | Pending |
+| HEALTH-08 | Phase 8 | Pending |
+| HEALTH-09 | Phase 8 | Pending |
+| HEALTH-10 | Phase 9 | Pending |
+| HEALTH-11 | Phase 8 | Pending |
+| HEALTH-12 | Phase 13 | Pending |
+| NUTR-02 | Phase 8 | Pending |
+| NUTR-03 | Phase 8 | Pending |
+| NUTR-04 | Phase 13 | Pending |
+| NUTR-05 | Phase 8 | Pending |
+| NUTR-06 | Phase 13 | Pending |
+| STR-01 | Phase 10 | Pending |
+| STR-02 | Phase 10 | Pending |
+| STR-03 | Phase 10 | Pending |
+| STR-04 | Phase 10 | Pending |
+| RPT-01 | Phase 13 | Pending |
+| RPT-02 | Phase 13 | Pending |
+| RPT-03 | Phase 13 | Pending |
+| BODY-03 | Phase 11 | Pending |
+| BODY-04 | Phase 11 | Pending |
+| BODY-05 | Phase 11 | Pending |
+| GOAL-01 | Phase 12 | Pending |
+| GOAL-02 | Phase 12 | Pending |
+| GOAL-03 | Phase 12 | Pending |
+| GOAL-04 | Phase 12 | Pending |
+| COACH-02 | Phase 13 | Pending |
+| COACH-03 | Phase 13 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 28 total
-- Mapped to phases: 0
-- Unmapped: 28 ⚠️ (roadmap creation next)
+- Mapped to phases: 28 ✓
+- Unmapped: 0
+
+**By phase:**
+
+| Phase | Requirements | Count |
+|-------|--------------|-------|
+| 8. Apple Health & Nutrition Ingest | HEALTH-06, HEALTH-07, HEALTH-08, HEALTH-09, HEALTH-11, NUTR-02, NUTR-03, NUTR-05 | 8 |
+| 9. Historical Apple Health Backfill | HEALTH-10 | 1 |
+| 10. Max-Weight Strength Signal | STR-01, STR-02, STR-03, STR-04 | 4 |
+| 11. Body Measurement History | BODY-03, BODY-04, BODY-05 | 3 |
+| 12. Training Programs & Confirm-Gated Write Tool | GOAL-01, GOAL-02, GOAL-03, GOAL-04 | 4 |
+| 13. Health Analytics, Reports & Coaching Style | HEALTH-12, NUTR-04, NUTR-06, RPT-01, RPT-02, RPT-03, COACH-02, COACH-03 | 8 |
 
 ---
 *Requirements defined: 2026-09-02*
-*Last updated: 2026-09-02 after initial v2.0 definition*
+*Last updated: 2026-09-02 after v2.0 roadmap creation (Phases 8-13, 28/28 mapped)*
