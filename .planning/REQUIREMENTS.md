@@ -10,8 +10,8 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 ### Apple Health Integration
 
 - [ ] **HEALTH-06**: User's Apple Health activity data (steps, active energy, basal energy, distance, flights climbed) syncs into BRETT via a Health Auto Export webhook receiver — no native iOS app, no Apple Developer Program enrollment
-- [ ] **HEALTH-07**: The webhook receiver authenticates inbound requests via a shared-secret bearer token (or equivalent header-based scheme), rejecting unauthenticated or mis-authenticated payloads
-- [ ] **HEALTH-08**: Sync excludes Apple Health workouts and body-mass records that originate from Hevy's own HealthKit write-back, preventing double-counting of data BRETT already holds at higher fidelity
+- [x] **HEALTH-07**: The webhook receiver authenticates inbound requests via a shared-secret bearer token (or equivalent header-based scheme), rejecting unauthenticated or mis-authenticated payloads
+- [x] **HEALTH-08**: Sync excludes Apple Health workouts and body-mass records that originate from Hevy's own HealthKit write-back, preventing double-counting of data BRETT already holds at higher fidelity
 - [x] **HEALTH-09**: Sync is idempotent — reprocessing an overlapping export window does not create duplicate records
 - [ ] **HEALTH-10**: A one-time historical backfill imports the user's existing `export.xml` Apple Health export, applying the same Hevy-exclusion filter as ongoing sync
 - [x] **HEALTH-11**: Apple Health data freshness (`last_synced_at`) is surfaced through the same freshness/coverage envelope Hevy data already uses (DQ-01/DQ-02)
@@ -98,8 +98,8 @@ Which phases cover which requirements. Populated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | HEALTH-06 | Phase 8 | Pending |
-| HEALTH-07 | Phase 8 | Pending |
-| HEALTH-08 | Phase 8 | Pending |
+| HEALTH-07 | Phase 8 | Complete |
+| HEALTH-08 | Phase 8 | Complete |
 | HEALTH-09 | Phase 8 | Complete |
 | HEALTH-10 | Phase 9 | Pending |
 | HEALTH-11 | Phase 8 | Complete |
