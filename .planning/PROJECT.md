@@ -13,14 +13,14 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 **Goal:** Extend BRETT beyond Hevy-only into a full recomposition coach — ingesting Apple Health data, tracking strength the way the user actually trains (max weight, not just 1RM), remembering physical progress over time, adapting to the active program, and answering with concise, report-ready summaries Claude can deliver on a schedule.
 
 **Target features:**
-- Apple Health integration via a Health Auto Export webhook receiver, no native app or Apple Developer Program needed
-- One-time historical Apple Health backfill from `export.xml`
-- Health analytics extension (activity/sleep/recovery trends) feeding recomposition status
-- Strength tracking metric shift: max-weight-lifted primary, estimated-1RM secondary
-- Weekly/monthly report MCP tools built for Claude scheduled-task delivery
+- Apple Health integration via a Health Auto Export webhook receiver, no native app or Apple Developer Program needed — with a hard exclusion filter for Apple Health workouts/body-mass rows that are actually Hevy re-exports
+- One-time historical Apple Health backfill from `export.xml`, same exclusion filter
+- Health analytics extension, activity only (steps/energy/distance/flights) — sleep/recovery cut for lack of any real data (no Apple Watch)
+- Strength tracking metric shift: max-weight-lifted primary, estimated-1RM secondary, thresholds re-derived for a plate-increment signal
+- Weekly/monthly report MCP tools, valuable on-demand; Claude scheduled-task delivery spiked early and verified, not assumed
 - Concise, simple coaching response style
-- Historical body measurements: manual entry + trend/comparison beyond weight-only
-- Training programs (Lean Bulk/Cut/Recomp) as real data, with a confirm-gated MCP write tool to switch programs
+- Historical body measurements: manual entry (with the `_dedupe_by_day` precedence fix) + trend/comparison beyond weight-only
+- Training programs (Lean Bulk/Cut/Recomp) as real data, with a token-based confirm-gated MCP write tool to switch programs
 
 ## Requirements
 
@@ -40,14 +40,14 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 
 ### Active
 
-- [ ] Apple Health integration via a Health Auto Export webhook receiver (body weight, steps, active energy, workouts, sleep, resting heart rate, HRV where available) — no native iOS app, no Apple Developer Program enrollment required; BRETT exposes a normalized ingest endpoint the same way `integrations/hevy/` is isolated
-- [ ] One-time historical Apple Health backfill from the user's existing `export.xml` export, alongside ongoing Health Auto Export sync going forward
-- [ ] Health analytics extension: activity/sleep/recovery trends, integrated into recomposition status alongside existing Hevy-based analytics
-- [ ] Strength tracking: max-weight-lifted becomes the primary signal for progression trend and plateau detection (`progression.py`, `recomposition.py`); estimated-1RM stays available as a secondary data point where it's already gated/valid, not removed
-- [ ] Weekly/monthly report MCP tools (composing volume, strength, measurements, trends, and recommendations into one structured payload) — designed to be driven by a Claude scheduled task for periodic delivery, since MCP itself has no push channel
+- [ ] Apple Health integration via a Health Auto Export webhook receiver (steps, active/basal energy, distance, flights climbed; body weight/composition where not already Hevy-sourced) — no native iOS app, no Apple Developer Program enrollment required; BRETT exposes a normalized ingest endpoint the same way `integrations/hevy/` is isolated. Apple Health *workouts* and body-mass rows sourced from Hevy are explicitly excluded from ingestion (research found 218/221 Apple Health workouts and 52/79 body-mass records are Hevy re-exports — ingesting them would double-count data BRETT already holds at higher fidelity)
+- [ ] One-time historical Apple Health backfill from the user's existing `export.xml` export (same Hevy-exclusion filter as ongoing sync), alongside ongoing Health Auto Export sync going forward
+- [ ] Health analytics extension, rescoped to activity only (steps/energy/distance/flights) — sleep and recovery trends (resting HR, HRV, sleep quality) are cut from v2.0: the user's actual Apple Health export has zero records of any of these (no Apple Watch, sleep tracking stopped Nov 2024), so there's no data to build against
+- [ ] Strength tracking: max-weight-lifted becomes the primary signal for progression trend and plateau detection (`progression.py`, `recomposition.py`); estimated-1RM stays available as a secondary data point where it's already gated/valid, not removed. Requires re-deriving the trend/plateau dead-band thresholds against live data — max weight moves in plate increments, not the continuous curve the existing 2%/4-week bands were tuned to
+- [ ] Weekly/monthly report MCP tools (composing volume, strength, measurements, trends, and recommendations into one structured payload) — valuable on-demand regardless of delivery mechanism; a real scheduled-task run against Claude's scheduled-tasks feature must be spiked early in this phase, since two documented GitHub issues (closed "not planned") report that scheduled sessions may not load MCP tool schemas at all. If that's confirmed broken, reports stay on-demand-only rather than blocking the phase on it
 - [ ] Coaching response style: tighten `docs/coaching-instructions.md` further toward concise, simple answers that still use real numbers (builds on guidance already present)
-- [ ] Historical body measurements: manual-entry path for measurements Hevy doesn't populate (the `body_measurements` schema already supports `source='manual'` but no endpoint writes it), plus trend/comparison analytics across weight *and* circumference/composition columns — not weight-only as today
-- [ ] Training programs: Lean Bulk / Cut / Recomp as real data (replacing the hardcoded "lean bulk" threshold constants in `recomposition.py`), with program-aware recomposition thresholds and recommendations, and a confirm-gated MCP write tool (two-call design: first call warns, second call with `confirm=true` switches) so the active program can be changed by chatting with Claude
+- [ ] Historical body measurements: manual-entry path for measurements Hevy doesn't populate (the `body_measurements` schema already supports `source='manual'` but no endpoint writes it), plus trend/comparison analytics across weight *and* circumference/composition columns — not weight-only as today. Must ship together with a fix to `bodyweight.py`'s `_dedupe_by_day` source-precedence logic (currently alphabetical — `'hevy' < 'manual'` — and its own docstring warns the "manual wins" tiebreak can silently delete same-day Hevy circumference readings once manual rows exist)
+- [ ] Training programs: Lean Bulk / Cut / Recomp as real data (replacing the hardcoded "lean bulk" threshold constants in `recomposition.py`), with program-aware recomposition thresholds and recommendations, and a confirm-gated MCP write tool so the active program can be changed by chatting with Claude — token-based two-call design (first call returns a one-time confirmation token in its warning; second call must echo that exact token back), not a bare `confirm: bool` flag, since a boolean parameter is not a real gate against the model just setting it true on the first call
 
 ### Out of Scope
 
@@ -90,7 +90,9 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 | Apple Health ingestion = Health Auto Export webhook receiver, not a native iOS app | No Apple Developer Program enrollment exists; HealthKit's entitlement requires a paid membership even under a free personal-team Xcode setup. A third-party app already holds that entitlement and can push normalized JSON to a URL on a schedule, so BRETT only needs a webhook receiver isolated the same way `integrations/hevy/` is | — Pending, decided 2026-09-02 for v2.0 |
 | Strength progression signal = max-weight-lifted (primary), estimated-1RM (secondary) | User trains and thinks in terms of the heaviest weight moved, not a derived 1RM estimate; `PersonalRecordType.MAX_WEIGHT` already exists ungated in `records.py`, but `progression.py`/`recomposition.py` classify trend and plateaus off e1RM today | — Pending, decided 2026-09-02 for v2.0 |
 | Weekly/monthly reports = on-demand MCP tools driven by Claude's own scheduled-tasks feature, not a BRETT-side scheduler | MCP tools only run when Claude is asked something in-session; there is no push channel from BRETT to the user. Claude Desktop/mobile's scheduled-tasks feature (settable per Project) already solves periodic delivery without new backend infrastructure | — Pending, decided 2026-09-02 for v2.0 |
-| Training program (Lean Bulk/Cut/Recomp) modeled as real data, switched via a confirm-gated MCP write tool (two-call: warn, then `confirm=true`) | v1.0 deliberately hardcoded "lean bulk" as five constants in `recomposition.py` rather than adding a `users.goal` column; that non-decision no longer holds once programs must be switchable. A two-call confirm contract guarantees an in-conversation confirmation step regardless of which Claude client's connector settings are in play | — Pending, decided 2026-09-02 for v2.0 |
+| Training program (Lean Bulk/Cut/Recomp) modeled as real data, switched via a confirm-gated MCP write tool (two-call: first call returns a one-time confirmation token, second call must echo it back) | v1.0 deliberately hardcoded "lean bulk" as five constants in `recomposition.py` rather than adding a `users.goal` column; that non-decision no longer holds once programs must be switchable. A bare `confirm: bool` parameter was rejected during research — it is not a real gate, since the model can set it `true` on the first call. A one-time token the model must echo back guarantees a genuine two-step confirmation regardless of which Claude client's connector settings are in play | — Pending, decided 2026-09-02 for v2.0 |
+| Apple Health workouts and Hevy-sourced body-mass rows excluded from ingestion | Research measured the user's real `export.xml`: 218/221 Apple Health workouts and 52/79 body-mass records already originate from Hevy's own HealthKit write-back. Ingesting them would double-count data BRETT already holds at higher fidelity | — Pending, decided 2026-09-02 for v2.0 |
+| Sleep/recovery trends cut from v2.0 scope; health analytics rescoped to activity only | Research measured zero heart-rate, HRV, VO2max, or blood-oxygen records in 4.5 years of the user's real export (no Apple Watch), and sleep tracking stopped Nov 2024 — no data exists to build against | — Pending, decided 2026-09-02 for v2.0 |
 
 ## Current State
 
