@@ -45,7 +45,17 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
   3. Re-sending an overlapping export window leaves row counts and every computed daily value unchanged.
   4. Apple Health workouts and Hevy-originated body-mass rows never enter BRETT's training or body data — the volume, frequency, and body-weight numbers Claude reports are identical before and after Apple Health data exists.
   5. Claude can see when Apple Health data last arrived, reported separately from when Hevy last synced, through the existing freshness envelope.
-**Plans**: TBD
+**Plans**: 8 plans in 6 waves
+
+Plans:
+- [ ] 08-01-PLAN.md — `health_daily_metrics` table, migration 0005, and the HAE test fixtures (wave 1)
+- [ ] 08-02-PLAN.md — freshness envelope takes `(provider, resource)` pairs; two Apple Health resources (wave 1)
+- [ ] 08-03-PLAN.md — ingest secret, dedicated rate-limit bucket, body cap, `--memory=1Gi` (wave 1)
+- [ ] 08-04-PLAN.md — HAE package core: metric registry, wire quarantine, errors, bearer verifier (wave 2)
+- [ ] 08-05-PLAN.md — normalize: Hevy-source exclusion, unit conversion, whole-payload aggregation (wave 3)
+- [ ] 08-06-PLAN.md — idempotent upsert + independent activity/nutrition freshness bookkeeping (wave 4)
+- [ ] 08-07-PLAN.md — the webhook route, its wiring above the MCP mount, and the criterion-#4 proof (wave 5)
+- [ ] 08-08-PLAN.md — setup doc, secret creation, deploy, and the live device verification checkpoint (wave 6)
 
 Notes for planning:
 - Register the ingest route **above** `app.mount("/", mcp_app)` in `main.py` — the mount is a catch-all and a route below it is dead in production (PITFALLS #1).
@@ -158,7 +168,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 5. Progression, Records & Recomposition Analytics | v1.0 | 10/10 | Complete | 2026-08-31 |
 | 6. MCP Tools | v1.0 | 11/11 | Complete | 2026-09-01 |
 | 7. Production Hardening & Coaching Layer | v1.0 | 10/10 | Complete | 2026-09-01 |
-| 8. Apple Health & Nutrition Ingest | v2.0 | 0/TBD | Not started | - |
+| 8. Apple Health & Nutrition Ingest | v2.0 | 0/8 | Planned | - |
 | 9. Historical Apple Health Backfill | v2.0 | 0/TBD | Not started | - |
 | 10. Max-Weight Strength Signal | v2.0 | 0/TBD | Not started | - |
 | 11. Body Measurement History | v2.0 | 0/TBD | Not started | - |
