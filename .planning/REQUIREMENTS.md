@@ -17,20 +17,20 @@ Backend-first milestone: Hevy sync → PostgreSQL → analytics → read-only re
 
 ### Hevy Integration
 
-- [ ] **HEVY-01**: System performs an initial full sync of the user's historical Hevy workouts via paginated API calls (Hevy's real pageSize cap is 10, not 50-100)
-- [ ] **HEVY-02**: System performs incremental sync using Hevy's workout-events endpoint, correctly draining newest-to-oldest pages before applying changes oldest-first (naive cursor advancement silently loses events)
+- [x] **HEVY-01**: System performs an initial full sync of the user's historical Hevy workouts via paginated API calls (Hevy's real pageSize cap is 10, not 50-100)
+- [x] **HEVY-02**: System performs incremental sync using Hevy's workout-events endpoint, correctly draining newest-to-oldest pages before applying changes oldest-first (naive cursor advancement silently loses events)
 - [x] **HEVY-03**: Hevy sync is idempotent — running it repeatedly never creates duplicate workouts, exercises, or sets (Hevy's child objects have no stable IDs, so exercises/sets are keyed by workout + reinserted transactionally, not upserted individually)
 - [x] **HEVY-04**: Deleted Hevy workouts are detected and reflected in the local database without corrupting other data
-- [ ] **HEVY-05**: Hevy-specific request/response logic is isolated inside `backend/app/integrations/hevy/`
-- [ ] **HEVY-06**: System syncs Hevy exercise templates, capturing each exercise's primary and secondary muscle groups
-- [ ] **HEVY-07**: System syncs Hevy body measurements (weight, body fat %, waist, and other available fields) as an automatic data source, in addition to manual entry
-- [ ] **HEVY-08**: A sync failure (network error, malformed response, rate limit) does not corrupt previously-synced data
-- [ ] **HEVY-09**: Each data source (Hevy workouts, Hevy body measurements) exposes a `last_synced_at` timestamp
+- [x] **HEVY-05**: Hevy-specific request/response logic is isolated inside `backend/app/integrations/hevy/`
+- [x] **HEVY-06**: System syncs Hevy exercise templates, capturing each exercise's primary and secondary muscle groups
+- [x] **HEVY-07**: System syncs Hevy body measurements (weight, body fat %, waist, and other available fields) as an automatic data source, in addition to manual entry
+- [x] **HEVY-08**: A sync failure (network error, malformed response, rate limit) does not corrupt previously-synced data
+- [x] **HEVY-09**: Each data source (Hevy workouts, Hevy body measurements) exposes a `last_synced_at` timestamp
 
 ### Exercise Normalization
 
 - [x] **NORM-01**: Every synced exercise is mapped to one or more canonical muscle groups, including a front/side/rear deltoid split that Hevy's own taxonomy does not provide
-- [ ] **NORM-02**: Muscle-group mappings can be manually overridden, with the override auditable against the original source mapping
+- [x] **NORM-02**: Muscle-group mappings can be manually overridden, with the override auditable against the original source mapping
 - [x] **NORM-03**: Each mapped exercise distinguishes direct (primary) vs indirect (secondary) muscle involvement, with a configurable weighting (default 1.0 direct / 0.5 indirect) applied at query time
 
 ### Analytics — Volume & Frequency
@@ -131,34 +131,34 @@ Every v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for p
 | MCP-04 | Phase 2 | Deploy & Connector Auth Spike | Complete |
 | DEPLOY-01 | Phase 2 | Deploy & Connector Auth Spike | Complete |
 | DEPLOY-02 | Phase 2 | Deploy & Connector Auth Spike | Complete |
-| HEVY-01 | Phase 3 | Hevy Integration & Normalization | Pending |
-| HEVY-02 | Phase 3 | Hevy Integration & Normalization | Pending |
-| HEVY-03 | Phase 3 | Hevy Integration & Normalization | Pending |
-| HEVY-04 | Phase 3 | Hevy Integration & Normalization | Pending |
-| HEVY-05 | Phase 3 | Hevy Integration & Normalization | Pending |
-| HEVY-06 | Phase 3 | Hevy Integration & Normalization | Pending |
-| HEVY-07 | Phase 3 | Hevy Integration & Normalization | Pending |
-| HEVY-08 | Phase 3 | Hevy Integration & Normalization | Pending |
-| HEVY-09 | Phase 3 | Hevy Integration & Normalization | Pending |
-| NORM-01 | Phase 3 | Hevy Integration & Normalization | Pending |
-| NORM-02 | Phase 3 | Hevy Integration & Normalization | Pending |
-| NORM-03 | Phase 3 | Hevy Integration & Normalization | Pending |
+| HEVY-01 | Phase 3 | Hevy Integration & Normalization | Complete |
+| HEVY-02 | Phase 3 | Hevy Integration & Normalization | Complete |
+| HEVY-03 | Phase 3 | Hevy Integration & Normalization | Complete |
+| HEVY-04 | Phase 3 | Hevy Integration & Normalization | Complete |
+| HEVY-05 | Phase 3 | Hevy Integration & Normalization | Complete |
+| HEVY-06 | Phase 3 | Hevy Integration & Normalization | Complete |
+| HEVY-07 | Phase 3 | Hevy Integration & Normalization | Complete |
+| HEVY-08 | Phase 3 | Hevy Integration & Normalization | Complete |
+| HEVY-09 | Phase 3 | Hevy Integration & Normalization | Complete |
+| NORM-01 | Phase 3 | Hevy Integration & Normalization | Complete |
+| NORM-02 | Phase 3 | Hevy Integration & Normalization | Complete |
+| NORM-03 | Phase 3 | Hevy Integration & Normalization | Complete |
 | VOL-01 | Phase 4 | Volume & Frequency Analytics | Complete |
 | VOL-02 | Phase 4 | Volume & Frequency Analytics | Complete |
 | VOL-03 | Phase 4 | Volume & Frequency Analytics | Complete |
 | DQ-01 | Phase 4 | Volume & Frequency Analytics | Complete |
 | DQ-02 | Phase 4 | Volume & Frequency Analytics | Complete |
-| PROG-01 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
-| PROG-02 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
-| PROG-03 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
-| PROG-04 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
-| CMP-01 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
+| PROG-01 | Phase 5 | Progression, Records & Recomposition Analytics | Complete |
+| PROG-02 | Phase 5 | Progression, Records & Recomposition Analytics | Complete |
+| PROG-03 | Phase 5 | Progression, Records & Recomposition Analytics | Complete |
+| PROG-04 | Phase 5 | Progression, Records & Recomposition Analytics | Complete |
+| CMP-01 | Phase 5 | Progression, Records & Recomposition Analytics | Complete |
 | BODY-01 | Phase 5 | Progression, Records & Recomposition Analytics | Complete |
-| BODY-02 | Phase 5 | Progression, Records & Recomposition Analytics | Pending |
-| MCP-02 | Phase 6 | MCP Tools | Pending |
-| MCP-03 | Phase 6 | MCP Tools | Pending |
-| MCP-05 | Phase 6 | MCP Tools | Pending |
-| MCP-06 | Phase 6 | MCP Tools | Pending |
+| BODY-02 | Phase 5 | Progression, Records & Recomposition Analytics | Complete |
+| MCP-02 | Phase 6 | MCP Tools | Complete |
+| MCP-03 | Phase 6 | MCP Tools | Complete |
+| MCP-05 | Phase 6 | MCP Tools | Complete |
+| MCP-06 | Phase 6 | MCP Tools | Complete |
 | DEPLOY-03 | Phase 7 | Production Hardening & Coaching Layer | Complete |
 | COACH-01 | Phase 7 | Production Hardening & Coaching Layer | Complete |
 
@@ -182,4 +182,4 @@ Every v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for p
 
 ---
 *Requirements defined: 2026-08-23*
-*Last updated: 2026-08-30 after phase 4 plan 04-08 (VOL-01..03, DQ-01, DQ-02 marked complete)*
+*Last updated: 2026-09-02 at v1.0 milestone close — all 39 v1 requirements confirmed shipped (Phases 1-7 complete); traceability table and checkboxes reconciled after being last synced through Phase 4 only (2026-08-30). HEVY-01/02/05/06/07/08/09 and NORM-02 spot-verified directly against code during milestone close.*

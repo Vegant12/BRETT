@@ -60,12 +60,25 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| v1 = backend-first (blueprint Phases 1-5), iOS/HealthKit pushed to milestone 2 | No Apple Developer account yet; backend+Hevy+MCP alone already delivers real Claude coaching value | — Pending |
+| v1 = backend-first (blueprint Phases 1-5), iOS/HealthKit pushed to milestone 2 | No Apple Developer account yet; backend+Hevy+MCP alone already delivers real Claude coaching value | ✓ Good — v1.0 shipped exactly as scoped (Phases 1-7); Core Value observed working end-to-end in Phase 7 before any HealthKit work started |
 | ~~MCP auth = bearer token for v1, not OAuth~~ | Matches blueprint's private-development guidance; simpler to ship, revisit for broader production use | **Superseded 2026-08-29 by the row below.** Overturned, not confirmed: a Claude custom connector cannot authenticate with a static bearer at all. The assumption was never that bearer auth was insecure — it was that the *client* would accept it, and it does not |
 | MCP connector auth = OAuth 2.1 via WorkOS AuthKit (managed IdP), with BRETT as a resource server only | Verified end-to-end on 2026-08-29, not chosen on paper. Claude Desktop completed the AuthKit consent flow and called `fitness_ping` successfully at the first attempt. **Claude identified itself via CIMD** (Anthropic's hosted client metadata document), which the tenant's discovery document predicted by advertising `client_id_metadata_document_supported: true` together with `"none"` in `token_endpoint_auth_methods_supported`; **DCR remains enabled and is the untested fallback**. The MCP SDK never issues tokens — it validates WorkOS-issued RS256 JWTs against the tenant JWKS and enforces `iss`/`aud`/`exp`, with `aud` pinned to the Resource Indicator to prevent cross-server token replay | **Decided 2026-08-29.** Evidence: `.planning/phases/02-deploy-connector-auth-spike/02-DEPLOY-LOG.md`. The static bearer is **not** retired: it remains the Claude Code CLI path (D-01, proven in plan 02-05) and the rollback for a WorkOS outage — `MCP_AUTH_MODE=static` in `deploy/cloud-run.env.yaml` plus a redeploy, a one-value config change and never a code change |
-| Repo layout = flat at BRETT repo root, no `fitness-platform/` nesting | Project already lives at the root of this repo | — Pending |
+| Repo layout = flat at BRETT repo root, no `fitness-platform/` nesting | Project already lives at the root of this repo | ✓ Good — held flat through all 7 phases, no nesting introduced |
 | ~~Deploy target = Render~~ | Account already provisioned; blueprint recommends it; architecture stays portable | — Superseded 2026-08-27 by the row below |
-| Deploy target = Google Cloud Run + Neon Postgres + Google Secret Manager | The original Cloud Run rejection (cost parity with a paid always-on tier, plus Cloud SQL provisioning surface) was re-presented on 2026-08-27 and the user chose to switch anyway. Neon replaces Cloud SQL, so the service needs only outbound egress and zero code change — `Settings.async_database_url` already translates the libpq DSN | — Pending Phase 2 |
+| Deploy target = Google Cloud Run + Neon Postgres + Google Secret Manager | The original Cloud Run rejection (cost parity with a paid always-on tier, plus Cloud SQL provisioning surface) was re-presented on 2026-08-27 and the user chose to switch anyway. Neon replaces Cloud SQL, so the service needs only outbound egress and zero code change — `Settings.async_database_url` already translates the libpq DSN | ✓ Good — live in production through Phase 7: real Neon PITR backup/restore drill (byte-identical across all 9 tables), a real `MCP_AUTH_SECRET` rotation, and a 6-hourly Cloud Run Job sync, with zero incidents |
+
+## Current State
+
+**Shipped: v1.0 MVP (2026-09-02).** All 39 v1 requirements complete across 7 phases (65 plans, 151 tasks, ~34k LOC in `backend/`). The full Hevy → PostgreSQL → analytics → MCP → Claude loop is live in production on Google Cloud Run: idempotent Hevy sync runs 6-hourly, the analytics layer is deterministic and fully tested (687 tests), thirteen read-only MCP tools are deployed behind WorkOS AuthKit OAuth with live rate limiting, and a real Claude Project answers real training questions from real synced data. See `.planning/milestones/v1.0-ROADMAP.md` and `.planning/milestones/v1.0-REQUIREMENTS.md` for full milestone detail, and `.planning/MILESTONES.md` for the shipped summary.
+
+## Next Milestone Goals
+
+Not yet formally scoped — run `/gsd-new-milestone` to define v1.1/v2 requirements. Candidate directions surfaced during v1.0:
+
+- **Resolve the three ambiguous Active items** (below) at the requirements-definition stage rather than carrying them forward again: body-measurement manual entry, nutrition manual entry, and freshness surfacing — each may already be satisfied by Hevy auto-sync and the DQ-01/DQ-02 envelope and should be explicitly validated or moved to Out of Scope.
+- **Milestone 2 (HealthKit)**: iOS app + Apple Health sync (steps, sleep, HRV, resting HR, workouts) — blocked on an Apple Developer account, which does not exist yet.
+- **v1.x analytics enhancements** already captured in the archived v1.0 requirements' "v2 Requirements" section (volume landmark bands, muscle balance ratios, RPE-derived stimulus quality, exercise substitution grouping, routine adherence, session density trends) — candidates for a lighter v1.1 before the full HealthKit milestone.
+- **Nutrition auto-import** (`NUTR-01`) — deferred provider integration, manual entry only so far.
 
 ## Evolution
 
@@ -85,4 +98,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-01 — Phase 7: Production Hardening & Coaching Layer complete (final phase of v1 milestone)*
+*Last updated: 2026-09-02 after v1.0 milestone*

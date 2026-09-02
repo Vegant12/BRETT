@@ -1,275 +1,38 @@
 # Roadmap: BRETT
 
-## Overview
+## Milestones
 
-BRETT starts as an empty repo and ends as a live, authenticated remote MCP server that Claude can query to coach body recomposition from real data. The path: stand up the FastAPI/PostgreSQL foundation with correct timezone and secret handling (Phase 1), then immediately spike the riskiest unknown — whether a real Claude client can authenticate to a Cloud Run-hosted MCP endpoint at all (Phase 2) — before any real functionality is built on that assumption. With the transport proven, Hevy becomes the data source of truth: workouts, exercise templates, and body measurements sync idempotently into normalized tables with a canonical muscle map (Phase 3). Analytics then layer on as pure, testable functions — volume and frequency first, establishing the freshness/uncertainty envelope every answer carries (Phase 4), then progression, records, plateaus, and recomposition status (Phase 5). Only once the computation exists do the read-only MCP tools compose it into compact, budgeted responses (Phase 6). The final phase makes the deployment production-grade — full test coverage, rate limiting, backup/restore, secret rotation — and ships the coaching instructions document that turns the data layer into an actual coach (Phase 7).
+- ✅ **v1.0 MVP** — Phases 1-7 (shipped 2026-09-02)
+
+Full phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 
 ## Phases
 
-**Phase Numbering:**
+<details>
+<summary>✅ v1.0 MVP (Phases 1-7) — SHIPPED 2026-09-02</summary>
 
-- Integer phases (1, 2, 3): Planned milestone work
-- Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
+- [x] Phase 1: Backend Foundation (5/5 plans) — completed 2026-08-23
+- [x] Phase 2: Deploy & Connector Auth Spike (8/8 plans) — completed 2026-08-29
+- [x] Phase 3: Hevy Integration & Normalization (12/12 plans) — completed 2026-08-30
+- [x] Phase 4: Volume & Frequency Analytics (9/9 plans) — completed 2026-08-30
+- [x] Phase 5: Progression, Records & Recomposition Analytics (10/10 plans) — completed 2026-08-31
+- [x] Phase 6: MCP Tools (11/11 plans) — completed 2026-09-01
+- [x] Phase 7: Production Hardening & Coaching Layer (10/10 plans) — completed 2026-09-01
 
-Decimal phases appear between their surrounding integers in numeric order.
+</details>
 
-- [x] **Phase 1: Backend Foundation** - FastAPI app, PostgreSQL, Alembic, configurable timezone, secret-safe logging, health endpoint
-- [x] **Phase 2: Deploy & Connector Auth Spike** - Prove a real Claude client can authenticate to a Cloud Run-hosted MCP endpoint before building on the assumption
-- [x] **Phase 3: Hevy Integration & Normalization** - Idempotent sync of workouts, exercise templates, and body measurements into a canonical muscle-mapped schema
-- [x] **Phase 4: Volume & Frequency Analytics** - Hard-set volume, per-muscle direct/indirect breakdown, training frequency, and the freshness/uncertainty envelope
-- [ ] **Phase 5: Progression, Records & Recomposition Analytics** - Progression trends, plateau detection, PRs, period comparison, weight trend, recomposition verdict
-- [ ] **Phase 6: MCP Tools** - Purpose-built, read-only, budgeted tools composing the analytics layer for Claude
-- [ ] **Phase 7: Production Hardening & Coaching Layer** - Full test coverage, rate limiting, backup/restore, secret rotation, and the coaching instructions document
+### 📋 v1.1 (Planned)
 
-
-
-## Phase Details
-
-
-
-### Phase 1: Backend Foundation
-
-**Goal**: A running FastAPI service backed by a migration-managed PostgreSQL schema, with timezone and secret handling correct from the first line of code
-**Depends on**: Nothing (first phase)
-**Requirements**: FOUND-01, FOUND-02, FOUND-03, FOUND-04, FOUND-05
-**Success Criteria** (what must be TRUE):
-
-1. Hitting the health endpoint on a running instance returns service status plus a live database connectivity check
-2. A fresh database can be built from empty to current schema by running Alembic migrations, and stepped back down, with no manual SQL
-3. Day/week bucketing helpers place a workout timestamped near midnight UTC into the correct Asia/Jakarta local day, with the timezone read from user configuration rather than hard-coded
-4. Every timestamp is stored in UTC and converted only at calculation boundaries — enforced by a test, not by convention
-5. A seeded secret passed through config, logs, and error output never appears in any log line or response
-
-**Plans**: 5 plans
-
-Plans:
-
-- [x] 01-01-PLAN.md — Repo scaffold, uv/tooling, local dev Postgres, typed fail-fast config with SecretStr (FOUND-05)
-- [x] 01-02-PLAN.md — Three-layer secret-redaction logging, FastAPI bootstrap, D-05 sanitized error handler (FOUND-05)
-- [x] 01-03-PLAN.md — SQLAlchemy models, async Alembic migrations + default-user seed, migrated-Postgres test infra (FOUND-02, FOUND-04)
-- [x] 01-04-PLAN.md — Timezone bucketing helpers and UTC-storage enforcement tests (FOUND-03, FOUND-04)
-- [x] 01-05-PLAN.md — Lifespan-managed engine, open GET /health with live DB check, README (FOUND-01)
-
-
-
-### Phase 2: Deploy & Connector Auth Spike
-
-**Goal**: Resolve the project's single highest-uncertainty question — whether and how a real Claude client can authenticate to a remote MCP server — while it is still cheap to change the answer
-**Depends on**: Phase 1
-**Requirements**: MCP-01, MCP-04, DEPLOY-01, DEPLOY-02
-**Success Criteria** (what must be TRUE):
-
-1. The service is live on Google Cloud Run over HTTPS, backed by Neon Postgres, with every credential supplied from Google Secret Manager and nothing committed to the repo
-2. A Claude custom connector pointed at the deployed `/mcp` endpoint discovers a throwaway tool and successfully calls it from an actual Claude client (Desktop/Web/Mobile), not just a local test client
-3. An unauthenticated request to the MCP endpoint is rejected and an authenticated one succeeds, verified against the deployed URL
-4. The auth mechanism that actually works — static bearer header or a minimal OAuth 2.1 resource-server shim — is chosen and recorded in PROJECT.md Key Decisions, confirming or explicitly overturning the "bearer token, not OAuth" decision
-
-**Plans**: 8 plans
-
-Plans (listed in execution order):
-
-- [x] 02-01-PLAN.md — mcp==2.0.0 pin, MCP_* settings fields, test env seeding (MCP-01, MCP-04, DEPLOY-01)
-- [x] 02-02-PLAN.md — backend/app/mcp package: lifespan context, static bearer verifier, fitness_ping, MCPServer wiring (MCP-01, MCP-04)
-- [x] 02-03-PLAN.md — render.yaml blueprint + static test binding it to Settings (DEPLOY-01) — deliverable superseded by 02-08 after the 2026-08-27 Cloud Run pivot
-- [x] 02-04-PLAN.md — FastAPI mount at / + full local HTTP verification suite (MCP-01, MCP-04)
-- [x] 02-08-PLAN.md — Cloud Run deploy script + env-vars file + Procfile + .gcloudignore + 12-assertion drift test; Render artifacts deleted; docs retargeted (DEPLOY-01)
-- [x] 02-05-PLAN.md — GCP project + Neon provisioning, gcloud run deploy, deployed Auth Verification Matrix, D-01 CLI proof (DEPLOY-01, MCP-01, MCP-04)
-- [x] 02-06-PLAN.md — WorkOS AuthKit project checkpoint + JWKS token verifier (MCP-04, DEPLOY-02)
-- [x] 02-07-PLAN.md — authkit cutover, Cloud Run --min=1 warm instance, Claude connector round-trip, decision recorded (DEPLOY-02, MCP-04, DEPLOY-01)
-
-*Plan 02-08 was inserted on 2026-08-27 when the deploy target moved from Render to Google Cloud Run (revised D-06). It must run before 02-05, which deploys using the script 02-08 creates. Remaining execution order: 02-08 → 02-05 → 02-06 → 02-07.*
-
-### Phase 3: Hevy Integration & Normalization
-
-**Goal**: PostgreSQL becomes the trustworthy source of truth for all Hevy data — workouts, exercise templates, and body measurements — normalized to a canonical muscle taxonomy
-**Depends on**: Phase 1 (Phase 2 runs in parallel-safe isolation; no dependency)
-**Requirements**: HEVY-01, HEVY-02, HEVY-03, HEVY-04, HEVY-05, HEVY-06, HEVY-07, HEVY-08, HEVY-09, NORM-01, NORM-02, NORM-03
-**Success Criteria** (what must be TRUE):
-
-1. A full historical sync pulls the entire Hevy workout history into Postgres with enough fidelity to reconstruct any workout — exercises, sets, set types, weights, reps — and an incremental sync afterwards picks up only what changed
-2. Running sync repeatedly, in any order, produces no duplicate workouts, exercises, or sets; a workout deleted in Hevy disappears locally without disturbing any other record
-3. An injected mid-sync failure (network drop, malformed page, rate limit) leaves all previously-synced data intact and the sync resumable from where it left off
-4. Every synced exercise resolves to canonical muscle groups with direct/indirect distinction and a front/side/rear deltoid split, and a manual override changes the effective mapping while the original source mapping stays visible for audit
-5. Each data source reports a readable `last_synced_at`, and all Hevy request/response code lives only under `backend/app/integrations/hevy/`
-
-**Plans**: 12 plans
-
-Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
-
-- [x] 03-01-PLAN.md — Wave 1: dependency/packaging fixes (httpx2 to runtime, tenacity, pytest-httpx2), `api-key` on the log deny-list, canned Hevy fixtures + conftest loader (HEVY-08)
-- [x] 03-02-PLAN.md — Wave 1: workouts / workout_exercises / workout_sets models + migration 0003 + live-schema tests (HEVY-03, HEVY-04)
-- [x] 03-03-PLAN.md — Wave 1: 19-group canonical muscle taxonomy, Hevy 20-value translation, curated deltoid/oblique split (NORM-01, NORM-03)
-- [x] 03-04-PLAN.md — Wave 2: exercise_templates / exercise_muscles / overrides / body_measurements / sync_state + migration 0004 + sync-state repository (HEVY-06, HEVY-07, HEVY-09, NORM-02, NORM-03)
-- [x] 03-05-PLAN.md — Wave 2: HevyClient — errors, wire schemas, per-endpoint page sizes, tenacity retry policy, HEVY-05 isolation test (HEVY-01, HEVY-02, HEVY-05..08)
-- [x] 03-06-PLAN.md — Wave 3: idempotent workout persistence + full sync with per-page commit, checkpoint resume and SAVEPOINT quarantine (HEVY-01, HEVY-03, HEVY-08, HEVY-09)
-- [x] 03-07-PLAN.md — Wave 3: exercise-template sync + effective muscle-mapping resolver with auditable override (HEVY-06, HEVY-09, NORM-01, NORM-02, NORM-03)
-- [x] 03-08-PLAN.md — Wave 3: body-measurement sync keyed on the calendar date, with the 404 page terminator (HEVY-07, HEVY-09)
-- [x] 03-09-PLAN.md — Wave 4: incremental event sync — frozen-cursor drain, oldest-first apply, deletion propagation (HEVY-02, HEVY-04, HEVY-09)
-- [x] 03-10-PLAN.md — Wave 5: HevySyncService facade, `python -m app.cli sync-hevy`, end-to-end mock-Hevy test (HEVY-01, HEVY-02, HEVY-05, HEVY-09)
-- [x] 03-11-PLAN.md — Wave 6 (checkpoints): live Hevy Pro sync; record real rate limits, page ordering, dumbbell semantics and measurement units (HEVY-01, HEVY-02, HEVY-07, HEVY-09)
-- [x] 03-12-PLAN.md — Wave 7: close the curation gap against the real exercise inventory + `mapping-gaps` command (HEVY-06, NORM-01, NORM-02, NORM-03)
-
-*Plan 03-01 is this phase's Wave 0: it moves* `httpx2` *from the dev group into runtime dependencies (a bare* `uv sync` *in Cloud Run would otherwise ship an image that ImportErrors on first sync), adds* `api-key` *to* `DENY_KEYS`*, and commits the canned Hevy fixtures every later plan mocks against.*
-
-### Phase 4: Volume & Frequency Analytics
-
-**Goal**: The system can answer "how much work am I doing, and which muscles is it reaching?" from stored data, with honest metadata attached to every answer
-**Depends on**: Phase 3
-**Requirements**: VOL-01, VOL-02, VOL-03, DQ-01, DQ-02
-**Success Criteria** (what must be TRUE):
-
-1. Weekly volume returns hard sets and reps for every Hevy exercise type, with tonnage reported only where the modality supports it, and warm-up sets excluded from every figure
-2. Per-muscle-group weekly volume breaks out direct versus indirect sets using the configurable weighting, making "which muscles are undertrained" answerable
-3. Training frequency per muscle group and per exercise reports sessions per week over a requested window
-4. Every analytics response carries freshness metadata (when the underlying data was last synced) and coverage/uncertainty metadata (sessions in window, insufficient-data flag)
-5. All calculations are verified against golden fixture workouts covering warm-ups, dropsets, supersets, and bodyweight exercises
-
-**Plans**: 9 plans
-
-Plans (4 waves; same-wave plans have zero file overlap and run in parallel):
-
-- [x] 04-01-PLAN.md — Wave 1: `local_range_bounds` / `snap_local_week_range` / `local_week_spine` in `core/time.py`, plus the stale `exercise_type` comment fix (VOL-01, VOL-02, VOL-03)
-- [x] 04-02-PLAN.md — Wave 1: `app/analytics/` package, all ten Pydantic return types, and the static boundary test (VOL-01..03, DQ-01, DQ-02)
-- [x] 04-03-PLAN.md — Wave 1: `golden_workout` flush-and-rollback builder fixture and its self-test (VOL-01..03, DQ-01, DQ-02)
-- [x] 04-04-PLAN.md — Wave 2: `analytics/metadata.py` — per-resource freshness, D-06 coverage block, D-05 threshold (DQ-01, DQ-02)
-- [x] 04-05-PLAN.md — Wave 2: `analytics/rollup.py` — window resolution, the one SQL aggregate, the pure muscle folds (VOL-01, VOL-02, VOL-03)
-- [x] 04-06-PLAN.md — Wave 3: `get_weekly_volume` (VOL-01) with golden-fixture tests for warm-ups, dropsets, modality, zero-load, supersets and week bucketing (VOL-01, DQ-01, DQ-02)
-- [x] 04-07-PLAN.md — Wave 3: `analytics/frequency.py` — `get_training_frequency` with session de-duplication and exact quantized rates (VOL-03, DQ-01, DQ-02)
-- [x] 04-09-PLAN.md — Wave 3: `test_analytics_rollup.py` — window guards and pure folds in the fast suite, the SQL aggregate against real Postgres (VOL-01, VOL-02, VOL-03)
-- [x] 04-08-PLAN.md — Wave 4: `get_muscle_group_volume` (VOL-02) with the override test that proves the resolver is used (VOL-02, DQ-01, DQ-02)
-
-*Plan 04-09 is numbered after 04-08 but runs a wave earlier: it was split out of 04-05 to keep that implementation plan inside its context budget, and it touches only* `test_analytics_rollup.py`*, so it runs in parallel with 04-06 and 04-07. 04-08 is wave 4 solely because it appends to* `volume.py` *and* `test_analytics_volume.py`*, which 04-06 creates in wave 3.*
-
-*This phase adds **zero** dependencies to* `pyproject.toml` *and creates **no** migration. A proposed dependency or schema change is a signal the design drifted from CLAUDE.md's "SQL aggregates + plain Python".*
-
-### Phase 5: Progression, Records & Recomposition Analytics
-
-**Goal**: The system returns verdicts, not just numbers — whether a lift is progressing, whether it has plateaued, what the records are, and where body recomposition stands
-**Depends on**: Phase 4
-**Requirements**: PROG-01, PROG-02, PROG-03, PROG-04, CMP-01, BODY-01, BODY-02
-**Success Criteria** (what must be TRUE):
-
-1. Exercise progression returns a weight/reps/sets time series, with an estimated 1RM only where the exercise modality and rep range make it meaningful and an explicit null-plus-reason otherwise
-2. Each tracked exercise receives a trend verdict — improving, stable, declining, or unclear — derived from multiple sessions, and plateau detection reports the window and threshold it used alongside the result
-3. Personal records (max weight, max reps at a weight, estimated-1RM, volume, rep PR) are detected with their dates and exclude warm-up sets
-4. Two time periods can be compared with values normalized per week, so unequal-length windows do not produce misleading deltas
-5. Body weight trend (7/14/30-day rolling averages, weekly rate of change) and a recomposition status verdict are produced from synced measurements, degrading cleanly to insufficient-data and framed as decision support rather than a medical claim
-
-**Plans**: TBD
-
-### Phase 6: MCP Tools
-
-**Goal**: Claude can reach every analytic through purpose-built, read-only tools that return compact structured answers instead of raw data
-**Depends on**: Phase 2, Phase 5
-**Requirements**: MCP-02, MCP-03, MCP-05, MCP-06
-**Success Criteria** (what must be TRUE):
-
-1. Claude can call read-only tools covering recent workouts, training summary, weekly volume, muscle-group volume, exercise progression, personal records, plateaus, training frequency, body-weight trend, recomposition status, and period comparison
-2. A single `fitness_get_training_summary` call returns a composed picture of training state without Claude needing to chain several tools
-3. Every tool response is compact structured JSON within an enforced size cap — no raw table access, no unbounded result sets, no arithmetic pushed onto the model
-4. No tool can write, modify, or delete any data; every tool is annotated read-only and a write attempt has no surface to reach
-5. No tool response or log line contains an API key, database credential, or internal token, verified by test
-
-**Plans**: 11 plans
-
-Plans (5 waves; same-wave plans have zero file overlap and run in parallel):
-
-- [x] 06-01-PLAN.md — Wave 1: `DEFAULT_USER_ID` promoted to `app/config.py`; `mcp/tools/_common.py` (read-only session, Monday-anchored `weeks` window, name lookup, `@safe_tool`, ten cap constants); fast window tests (MCP-02, MCP-03, MCP-05, MCP-06)
-- [x] 06-02-PLAN.md — Wave 1: `mcp/tools/schemas.py` — `_McpModel` plus the twelve tool response wrappers, the workout projections, the muscle rollup and the training-summary shape (MCP-02, MCP-03, MCP-06)
-- [x] 06-03-PLAN.md — Wave 1: `hard_set_predicates` made public; read-only `db/repositories/workouts.py`; `committed_history` / `worst_case_history` conftest fixtures (MCP-02, MCP-03, MCP-05)
-- [x] 06-04-PLAN.md — Wave 2: `fitness_get_recent_workouts`, `fitness_get_workout` (MCP-02, MCP-03, MCP-05, MCP-06)
-- [x] 06-05-PLAN.md — Wave 2: `roll_up_muscles` plus `fitness_get_weekly_volume`, `fitness_get_muscle_group_volume`, `fitness_get_training_frequency` (MCP-02, MCP-03, MCP-05, MCP-06)
-- [x] 06-06-PLAN.md — Wave 2: `fitness_get_exercise_progression`, `fitness_get_plateaus`, `fitness_get_personal_records` with the D-01/D-02 name resolution (MCP-02, MCP-03, MCP-05, MCP-06)
-- [x] 06-07-PLAN.md — Wave 2: `fitness_compare_periods` (explicit dates, D-06) and the two anchored-on-today body tools (D-07) (MCP-02, MCP-03, MCP-05, MCP-06)
-- [x] 06-08-PLAN.md — Wave 3: `fitness_get_training_summary` — the one-call composed picture (MCP-02, MCP-03, MCP-05, MCP-06)
-- [x] 06-09-PLAN.md — Wave 4: register all twelve tools with `ToolAnnotations(read_only_hint=True)`; `test_mcp_tool_schemas.py`; `test_mcp_isolation.py` static guards (MCP-02, MCP-03, MCP-05, MCP-06)
-- [x] 06-10-PLAN.md — Wave 5: `test_mcp_tool_budget.py` (D-13 byte budgets on the full `CallToolResult`) and `test_mcp_readonly.py` (PostgreSQL refuses the write) (MCP-03, MCP-05)
-- [x] 06-11-PLAN.md — Wave 5: per-tool integration coverage, D-02 disambiguation, composed-summary proof, and the DSN-leak test parametrized over all thirteen tools (MCP-02, MCP-06)
-
-*This phase adds **zero** dependencies and creates **no** migration — it composes shipped Phase 4/5 analytics. Two facts drive the plan shape. First, `MuscleGroupVolumeResult` over a 52-week window measures 128 KB structured / ~348 KB on the wire, so `fitness_get_muscle_group_volume` rolls up to 19 rows over the window (Open Question 1, resolved by the user in favour of option (a)); the reshape is documented at the model that performs it and is the ONE exception to "compose, don't reshape". Second, `mcp 2.0.0` returns any escaping exception's `str()` to Claude verbatim and structlog never sees that channel, so `@safe_tool` is mandatory on all twelve tools and is enforced statically as well as behaviourally.*
-
-### Phase 7: Production Hardening & Coaching Layer
-
-**Goal**: The deployment is production-grade and Claude actually coaches — the end-to-end Hevy → Postgres → analytics → MCP → Claude path works against real data
-**Depends on**: Phase 6
-**Requirements**: DEPLOY-03, COACH-01
-**Success Criteria** (what must be TRUE):
-
-1. An automated test suite covering Hevy sync (auth, pagination, incremental events, duplicate prevention, deletions, failures), analytics against known workouts, and MCP tool schemas/auth/output structure runs green, including an end-to-end mock-Hevy-to-MCP integration test
-2. The deployed connector serves the real tool set with finalized auth and rate limiting applied ahead of handler work; unauthenticated and over-limit requests are rejected without leaking detail
-3. A database backup restores into a fresh instance with no data loss, and a secret can be rotated without breaking the live connector
-4. The coaching system-prompt/instructions document exists, and with it loaded Claude answers "Am I progressing?" and "Which muscles are undertrained?" from real synced data, correctly flagging stale or sparse data when present
-
-**Plans**: 10 plans
-
-Plans (7 waves; same-wave plans have zero file overlap and run in parallel):
-
-- [x] 07-01-PLAN.md — Wave 1: `RATE_LIMIT_*` Settings fields + env-file keys, `backend/app/middleware.py` pure-ASGI token bucket, fast bucket tests (DEPLOY-03)
-- [x] 07-02-PLAN.md — Wave 1: `test_full_chain_end_to_end.py` (blueprint §43 composition test) + the wrong-type / missing-required parameter gaps (DEPLOY-03)
-- [x] 07-03-PLAN.md — Wave 1: `docs/coaching-instructions.md` (D-05..D-08), `MCPServer(instructions=…)`, `test_coaching_doc.py` drift guard (COACH-01)
-- [x] 07-04-PLAN.md — Wave 1: D-10 sync-job artifacts — `deploy-sync-job.sh`, `create-sync-schedule.sh`, `sync-job.env.yaml`, `test_sync_job_deploy.py`, README correction (DEPLOY-03)
-- [x] 07-05-PLAN.md — Wave 2: register `RateLimitMiddleware` ahead of routing + the over-HTTP 429 / exemption / before-auth tests (DEPLOY-03)
-- [x] 07-06-PLAN.md — Wave 3: redeploy Cloud Run with the 13-tool set and the limiter; 8-row anonymous matrix + Claude client round-trip; `07-DEPLOY-RECORD.md` (DEPLOY-03)
-- [x] 07-07-PLAN.md — Wave 4: credential gate, create `brett-hevy-api-key`, deploy the Cloud Run Job, create the 6-hourly Scheduler trigger; `docs/runbook-sync-schedule.md` (DEPLOY-03, D-10)
-- [x] 07-08-PLAN.md — Wave 5: `scripts/verify-restore.sql` + coverage guard, Neon branch-from-timestamp drill, `docs/runbook-backup-restore.md` (DEPLOY-03, D-01/D-02)
-- [x] 07-09-PLAN.md — Wave 6: rotate `MCP_AUTH_SECRET` for real (flip to static, old-401/new-200 with 13 tools, flip back, disable old version); `docs/runbook-secret-rotation.md` (DEPLOY-03, D-03/D-04)
-- [x] 07-10-PLAN.md — Wave 7: D-09 coaching UAT in a real Claude Project; `07-COACH-VERIFICATION.md` (COACH-01)
-
-*Four largely independent tracks. The four wave-1 plans and 07-05 are autonomous code; 07-06
-through 07-10 are deliberately SERIALIZED live-infrastructure plans, because they mutate the same
-production service and a concurrent redeploy, rotation or restore drill would muddy each other's
-evidence. Two research findings shape the order: the live revision `brett-00005-gcx` predates
-Phase 6 and serves only `fitness_ping`, so the redeploy (07-06) is a prerequisite for everything
-after it; and `MCP_AUTH_MODE: "authkit"` means `StaticTokenVerifier` is never constructed, so
-D-04's rotation verification is not executable without a temporary mode flip and a mandatory,
-verified flip-back (07-09). This phase adds **zero** dependencies and creates **no** migration.*
+Not yet scoped. Run `/gsd-new-milestone` to start.
 
 ## Progress
 
-**Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
-
-
-| Phase                                             | Plans Complete | Status      | Completed |
-| ------------------------------------------------- | -------------- | ----------- | --------- |
-| 1. Backend Foundation                             | 0/5            | Planned     | -         |
-| 2. Deploy & Connector Auth Spike                  | 4/8            | Executing   | -         |
-| 3. Hevy Integration & Normalization               | 0/12           | Planned     | -         |
-| 4. Volume & Frequency Analytics                   | 0/9            | Planned     | -         |
-| 5. Progression, Records & Recomposition Analytics | 0/TBD          | Not started | -         |
-| 6. MCP Tools                                      | 0/11           | Planned     | -         |
-| 7. Production Hardening & Coaching Layer          | 0/10           | Planned     | -         |
-
-
-
-
-## Coverage
-
-All 39 v1 requirements are mapped to exactly one phase. See REQUIREMENTS.md Traceability.
-
-
-| Phase     | Requirements                          | Count  |
-| --------- | ------------------------------------- | ------ |
-| 1         | FOUND-01..05                          | 5      |
-| 2         | MCP-01, MCP-04, DEPLOY-01, DEPLOY-02  | 4      |
-| 3         | HEVY-01..09, NORM-01..03              | 12     |
-| 4         | VOL-01..03, DQ-01, DQ-02              | 5      |
-| 5         | PROG-01..04, CMP-01, BODY-01, BODY-02 | 7      |
-| 6         | MCP-02, MCP-03, MCP-05, MCP-06        | 4      |
-| 7         | DEPLOY-03, COACH-01                   | 2      |
-| **Total** |                                       | **39** |
-
-
-
-
-## Notes
-
-- **Phase 2 is a spike, deliberately placed before the real work.** All four researchers independently found that PROJECT.md's "MCP auth = bearer token" decision may not be implementable through Claude's custom-connector UI. Resolving it now costs hours; discovering it after Phases 3-6 are built costs an auth-layer rewrite. Phase 2 ships a throwaway tool — its value is the answer, not the code.
-- **Exercise-template sync and the muscle map live in Phase 3, not later.** Per-muscle analytics structurally cannot start without them, so they are prerequisites of Phase 4, not a Phase 4 concern.
-- **Hevy body measurements are synced in Phase 3 rather than entered manually.** The Hevy client already exists at that point and `/v1/body_measurements` is real, which unlocks weight trend and recomposition status in v1 without waiting for HealthKit.
-- **Phase 4 establishes the freshness/uncertainty envelope** that Phase 5 analytics and Phase 6 tools both inherit — it is a shared contract created once, not retrofitted per metric.
-- **No UI phase.** v1 is backend and MCP only; there is no frontend surface in this milestone.
-
----
-
-*Roadmap created: 2026-08-23*
+| Phase | Milestone | Plans Complete | Status   | Completed  |
+| ----- | --------- | --------------- | -------- | ---------- |
+| 1. Backend Foundation | v1.0 | 5/5 | Complete | 2026-08-23 |
+| 2. Deploy & Connector Auth Spike | v1.0 | 8/8 | Complete | 2026-08-29 |
+| 3. Hevy Integration & Normalization | v1.0 | 12/12 | Complete | 2026-08-30 |
+| 4. Volume & Frequency Analytics | v1.0 | 9/9 | Complete | 2026-08-30 |
+| 5. Progression, Records & Recomposition Analytics | v1.0 | 10/10 | Complete | 2026-08-31 |
+| 6. MCP Tools | v1.0 | 11/11 | Complete | 2026-09-01 |
+| 7. Production Hardening & Coaching Layer | v1.0 | 10/10 | Complete | 2026-09-01 |
