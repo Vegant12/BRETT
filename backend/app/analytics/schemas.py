@@ -354,6 +354,17 @@ class PlateauResult(_AnalyticsModel):
     ``min_elapsed_days`` are D-06's two floors; ``lookback_start`` / ``lookback_end`` echo D-19's
     bounded window back. PROG-03's requirement text demands the window and threshold be returned
     ALONGSIDE the result, so all six are fields.
+
+    ``last_max_weight_kg`` is the most recent IN-WINDOW training day's best set weight (D-07:
+    ``series[-1].best_weight_kg`` after the existing ascending-by-local_day sort) -- the
+    literal last weight lifted, not necessarily the last plateau-streak-QUALIFYING session; a
+    deload or high-rep week can break streak membership while still being real, recent
+    training. ``None`` means the most recent day's selected set had no weight recorded (a
+    bodyweight or duration-only exercise), never a literal ``Decimal("0")`` standing in for a
+    real observation. It plays NO role in computing ``plateaued``, ``threshold_percent``, or
+    any other field on this model -- estimated-1RM alone continues to classify. Distinct from
+    ``PersonalRecordType.MAX_WEIGHT`` (``fitness_get_personal_records``), which answers "what
+    is the heaviest you have EVER lifted"; this field answers "what did you lift MOST RECENTLY".
     """
 
     exercise_template_external_id: str
@@ -369,6 +380,7 @@ class PlateauResult(_AnalyticsModel):
     min_elapsed_days: int
     lookback_start: dt.date
     lookback_end: dt.date
+    last_max_weight_kg: Decimal | None
 
 
 class PlateauReport(_AnalyticsModel):

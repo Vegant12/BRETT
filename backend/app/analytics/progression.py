@@ -760,6 +760,13 @@ async def get_plateaus(
                 min_elapsed_days=PLATEAU_MIN_ELAPSED_DAYS,
                 lookback_start=lookback_start,
                 lookback_end=lookback_end,
+                # D-07: the literal last weight lifted inside the window, not the streak-consistent
+                # day. `series` is already ascending by local_day (the sort above `in_window` is
+                # built from) and is guaranteed non-empty -- `in_window` only ever gains entries via
+                # `.setdefault(...).append(...)`. `series[-1].best_weight_kg` is `None` exactly when
+                # D-08 requires it to be (a bodyweight/duration-only day's selected set has no
+                # weight): no extra guard needed.
+                last_max_weight_kg=series[-1].best_weight_kg,
             )
         )
 
