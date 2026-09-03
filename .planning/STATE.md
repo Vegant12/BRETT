@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-09-02)
 
 ## Current Position
 
-Phase: 09 (historical-apple-health-backfill) — EXECUTING
-Plan: 1 of 7
-Status: Executing Phase 09
-Last activity: 2026-09-03 -- Phase 09 execution started
+Phase: 09 (historical-apple-health-backfill) — EXECUTION COMPLETE
+Plan: 7 of 7
+Status: Phase 09 execution complete. Next step is verification.
+Last activity: 2026-09-03 -- Phase 09 production backfill run verified against all four success criteria
 
 Progress: [██████████] 100% (v2.0) — 8 of 8 plans complete
 
@@ -86,6 +86,12 @@ None yet.
 - **Resolved 2026-09-03:** Phase 8 plan 08-08 Task 3 completed. A real Health Auto Export run landed all 12 metrics live; a repeat run proved idempotency (23 rows / 23 samples unchanged). HEALTH-06 and NUTR-02 are now complete. RESEARCH Assumption A1 closed as **MOOT** (not confirmed, not refuted): the user's native Health app confirms Hevy is not currently writing `active_energy` to HealthKit at all, despite a Hevy workout existing on the exported day — consistent with D-01's note that Hevy's body-mass write-back "stops in May 2025", suggesting Hevy stopped writing to HealthKit generally around then. `_HEVY_SOURCE_ALIASES` was left unchanged (no live spelling was observed to add); the exclusion predicate remains necessary for Phase 9's `export.xml` historical backfill, which covers the pre-2025 period when Hevy demonstrably did write to HealthKit. **New open item:** if Hevy ever resumes HealthKit write-back, the exclusion predicate's string-matching is still formally unverified against a live payload — worth a periodic check, not urgent.
 - **New (2026-09-03):** During Task 3, the live production database was found one migration behind deployed code (`alembic current` == `0004`, code needed `0005` for `health_daily_metrics`) — `scripts/deploy-cloud-run.sh` has no migration step, and this is the **second** occurrence of the exact failure mode already documented in `docs/runbook-sync-schedule.md`. Fixed live with the user's confirmation (`alembic upgrade head` against production). Recommend a structural fix (pre-deploy migration step, or an enforced `alembic current` vs `alembic heads` pre-flight check) before Phase 9 deploys its own migration and repeats this a third time.
 - **Resolved 2026-09-03:** `docs/health-auto-export-setup.md` originally described the Daily-aggregation setting as an "Aggregation interval" dropdown; the user's HAE build (9.1.1) actually exposes it as a boolean **"Aggregate Data"** toggle, discovered when the doc's wrong wording sent them looking for a setting that doesn't exist. Corrected throughout the doc (§1, §3, §6, §7, §9) in the same session.
+- **Resolved 2026-09-03:** RESEARCH Assumption **A2** (backfill/webhook day overlap) — confirmed zero overlapping days against production: the `export.xml` history ends 2026-08-26 and the live webhook feed begins 2026-09-02. Success criterion #3 ("no metric-day holds two rows for the same `source_name`") is therefore proven in production vacuously, not by an actual overlap; the overlapping-day case itself is proven mechanically by `backend/tests/test_backfill_idempotency.py`'s container tests.
+- **Resolved 2026-09-03:** RESEARCH Assumption **A3** (device not renamed between research and the run) — confirmed: the production duplicate-metric-day query returned zero rows, the observable form of the backfill and webhook agreeing on `source_name` for the same device. `test_source_name_matches_device_capture` now pins it, so a future rename fails the fast suite instead of silently producing two rows per metric-day.
+- **Open (accepted, documented):** `sample_count` semantics diverge between the backfill (raw sample count, >1 for 91.7% of rows) and the webhook (always 1). A falling `sample_count` on a backfilled day is a false positive for the Pitfall N-2 batch-split detector. Documented in `docs/health-auto-export-setup.md` §7. No day existed to actually exercise it during the production run (zero overlap, per A2), so it remains open rather than closed.
+- **Open (decision, not an oversight):** `Gymverse` (2 records) and `Zing` (1 record) also wrote `ActiveEnergyBurned` into HealthKit and were **deliberately ingested**. HEALTH-08 names Hevy specifically, and its rationale — "BRETT already holds this data at higher fidelity" — is true of Hevy and false of these two, whose workouts BRETT does not hold at all. Widening `_HEVY_SOURCE_ALIASES` would have broken the constant's documented meaning and its Phase 8 tests.
+- **New (2026-09-03):** During the plan 09-07 production run, the post-write verification queries were first run against the wrong `DATABASE_URL` (not the Neon connection string bound to the deployed service, held in Google Secret Manager as `brett-database-url`) and showed a stale before-state even though the `--write` command itself had logged success. This is the **third** occurrence this milestone of an operator's shell pointing somewhere other than the intended production target (the first two were the `alembic current`/`heads` migration-gap incidents above and in `docs/runbook-sync-schedule.md`). Resolved by retrieving the confirmed value with `gcloud secrets versions access latest --secret="brett-database-url"` and re-running the full sequence; the write is idempotent by natural key, so repeating it cost nothing. The structural fix — a pre-deploy migration step in `scripts/deploy-cloud-run.sh`, or a documented single source of truth for the production `DATABASE_URL` that the operator retrieves the same way every time — is still not done.
+- **Resolved 2026-09-03:** Phase 9 (historical Apple Health backfill, HEALTH-10) executed and production-verified. 8,077 rows of Apple Health activity and nutrition history (2022-03-10 → 2026-08-26) landed in production alongside the live webhook feed; all four ROADMAP success criteria confirmed against the real database. See `docs/health-auto-export-setup.md` §9's "2026-09-03 — historical backfill, production run" entry for the full record.
 
 ## Deferred Items
 
@@ -98,6 +104,6 @@ Items acknowledged and deferred at v1.0 milestone close on 2026-09-02:
 
 ## Session Continuity
 
-Last session: 2026-09-03T03:46:24.931Z
-Stopped at: Phase 9 context gathered
-Resume: /gsd-discuss-phase 9 or /gsd-plan-phase 9
+Last session: 2026-09-03T11:20:11.922Z
+Stopped at: Phase 9 execution complete — production backfill run verified
+Resume: phase verification (goal-backward check against ROADMAP success criteria)

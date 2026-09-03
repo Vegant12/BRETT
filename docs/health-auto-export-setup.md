@@ -640,3 +640,112 @@ pre-flight had no `cd backend` (alembic exits `No 'script_location' key found in
 from the repo root), and the `ExportDate` probe read `head -c 400` when a real HealthKit export
 puts a ~7 KB inline DTD ahead of that element — it begins at byte 7426 in this file. Both would
 have read as a broken export rather than a mistyped command.
+
+### 2026-09-03 — historical backfill, production run
+
+Command shape (the placeholder never held a real value in any pasted output):
+
+```bash
+DATABASE_URL='<production-database-url>' uv run alembic current
+DATABASE_URL='<production-database-url>' uv run alembic heads
+
+ DATABASE_URL='<production-database-url>' PYTHONPATH=backend \
+   uv run python -m app.cli backfill-apple-health export.xml --dry-run
+
+ time DATABASE_URL='<production-database-url>' PYTHONPATH=backend \
+   uv run python -m app.cli backfill-apple-health export.xml --write
+```
+
+Pre-flight: `alembic current` and `alembic heads` both printed **0005** — matched, no migration gap
+this time.
+
+**Operational note, worth carrying forward.** The first pass at this run's post-write verification
+queries came back showing the stale before-state (`count: 23`, range `2026-09-02 .. 2026-09-03`)
+immediately after a `--write` that had logged `rows_written=8077` with no errors. The cause was not
+the write — it was an incorrect `DATABASE_URL` used for the *verification* queries: not the actual
+Neon connection string bound to the deployed service (held in Google Secret Manager as
+`brett-database-url`, per `scripts/deploy-cloud-run.sh`). This is the same family of risk as the
+migration-gap incidents already logged in `.planning/STATE.md` — the operator's shell pointed
+somewhere other than intended — but on the read side rather than the write side, and on the third
+occasion this class of mistake has cost time in this phase. Retrieving the confirmed value with
+`gcloud secrets versions access latest --secret="brett-database-url"` and re-running the full
+sequence against it (pre-flight, dry run, write) resolved it. The write is idempotent by natural
+key, so repeating it was safe and cost nothing.
+
+Before state (query 1, against the confirmed production URL, prior to the write that landed):
+
+```
+apple_health | 23 | 2026-09-02 | 2026-09-03
+```
+
+The real run's printed summary, as printed (wall clock: `hevy_cli_started` 11:19:12.863Z →
+`hevy_cli_stopped` 11:20:11.922Z, ≈59 s):
+
+```
+Apple Health backfill — WROTE TO THE DATABASE
+file: export.xml
+records: 438649 total = 230395 in-scope + 208175 unrecognized + 79 body-mass + 0 malformed
+datapoints: 230395 seen, 209 dropped (209 Hevy-sourced)
+skipped elements: Workout=224 ActivitySummary=1443
+multi-point days: 7403 (normal for raw HealthKit samples; warning suppressed)
+date range: 2022-03-10 .. 2026-08-26
+rows by metric:
+  active_energy                  1501
+  basal_energy_burned            1592
+  carbohydrates                    53
+  dietary_energy                   54
+  dietary_sugar                    54
+  fiber                            53
+  flights_climbed                1211
+  protein                          54
+  sodium                           53
+  step_count                     1699
+  total_fat                        54
+  walking_running_distance       1699
+rows: 8077 written, 0 skipped
+freshness: activity, nutrition advanced
+```
+
+(The 34-line `unrecognized types` breakdown is identical to the dry-run entry above and is not
+repeated here — same file, same figures, both invocations of `format_summary` byte-identical on
+that section.)
+
+After state (query 1, re-run against the same confirmed URL):
+
+```
+apple_health | 8100 | 2022-03-10 | 2026-09-03
+```
+
+The four verification queries, mapped onto the four ROADMAP success criteria:
+
+1. **`rows: 8077 written, 0 skipped`, date range `2022-03-10 .. 2026-08-26`** — the printed summary
+   matches every pinned figure from the §9 dry-run entry exactly, over the real 191 MB file —
+   **success criterion #1**.
+2. **Before/after state**: count moved from 23 to **8,100** (23 + 8,077), and the date range
+   widened from `2026-09-02 .. 2026-09-03` (webhook only) to `2022-03-10 .. 2026-09-03` — 4.5 years
+   of history is queryable in production alongside the live webhook feed — **success criterion #2**.
+3. **Duplicate metric-day check** (`GROUP BY metric, source_name, local_day HAVING count(*) > 1`):
+   **zero rows** — **success criterion #3**. As RESEARCH Assumption A2 anticipated, the export ends
+   2026-08-26 and the webhook feed begins 2026-09-02, so this held vacuously rather than by
+   overlap; the day-overlap case itself is proven by `test_backfill_idempotency.py`'s container
+   test, and this query confirms nothing violated it live.
+4. **Hevy-sourced row check** (`WHERE lower(source_name) = 'hevy'`): **`0`** — **success criterion
+   #4**.
+
+`sync_state` freshness: `activity` and `nutrition` both report `idle` with the identical
+`last_synced_at: 2026-09-03 11:20:08.304243+00` — one `utc_now()` for the whole run, confirming
+`complete_sync` advanced both resources together in the same transaction as the rows (T-09-34).
+
+**Assumption A2 (backfill/webhook day overlap): confirmed zero overlapping days**, empirically, on
+production data — the export's last day (2026-08-26) precedes the webhook's first day
+(2026-09-02).
+
+**Assumption A3 (device name unchanged): confirmed.** Query 3 [duplicate check] returning zero rows
+is the observable form of the backfill and webhook writing the same `source_name` for the same
+device. `test_source_name_matches_device_capture` pins this so a future device rename fails the
+fast suite instead of silently producing two rows per metric-day.
+
+No day existed to exercise the §7 `sample_count` divergence (raw sample count from the backfill vs.
+always-1 from the webhook) live, since no day is shared. It remains an open, documented, accepted
+divergence — not something this run closed — and will surface the first time a backfilled day and
+a webhook day for the same metric genuinely coincide.
