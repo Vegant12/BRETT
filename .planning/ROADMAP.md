@@ -84,7 +84,7 @@ Notes for planning:
 **Plans**: 7 plans in 6 waves
 
 Plans:
-- [ ] 09-01-PLAN.md — synthetic `export_sample.xml` fixture, XML loader, `realfile` marker, and the stale `normalize.py` Pitfall N-3 docstring correction (wave 1)
+- [x] 09-01-PLAN.md — synthetic `export_sample.xml` fixture, XML loader, `realfile` marker, and the stale `normalize.py` Pitfall N-3 docstring correction (wave 1)
 - [ ] 09-02-PLAN.md — `backfill.py` read half: 12-entry `HK_TO_WIRE`, streaming `iterparse` with the two-clear discipline, per-record skip-not-abort, literal `HAEPayload` handoff (wave 2)
 - [ ] 09-03-PLAN.md — write half: chunked `ON CONFLICT` upsert with a per-row SAVEPOINT fallback, dry-run gate, freshness bookkeeping, and the SC#3 container proof (wave 3)
 - [ ] 09-04-PLAN.md — `backfill-apple-health` CLI verb with a required `--dry-run`/`--write` choice, and its parser/bootstrap guards (wave 4)
