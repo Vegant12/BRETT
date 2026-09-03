@@ -107,7 +107,10 @@ Notes for planning:
   3. Recomposition status's progression input still comes from the e1RM-based trend, unchanged — confirmed, not merely assumed, against live data.
   4. A bodyweight or duration-only exercise reports "we could not tell" for the new field (None + reason) rather than a weight of 0 kg presented as a real observation.
   5. `ExerciseTrend` and `fitness_get_exercise_progression` are unchanged — the latter already returns `best_weight_kg` per day, which is why "am I progressing on bench press?" needs no code change to answer with the last weight lifted.
-**Plans**: TBD
+**Plans**: 1 plan in 1 wave
+
+Plans:
+- [ ] 10-01-PLAN.md — `PlateauResult.last_max_weight_kg` (schemas.py + get_plateaus), D-07/D-08 regression tests, MCP passthrough proof, budget check, and STR-01/STR-03/STR-04 regression confirmation (wave 1)
 
 Notes for planning:
 - **Scope correction, 2026-09-03 discuss-phase session, two rounds:** (1) this phase was originally scoped (see PITFALLS #10/#11/#12, ARCHITECTURE.md §3) as max-weight becoming the primary classifier with e1RM as secondary — a new classifier, re-derived dead-bands, changed insufficient-data semantics. The user reversed this: e1RM keeps classifying, unchanged; max weight is a labelled display-only field. (2) Follow-up investigation during the same session found `ExerciseTrend` (PROG-02) is never exposed through any MCP tool — it only feeds the aggregate whole-account signal in `fitness_get_recomposition_status`/`fitness_get_training_summary` — and `fitness_get_exercise_progression` already returns `best_weight_kg` per day. So the only response with an actual gap (e1RM-derived numbers only, no real weight figure) is `PlateauResult`. The user confirmed: scope narrows to `PlateauResult` only. Do **not** add a field to `ExerciseTrend` — it would be dead weight nothing reads.
