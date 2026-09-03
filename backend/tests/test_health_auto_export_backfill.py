@@ -10,6 +10,10 @@ Two layers, in this order:
    streaming `scan_export` walk over that fixture. Still pure and container-free: `backfill.py`
    touches no database, so every case here runs in the FAST suite and fails on the commit that
    breaks it rather than after a deploy.
+3. **The D-06 summary block** (plan 09-03) -- `format_summary` is a pure function over a
+   `BackfillSummary`, so what the operator sees on stdout is asserted here rather than by
+   capturing a CLI run. The rule it must obey is Phase 8's logging rule, applied to stdout: a
+   summary line carrying a calorie total is the same leak as a log line carrying one (T-09-14).
 
 What deliberately lives ELSEWHERE:
 
@@ -33,6 +37,7 @@ import inspect
 import io
 import json
 import logging
+import re
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -48,6 +53,8 @@ from app.integrations.health_auto_export.backfill import (
     _HK_BODY_MASS,
     HK_TO_WIRE,
     BackfillScan,
+    _summarize,
+    format_summary,
     scan_export,
 )
 from app.integrations.health_auto_export.errors import HAEExportFileError
@@ -615,3 +622,95 @@ def test_unreadable_file_raises_a_detail_free_error(tmp_path: Path) -> None:
         assert str(path) not in message
         assert path.name not in message
         assert "line" not in message.lower()
+
+
+# ---------------------------------------------------------------------------
+# T-09-14: the D-06 summary block. The logging rule extends to stdout.
+# ---------------------------------------------------------------------------
+
+# Distinctive quantities the fixture carries on a `Record`: the `step_count` aggregate and the
+# `basal_energy_burned` value (1500), the live webhook's own step figure (6500), `sodium` (2300),
+# the Hevy `active_energy` record and its `WorkoutStatistics` twin (228), and
+# `walking_running_distance` (4.5). Any of these appearing in the rendered block means a measured
+# quantity reached the operator's terminal.
+FIXTURE_QUANTITIES = ("1500", "6500", "2300", "228", "4.5")
+
+# Every numeric token in the rendered block, so a quantity is matched as a NUMBER and not as a
+# substring. Without this, `2300` would be "found" inside a hypothetical count of 12300 and, worse,
+# a real leak of `228` would be missed if it were ever rendered as `228.0`.
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _rendered_summary(*, dry_run: bool) -> str:
+    """The D-06 block for the fixture, through the SAME derivation `run_backfill` uses.
+
+    `_summarize` rather than a hand-built `BackfillSummary`: a summary assembled by the test
+    could satisfy every assertion here while the one the CLI actually prints differed.
+    """
+    scan = _scan()
+    summary = _summarize(
+        scan,
+        dry_run=dry_run,
+        rows_written=len(scan.normalized.rows),
+        rows_skipped=0,
+        resources_advanced=() if dry_run else ("activity", "nutrition"),
+    )
+    return "\n".join(format_summary(summary, path=_fixture_path()))
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_summary_prints_no_measured_quantity(dry_run: bool) -> None:
+    """T-09-14. `cli.py` PRINTS this block, and stdout is a sink like any other.
+
+    Phase 8's rule -- a metric name, a unit, a date, a source name, a count and an exception class
+    name are reportable; a measured quantity never is -- was written about log lines, but the data
+    does not care which file descriptor it leaves by. A summary line carrying a calorie total is
+    the same leak as a log line carrying one, and it is MORE likely to be pasted somewhere.
+
+    Both modes are checked because they take different branches through `format_summary`, and a
+    quantity leaking on only one of them would still be a leak.
+    """
+    text = _rendered_summary(dry_run=dry_run)
+    numbers = set(_NUMBER.findall(text))
+
+    leaked = sorted(quantity for quantity in FIXTURE_QUANTITIES if quantity in numbers)
+    assert not leaked, (
+        f"T-09-14 violated: the summary block printed a measured quantity from the fixture "
+        f"({leaked}). D-06 reports counts, metric names, HealthKit identifiers, units and dates "
+        f"-- never a value"
+    )
+
+    # The block must still be USEFUL. Without these, the assertion above passes on empty output.
+    assert "step_count" in text, "a metric NAME is reportable and the block must carry them"
+    assert "date range:" in text
+    assert "rows by metric:" in text
+
+
+def test_summary_reports_the_record_accounting_identity() -> None:
+    """The `records:` line spells out its own arithmetic, and the arithmetic must hold.
+
+    Reported as `total = in-scope + unrecognized + body-mass + malformed` rather than as a bare
+    total so an operator can add four numbers and see that every `<Record>` in the file is
+    accounted for. A record the tag walk silently dropped would otherwise leave a summary that is
+    internally consistent and quietly wrong, with the missing days surfacing only as a gap in a
+    trend months later.
+
+    Parsed back OUT of the rendered text, not read off `BackfillScan`: the point is that the line
+    the operator reads is the one that reconciles.
+    """
+    text = _rendered_summary(dry_run=True)
+    line = next(line for line in text.splitlines() if line.startswith("records:"))
+    reported_total, separator, addends = line.partition(" = ")
+
+    assert separator, f"the records line no longer states its identity: {line!r}"
+    total = int(_NUMBER.findall(reported_total)[0])
+    parts = [int(part) for part in _NUMBER.findall(addends)]
+
+    assert len(parts) == 4, (
+        f"expected four addends (in-scope, unrecognized, body-mass, malformed), got {parts}"
+    )
+    assert total == EXPECTED_RECORDS
+    assert sum(parts) == total, (
+        f"the summary's own arithmetic does not reconcile: {' + '.join(str(p) for p in parts)} "
+        f"= {sum(parts)}, reported total {total}. A record is being counted twice or not at all"
+    )
