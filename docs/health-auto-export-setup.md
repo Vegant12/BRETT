@@ -281,7 +281,9 @@ laptop; only the rows do.
 
    ```bash
    ls -l export.xml
-   head -c 400 export.xml | grep -o 'ExportDate value="[^"]*"'
+   # 20000 bytes, not 400: HealthKit writes a ~7 KB inline DTD ahead of the ExportDate
+   # element, so a small window finds nothing and looks like a malformed file.
+   head -c 20000 export.xml | grep -o 'ExportDate value="[^"]*"'
    ```
 
 2. **Confirm the production database is not behind the deployed code.** This has been the failure
