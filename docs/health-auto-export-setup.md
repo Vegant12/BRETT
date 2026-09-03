@@ -512,3 +512,131 @@ covers the period when Hevy demonstrably did write to HealthKit (52/79 body-mass
 workouts — see §5), so the predicate is still load-bearing there. If Hevy ever resumes writing to
 HealthKit, treat the first live delivery on a training day as the real test of this filter, not
 this checkpoint.
+
+### 2026-09-03 — historical backfill dry run
+
+The §10 procedure, rehearsed end to end before the real write. **This run used the LOCAL
+`docker compose` database, not production.** A dry run writes nothing, but it does read
+`users.timezone`, and there is no reason to point a rehearsal at production when the local
+database holds the same seeded user. D-02's inline production override belongs to the real run
+only, so no `DATABASE_URL` appears anywhere below — the command read the repo's gitignored `.env`,
+which points at `localhost`.
+
+Pre-flight, in order:
+
+```bash
+docker compose up -d
+cd backend && uv run alembic upgrade head    # 0004 -> 0005 (health daily metrics)
+uv run alembic current                        # 0005 (head)
+uv run alembic heads                          # 0005 (head)  -- they match
+```
+
+The file, confirmed to be the one the pinned figures describe:
+
+```
+ls -l export.xml                 ->  191257897 bytes, mtime Aug 26 10:09
+ExportDate value="2026-08-26 10:09:33 +0700"
+```
+
+The command:
+
+```bash
+PYTHONPATH=backend uv run python -m app.cli backfill-apple-health export.xml --dry-run
+```
+
+Exit code **0**. Wall clock **4.41 s** for the whole command, of which ~2.6 s was the streaming
+parse (`hevy_cli_started` 06:00:22.011Z → `health_backfill_parsed` 06:00:24.634Z). Run twice; the
+two summary blocks are byte-identical.
+
+The summary block, as printed:
+
+```
+Apple Health backfill — DRY RUN (nothing written)
+file: export.xml
+records: 438649 total = 230395 in-scope + 208175 unrecognized + 79 body-mass + 0 malformed
+datapoints: 230395 seen, 209 dropped (209 Hevy-sourced)
+skipped elements: Workout=224 ActivitySummary=1443
+multi-point days: 7403 (normal for raw HealthKit samples; warning suppressed)
+date range: 2022-03-10 .. 2026-08-26
+rows by metric:
+  active_energy                  1501
+  basal_energy_burned            1592
+  carbohydrates                    53
+  dietary_energy                   54
+  dietary_sugar                    54
+  fiber                            53
+  flights_climbed                1211
+  protein                          54
+  sodium                           53
+  step_count                     1699
+  total_fat                        54
+  walking_running_distance       1699
+unrecognized types (34):
+  HKQuantityTypeIdentifierWalkingSpeed                       57364
+  HKQuantityTypeIdentifierWalkingStepLength                  57363
+  HKQuantityTypeIdentifierWalkingDoubleSupportPercentage     50031
+  HKQuantityTypeIdentifierWalkingAsymmetryPercentage         30218
+  HKQuantityTypeIdentifierHeadphoneAudioExposure             10077
+  HKCategoryTypeIdentifierSleepAnalysis                       2411
+  HKQuantityTypeIdentifierAppleWalkingSteadiness               219
+  HKQuantityTypeIdentifierDietaryFatSaturated                   63
+  HKQuantityTypeIdentifierDietaryPotassium                      63
+  HKQuantityTypeIdentifierDietaryIron                           58
+  HKQuantityTypeIdentifierDietaryCalcium                        56
+  HKQuantityTypeIdentifierDietaryMagnesium                      54
+  HKQuantityTypeIdentifierDietaryVitaminC                       53
+  HKQuantityTypeIdentifierDietaryCholesterol                    50
+  HKQuantityTypeIdentifierDietaryPhosphorus                     49
+  HKQuantityTypeIdentifierHeight                                 8
+  HKQuantityTypeIdentifierWaistCircumference                     8
+  HKCategoryTypeIdentifierHeadphoneAudioExposureEvent            2
+  HKQuantityTypeIdentifierDietaryCopper                          2
+  HKQuantityTypeIdentifierDietaryFatPolyunsaturated              2
+  HKQuantityTypeIdentifierDietaryFolate                          2
+  HKQuantityTypeIdentifierDietaryManganese                       2
+  HKQuantityTypeIdentifierDietaryNiacin                          2
+  HKQuantityTypeIdentifierDietaryPantothenicAcid                 2
+  HKQuantityTypeIdentifierDietaryRiboflavin                      2
+  HKQuantityTypeIdentifierDietarySelenium                        2
+  HKQuantityTypeIdentifierDietaryVitaminB6                       2
+  HKQuantityTypeIdentifierDietaryVitaminE                        2
+  HKQuantityTypeIdentifierDietaryVitaminK                        2
+  HKQuantityTypeIdentifierDietaryZinc                            2
+  HKDataTypeSleepDurationGoal                                    1
+  HKQuantityTypeIdentifierDietaryBiotin                          1
+  HKQuantityTypeIdentifierDietaryFatMonounsaturated              1
+  HKQuantityTypeIdentifierDietaryThiamin                         1
+rows: 8077 would write, 0 skipped
+freshness: not advanced (dry run)
+```
+
+Nothing else from the run is reproduced here. The block above carries counts, metric names,
+HealthKit identifiers and dates and no measured quantity — which is a property of
+`format_summary`, asserted by `test_summary_prints_no_measured_quantity`, not a judgement call
+made while pasting it.
+
+**All eleven expected figures matched**, and so did all twelve per-metric row counts: 438,649
+records total; the four addends 230,395 / 208,175 / 79 / 0 summing to it exactly; 230,395
+datapoints seen; 209 dropped and all 209 Hevy-sourced; Workout=224; ActivitySummary=1,443; 7,403
+multi-point days; 8,077 rows would-write; 0 rows skipped; date range 2022-03-10 .. 2026-08-26;
+freshness not advanced. No figure was edited to match — nothing needed to be.
+
+**The overlap answer (RESEARCH Assumption A2): zero days overlap.** The dry run's `date range:`
+ends **2026-08-26**. The first `local_day` the live webhook delivered is **2026-09-02** (the
+entry above this one). 2026-08-26 < 2026-09-02, so no day is covered by both paths, the §7
+`sample_count` false positive will not fire on this run, and success criterion #3 ("no metric-day
+holds two rows for the same `source_name`") is satisfied **vacuously** on production data. That is
+worth stating plainly rather than reading as a pass: the criterion is genuinely proven by
+`test_backfill_idempotency.py`'s container test, not by this run. Re-confirm the production side
+empirically with §10's pre-flight step 3 before the real write — this rehearsal read the local
+database, which holds no webhook rows at all.
+
+**The dry run wrote zero rows.** `SELECT count(*) FROM health_daily_metrics` on the local database
+read **0 before and 0 after** both invocations, and `sync_state` still holds **no** row for
+`provider = 'apple_health'` — freshness was not advanced either.
+
+Two defects in §10 were found by following it and are fixed in the committed version: the alembic
+pre-flight had no `cd backend` (alembic exits `No 'script_location' key found in configuration`
+from the repo root), and the `ExportDate` probe read `head -c 400` when a real HealthKit export
+puts a ~7 KB inline DTD ahead of that element — it begins at byte 7426 in this file. Both would
+have read as a broken export rather than a mistyped command.
