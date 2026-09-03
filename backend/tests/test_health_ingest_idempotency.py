@@ -335,6 +335,58 @@ async def test_an_overlapping_window_replaces_rather_than_accumulates(
 
 
 @pytest.mark.integration
+async def test_updated_at_advances_on_a_resync(engine: AsyncEngine) -> None:
+    """The audit timestamp must track the LATEST delivery, not the row's creation.
+
+    SQLAlchemy's `onupdate=func.now()` fires for an ORM/Core `update()` statement but is NOT
+    injected into a raw `INSERT ... ON CONFLICT DO UPDATE SET` clause -- the exact pitfall
+    `app.db.repositories.sync_state`'s `_upsert` helper documents and works around. If
+    `upsert_health_metric` ever drops `updated_at` from its `set_` dict again, this is the test
+    that catches it: `created_at` must stay fixed while `updated_at` strictly advances across
+    two deliveries separated by real wall-clock time.
+    """
+    maker = _maker(engine)
+    payload = _payload("activity_and_nutrition")
+    try:
+        await ingest_payload(maker, user_id=DEFAULT_USER_ID, payload=payload)
+        async with maker() as session:
+            row = (
+                await session.execute(
+                    sa.select(HealthDailyMetric.created_at, HealthDailyMetric.updated_at).where(
+                        HealthDailyMetric.user_id == DEFAULT_USER_ID,
+                        HealthDailyMetric.metric == "step_count",
+                        HealthDailyMetric.source_name == "iPhone",
+                    )
+                )
+            ).one()
+            created_before, updated_before = row
+
+        await ingest_payload(maker, user_id=DEFAULT_USER_ID, payload=payload)
+        async with maker() as session:
+            row = (
+                await session.execute(
+                    sa.select(HealthDailyMetric.created_at, HealthDailyMetric.updated_at).where(
+                        HealthDailyMetric.user_id == DEFAULT_USER_ID,
+                        HealthDailyMetric.metric == "step_count",
+                        HealthDailyMetric.source_name == "iPhone",
+                    )
+                )
+            ).one()
+            created_after, updated_after = row
+
+        assert created_after == created_before, (
+            "created_at must never move on a re-sync -- ON CONFLICT DO UPDATE must not touch it"
+        )
+        assert updated_after > updated_before, (
+            "updated_at did not advance on a re-sync -- the ON CONFLICT DO UPDATE clause is "
+            "missing 'updated_at': func.now(), so the audit trail freezes at row creation and "
+            "silently stops reflecting when this row last actually changed"
+        )
+    finally:
+        await _cleanup(maker)
+
+
+@pytest.mark.integration
 async def test_nutrition_metrics_survive_an_identical_redelivery_unchanged(
     engine: AsyncEngine,
 ) -> None:

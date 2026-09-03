@@ -58,7 +58,7 @@ from types import MappingProxyType
 
 import structlog
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -152,6 +152,12 @@ async def upsert_health_metric(
     # re-sync is the cheapest available detector for a batch-split data loss, and it only works
     # if the column tracks the latest delivery.
     #
+    # `updated_at` is set explicitly, mirroring `app.db.repositories.sync_state`'s `_upsert`:
+    # SQLAlchemy's `onupdate=func.now()` fires for an `update()` statement but is NOT injected
+    # into an `ON CONFLICT DO UPDATE SET` clause, so omitting it here would freeze the audit
+    # timestamp at row creation across every re-sync -- exactly the pitfall that helper already
+    # guards against.
+    #
     # Bound to the constraint BY NAME rather than by column list, mirroring
     # `app.db.repositories.sync_state`: if the constraint is ever renamed this raises immediately
     # instead of silently degrading into a duplicate-row insert.
@@ -161,6 +167,7 @@ async def upsert_health_metric(
             "value": statement.excluded.value,
             "units": statement.excluded.units,
             "sample_count": statement.excluded.sample_count,
+            "updated_at": func.now(),
         },
     )
     await session.execute(statement)

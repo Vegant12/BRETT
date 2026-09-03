@@ -45,7 +45,7 @@ The order of the checks is the design
 Nothing leaves here that a caller could not already compute
 -----------------------------------------------------------
 The 401 and 413 bodies can be produced by anyone on the internet, so they carry one key each and
-never say which of the several rejection reasons applied. The 202 body is five integer counts
+never say which of the several rejection reasons applied. The 202 body is four integer counts
 and a status string: a calorie figure is personal health data and must not appear in a response
 the caller is free to log (ASVS V8, T-08-48).
 """
