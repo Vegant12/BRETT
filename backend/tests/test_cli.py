@@ -113,6 +113,67 @@ def test_default_user_id_is_the_seeded_uuid() -> None:
         assert build_parser().parse_args([command]).user_id == SEEDED_USER_ID
 
 
+def test_parser_exposes_backfill_apple_health() -> None:
+    """HEALTH-10 is a first-class verb, not a script somebody pastes into a REPL.
+
+    The path is read back as a `Path` rather than a string because `run_backfill` and
+    `format_summary` both take one, and an `str` reaching them would only fail deep inside the
+    parse -- after the operator has already been told the command started.
+    """
+    parsed = build_parser().parse_args(["backfill-apple-health", "export.xml", "--dry-run"])
+
+    assert parsed.command == "backfill-apple-health"
+    assert parsed.path == Path("export.xml")
+    assert parsed.dry_run is True
+    assert parsed.write is False
+    assert parsed.user_id == SEEDED_USER_ID
+
+    other_user = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
+    overridden = build_parser().parse_args(
+        ["backfill-apple-health", "export.xml", "--write", "--user-id", str(other_user)]
+    )
+    assert overridden.user_id == other_user
+    assert overridden.write is True
+    assert overridden.dry_run is False
+
+
+def test_backfill_requires_an_explicit_mode() -> None:
+    """The mode is a GATE, not a default: neither flag and both flags are equally an error.
+
+    This command writes 4.5 years of history to a production database and has no practical
+    rollback, so a forgotten flag must exit 2 rather than fall through to a silent full write.
+    Both directions matter for the same reason `--full --incremental` does: `--dry-run --write`
+    is a contradiction, and resolving it silently would let an operator believe they rehearsed
+    a run that actually wrote.
+
+    This is the argparse half of D-03. The runtime half -- that `dry_run=True` really touches
+    no row and no `sync_state` timestamp -- is `test_dry_run_writes_nothing` in
+    `test_backfill_idempotency.py`.
+    """
+    for argv in (
+        ["backfill-apple-health", "export.xml"],
+        ["backfill-apple-health", "export.xml", "--dry-run", "--write"],
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            build_parser().parse_args(argv)
+
+        assert excinfo.value.code == 2, argv
+
+
+def test_backfill_takes_the_export_path_positionally() -> None:
+    """No default path. An implicit `export.xml` at the repo root is how the wrong file is read.
+
+    The operator has two exports sitting side by side (`export.xml` and `export_cda.xml`) and
+    the summary's `file:` line is only a confirmation if the name was typed on purpose. A
+    defaulted path would also let a run started in the wrong directory look like a run over an
+    empty file rather than like the mistake it is.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["backfill-apple-health", "--dry-run"])
+
+    assert excinfo.value.code == 2
+
+
 def test_configure_logging_precedes_every_log_call() -> None:
     """T-03-44, asserted against the SOURCE because the runtime cannot show it.
 
@@ -155,4 +216,52 @@ def test_cli_never_formats_an_arbitrary_exception() -> None:
     assert "safe_message" in source, (
         "T-03-45 violated: backend/app/cli.py no longer uses the curated `safe_message` "
         "channel, so a Hevy failure now reaches the operator as a bare class name at best"
+    )
+
+
+def test_cli_does_not_import_hae_wire_vocabulary() -> None:
+    """`cli.py` reaches the backfill through ONE door: `backfill.run_backfill`/`format_summary`.
+
+    This duplicates one half of `test_health_auto_export_isolation.py` on purpose. That file's
+    `rglob` walk proves the boundary holds across the whole app and reports whichever module
+    broke it; this one fails with a message naming the CLI specifically, so the person who
+    reached for `METRIC_REGISTRY` to build a summary line by hand sees why they must not.
+
+    The positive half is the load-bearing one: dropping the `backfill` import entirely would
+    satisfy the two negatives while removing the subcommand.
+    """
+    source = CLI_SOURCE.read_text(encoding="utf-8")
+
+    for forbidden in (
+        "health_auto_export.registry",
+        "health_auto_export.schemas",
+    ):
+        assert forbidden not in source, (
+            f"HEALTH-06 violated: backend/app/cli.py names `{forbidden}`. The metric names and "
+            f"the wire schemas are Health Auto Export's identifiers; the summary block is "
+            f"built by `backfill.format_summary`, where that vocabulary already lives"
+        )
+
+    assert "health_auto_export.backfill" in source, (
+        "backend/app/cli.py no longer imports the backfill entry point, so HEALTH-10 has no "
+        "operator command behind it"
+    )
+
+
+def test_backfill_runner_is_declared_below_the_bootstrap() -> None:
+    """The new runner's position, pinned specifically rather than only in aggregate.
+
+    `test_configure_logging_precedes_every_log_call` already proves that nothing in this file
+    logs or builds an engine above `configure_logging(settings)`. This one names
+    `_run_backfill` because it does BOTH -- `structlog.get_logger()` and `make_engine` on its
+    first two lines -- so moving it above `main`, which reads as a harmless tidy-up, would
+    write the production `DATABASE_URL` into a log line with every redaction layer off
+    (T-09-17).
+    """
+    source = CLI_SOURCE.read_text(encoding="utf-8")
+
+    assert source.index("async def _run_backfill") > source.index("configure_logging(settings)"), (
+        "T-09-17 violated: `_run_backfill` is declared above `configure_logging(settings)`. It "
+        "builds an engine and a logger, so at that position SQLAlchemy's loggers are live "
+        "before the value scrubber has the production DATABASE_URL"
     )
