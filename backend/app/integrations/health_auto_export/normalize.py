@@ -20,21 +20,41 @@ would be up to 88 % Hevy's own estimate of a session BRETT already holds at set-
 
 Pitfall N-3 -- match the APP name, never the device name
 --------------------------------------------------------
-Two source vocabularies exist. The webhook sends ``"iPhone"``; ``export.xml`` says
-``"Vegant\u2019s iPhone"``. The device name is unstable -- this device was renamed mid-history
-(366,339 records under one name, 70,900 under the other) -- and it carries U+2019 RIGHT SINGLE
-QUOTATION MARK rather than an ASCII apostrophe, so any hardcoded device comparison fails
-silently and forever. The app name is what HEALTH-08 actually cares about and it survives
-device renames. Matching is case-folded and whitespace-stripped.
+The two source vocabularies **converged**, and that convergence is load-bearing.
+``tests/fixtures/hae/device_capture.json`` -- live-verified 2026-09-03 against the deployed
+service and the resulting database rows in the same session -- shows the webhook sends
+``"V’s iPhone"`` for all five activity metrics and ``"Foodvisor"`` for all seven nutrition
+metrics: byte-identical, U+2019 included, to the ``sourceName`` values ``export.xml`` carries
+for the current phone.
 
-Assumption A1, STILL OPEN
--------------------------
-That the *webhook* spells Hevy the way ``export.xml``'s ``sourceName`` vocabulary does has been
-verified only against that vocabulary, never against a payload from this phone. Third-party
-captures cannot settle it, because those users do not have Hevy installed.
-``_HEVY_SOURCE_ALIASES`` is a frozenset precisely so plan 08-08's device capture can add a
-spelling on one line. **The warning sign is a filter that never excludes anything** -- which is
-why the exclusion emits a log line rather than happening in silence.
+That byte-identity is not a nicety. ``source_name`` sits **inside** the natural key
+``(user_id, source, metric, source_name, local_day)``, so it is the only reason Phase 9's
+historical backfill and the live webhook produce **one** row per metric-day on a day both
+cover, rather than two. A one-character difference would insert instead of update, silently
+and invisibly. The backfill must therefore pass ``source_name`` through **verbatim** --
+``.strip()`` only, exactly as :func:`_scan_metric` already does -- and must never ASCII-fold,
+normalise or rewrite it.
+
+None of which makes the device name safe to match on. It is still unstable: this phone was
+renamed mid-history (``"Vegant’s iPhone"`` for 366,339 records, ``"V’s iPhone"`` for 70,900),
+and the U+2019 RIGHT SINGLE QUOTATION MARK makes any hardcoded ASCII comparison fail silently
+and forever. The rule stands -- match the APP name, never the device name. The app name is what
+HEALTH-08 actually cares about and it survives device renames. Matching is case-folded and
+whitespace-stripped.
+
+Assumption A1, CLOSED AS MOOT (2026-09-03)
+------------------------------------------
+The assumption was that the *webhook* spells Hevy the way ``export.xml``'s ``sourceName``
+vocabulary does. Plan 08-08's live device capture could neither confirm nor refute it: the
+user's native Health app shows Hevy is not currently writing ``active_energy`` to HealthKit at
+all, so there was no live payload to widen the alias set against. ``_HEVY_SOURCE_ALIASES`` is
+therefore left exactly as it is -- no observed spelling exists to add.
+
+The predicate stays load-bearing regardless. All 209 Hevy ``ActiveEnergyBurned`` records in
+``export.xml`` are pre-2025, from the period when Hevy demonstrably did write to HealthKit --
+and that is precisely the period Phase 9's backfill imports. See ``.planning/STATE.md``'s
+2026-09-03 entry. **The warning sign is a filter that never excludes anything** -- which is why
+the exclusion emits a log line rather than happening in silence.
 
 Decisions locked here
 ---------------------
