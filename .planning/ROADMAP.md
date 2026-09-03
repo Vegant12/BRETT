@@ -81,7 +81,16 @@ Notes for planning:
   2. Activity and nutrition history from 2022-03 through the export date is queryable in BRETT alongside the ongoing webhook feed.
   3. Days covered by both the backfill and the live webhook hold one value per metric per day, not two — running the backfill after the webhook has been live is a no-op on overlapping days.
   4. No Hevy-originated workout or body-mass row from the export enters BRETT.
-**Plans**: TBD
+**Plans**: 7 plans in 6 waves
+
+Plans:
+- [ ] 09-01-PLAN.md — synthetic `export_sample.xml` fixture, XML loader, `realfile` marker, and the stale `normalize.py` Pitfall N-3 docstring correction (wave 1)
+- [ ] 09-02-PLAN.md — `backfill.py` read half: 12-entry `HK_TO_WIRE`, streaming `iterparse` with the two-clear discipline, per-record skip-not-abort, literal `HAEPayload` handoff (wave 2)
+- [ ] 09-03-PLAN.md — write half: chunked `ON CONFLICT` upsert with a per-row SAVEPOINT fallback, dry-run gate, freshness bookkeeping, and the SC#3 container proof (wave 3)
+- [ ] 09-04-PLAN.md — `backfill-apple-health` CLI verb with a required `--dry-run`/`--write` choice, and its parser/bootstrap guards (wave 4)
+- [ ] 09-05-PLAN.md — opt-in `realfile` test pinning the real 191 MB export, plus the `sample_count` false-positive note in the operator doc (wave 3)
+- [ ] 09-06-PLAN.md — §10 backfill runbook, then the rehearsed `--dry-run` against the real file with its figures recorded (wave 5)
+- [ ] 09-07-PLAN.md — the production import (human-gated on the D-02 credential) and the dated verification record (wave 6)
 
 Notes for planning:
 - Streaming `iterparse` with `elem.clear()`; `ElementTree.parse()` builds a 1.5-2 GB DOM and OOMs (PITFALLS #6).
@@ -177,7 +186,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 6. MCP Tools | v1.0 | 11/11 | Complete | 2026-09-01 |
 | 7. Production Hardening & Coaching Layer | v1.0 | 10/10 | Complete | 2026-09-01 |
 | 8. Apple Health & Nutrition Ingest | v2.0 | 8/8 | Complete | 2026-09-03 |
-| 9. Historical Apple Health Backfill | v2.0 | 0/TBD | Not started | - |
+| 9. Historical Apple Health Backfill | v2.0 | 0/7 | Planned | - |
 | 10. Max-Weight Strength Signal | v2.0 | 0/TBD | Not started | - |
 | 11. Body Measurement History | v2.0 | 0/TBD | Not started | - |
 | 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 0/TBD | Not started | - |
