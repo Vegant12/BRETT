@@ -193,7 +193,8 @@ This event exists for one reason: to convert a silent data-loss mode into a visi
 step total that quietly falls after a re-sync is otherwise indistinguishable from a day you walked
 less.
 
-Two related events, both safe to read — none of them carries a measured value:
+Related events, all safe to read — none of them carries a measured value. The four
+`health_backfill_*` events come from the one-time historical import, not from the phone:
 
 | Event | Fields | Read it as |
 |---|---|---|
@@ -203,6 +204,40 @@ Two related events, both safe to read — none of them carries a measured value:
 | `health_ingest_datapoint_dropped` | `metric=` `unit=` `reason=` | One datapoint failed conversion — most often a unit changed in the app's per-metric settings |
 | `health_ingest_unauthorized` | — | A request was rejected. Expected: this endpoint is on the public internet |
 | `health_ingest_payload_too_large` | `declared_bytes=`/`read_bytes=` `cap=` | Over 10 MiB. Narrow the export window |
+| `health_backfill_parsed` | `records_total` `datapoints` `unrecognized_records` `body_mass_skipped` `malformed` `workouts_skipped` `activity_summaries_skipped` | The file was read end to end |
+| `health_backfill_progress` | `rows_written` `rows_total` | The write is alive; one line per 500 rows |
+| `health_backfill_row_skipped` | `metric` `local_day` `source_name` `reason` | One row failed; the rest of the run continued |
+| `health_backfill_completed` | `rows_written` `rows_skipped` `datapoints_seen` `datapoints_dropped` `records_total` `kinds` | The backfill finished |
+
+### After the historical backfill: a falling `sample_count` is expected, once
+
+Phase 9's one-time backfill imports `export.xml` and writes `sample_count` as the number of **raw
+HealthKit samples** aggregated into that metric-day. Raw samples are per-event, not per-day:
+measured on the real export, **7,403 of 8,077 backfilled rows (91.7%)** aggregate more than one
+sample. The webhook writes `sample_count = 1`, because Aggregate Data makes the phone send one
+datapoint per metric per day (confirmed live 2026-09-03, §9).
+
+`health_daily_metrics.sample_count` is documented in the schema as "the cheapest diagnostic for
+Pitfall N-2" — a `sample_count` that **falls** on a re-sync is a batch-split data loss. On a day
+the backfill covered and the webhook later re-delivers, `sample_count` legitimately drops from N
+to 1. That is a **false positive**, and it is expected exactly once per overlapping day.
+
+How to tell the two apart:
+
+| | The backfill false positive | A real batch-split loss |
+|---|---|---|
+| Which day it lands on | On or before the backfill's `ExportDate` | A recent day, inside the live webhook window |
+| What happens to the day alongside it | The value is replaced by a correct daily total | The day's total gets smaller |
+| How often | Once per overlapping day, then never again | Every affected re-sync |
+
+Why this is accepted rather than fixed: `sample_count` is diagnostic-only and feeds no analytics,
+and the alternative — making the backfill write `sample_count = 1` — would be the backfill lying
+about what it actually aggregated, which is worse than a documented false positive. It is recorded
+here so it does not cost a future debugging session.
+
+In practice the overlap is expected to be **zero days**: the export ends 2026-08-26 and the live
+webhook feed starts 2026-09-02, so no day is covered by both paths. Confirm that empirically from
+the backfill's own `--dry-run` summary date range before the real run rather than assuming it.
 
 ---
 
