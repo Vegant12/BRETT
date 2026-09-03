@@ -34,10 +34,10 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 ### Strength Tracking
 
-- [ ] **STR-01**: Progression and plateau trend classification continue to be driven by estimated-1RM, unchanged — no new classifier, no dead-band re-derivation
-- [ ] **STR-02**: `PlateauResult` (`fitness_get_plateaus`) carries the last max-weight-lifted figure as a labelled secondary display field, sourced from the existing `SessionBest.best_weight_kg` fold — Claude can cite it when explaining a plateau without it affecting `plateaued` or any other field. (`ExerciseTrend` is not exposed through any MCP tool and is out of scope; `fitness_get_exercise_progression` already returns `best_weight_kg` per day and needs no change.)
-- [ ] **STR-03**: Estimated-1RM remains the value progression/records responses classify against wherever it's already gated and valid — not removed or displaced from that role
-- [ ] **STR-04**: Recomposition status's progression input continues to reflect the e1RM-based trend, unchanged
+- [x] **STR-01**: Progression and plateau trend classification continue to be driven by estimated-1RM, unchanged — no new classifier, no dead-band re-derivation
+- [x] **STR-02**: `PlateauResult` (`fitness_get_plateaus`) carries the last max-weight-lifted figure as a labelled secondary display field, sourced from the existing `SessionBest.best_weight_kg` fold — Claude can cite it when explaining a plateau without it affecting `plateaued` or any other field. (`ExerciseTrend` is not exposed through any MCP tool and is out of scope; `fitness_get_exercise_progression` already returns `best_weight_kg` per day and needs no change.)
+- [x] **STR-03**: Estimated-1RM remains the value progression/records responses classify against wherever it's already gated and valid — not removed or displaced from that role
+- [x] **STR-04**: Recomposition status's progression input continues to reflect the e1RM-based trend, unchanged
 
 ### Reports
 
@@ -109,10 +109,10 @@ Which phases cover which requirements. Populated during roadmap creation.
 | NUTR-04 | Phase 13 | Pending |
 | NUTR-05 | Phase 8 | Complete |
 | NUTR-06 | Phase 13 | Pending |
-| STR-01 | Phase 10 | Pending |
-| STR-02 | Phase 10 | Pending |
-| STR-03 | Phase 10 | Pending |
-| STR-04 | Phase 10 | Pending |
+| STR-01 | Phase 10 | Complete |
+| STR-02 | Phase 10 | Complete |
+| STR-03 | Phase 10 | Complete |
+| STR-04 | Phase 10 | Complete |
 | RPT-01 | Phase 13 | Pending |
 | RPT-02 | Phase 13 | Pending |
 | RPT-03 | Phase 13 | Pending |
