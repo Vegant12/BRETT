@@ -85,7 +85,7 @@ Notes for planning:
 
 Plans:
 - [x] 09-01-PLAN.md — synthetic `export_sample.xml` fixture, XML loader, `realfile` marker, and the stale `normalize.py` Pitfall N-3 docstring correction (wave 1)
-- [ ] 09-02-PLAN.md — `backfill.py` read half: 12-entry `HK_TO_WIRE`, streaming `iterparse` with the two-clear discipline, per-record skip-not-abort, literal `HAEPayload` handoff (wave 2)
+- [x] 09-02-PLAN.md — `backfill.py` read half: 12-entry `HK_TO_WIRE`, streaming `iterparse` with the two-clear discipline, per-record skip-not-abort, literal `HAEPayload` handoff (wave 2)
 - [ ] 09-03-PLAN.md — write half: chunked `ON CONFLICT` upsert with a per-row SAVEPOINT fallback, dry-run gate, freshness bookkeeping, and the SC#3 container proof (wave 3)
 - [ ] 09-04-PLAN.md — `backfill-apple-health` CLI verb with a required `--dry-run`/`--write` choice, and its parser/bootstrap guards (wave 4)
 - [ ] 09-05-PLAN.md — opt-in `realfile` test pinning the real 191 MB export, plus the `sample_count` false-positive note in the operator doc (wave 3)
