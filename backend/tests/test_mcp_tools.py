@@ -844,6 +844,10 @@ async def test_plateaus_reports_its_window_and_threshold(
         assert row["threshold_percent"] is not None
         assert row["min_sessions"] is not None
         assert row["min_elapsed_days"] is not None
+        assert "last_max_weight_kg" in row, (
+            "PlateauResult gained a new field but fitness_get_plateaus is not forwarding it -- "
+            "Task 1's PlateauResult.last_max_weight_kg must reach the MCP response unchanged"
+        )
 
 
 @pytest.mark.integration
