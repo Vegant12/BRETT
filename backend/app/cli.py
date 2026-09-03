@@ -1,8 +1,10 @@
-"""Command-line entrypoint for Hevy sync.
+"""Command-line entrypoint for Hevy sync and the one-time Apple Health backfill.
 
     PYTHONPATH=backend uv run python -m app.cli sync-hevy
     PYTHONPATH=backend uv run python -m app.cli sync-status
     PYTHONPATH=backend uv run python -m app.cli mapping-gaps
+    DATABASE_URL=<production-url> PYTHONPATH=backend uv run python -m app.cli \\
+        backfill-apple-health export.xml --dry-run
 
 Bootstrap order is load-bearing and is the same order `app/main.py` uses: configuration is
 read first so a misconfigured process dies immediately, then logging is configured -- the
@@ -18,6 +20,14 @@ file, and Python resolves the forward references at call time.
 This is a VERIFICATION and operations trigger, not the production schedule. Phase 7 decides
 how sync actually runs in production (Cloud Run job, scheduler, or otherwise); this phase only
 needs a way to invoke `HevySyncService`.
+
+`backfill-apple-health` is an operator VERB here rather than an HTTP route or a Cloud Run Job,
+and that is a decision (D-01), not an omission. The source is a 191 MB `export.xml` sitting on
+the operator's own machine and Cloud Run caps a request body at 32 MiB, so there is no route
+that could accept it. A Job would clear that ceiling but only by first uploading this person's
+entire gitignored health history to Cloud Storage -- new egress, a new place the data lives at
+rest, and a new thing to delete afterwards -- to run a command exactly once. The file never
+leaves the laptop; only the rows do.
 """
 
 import argparse
@@ -25,6 +35,7 @@ import asyncio
 import sys
 import uuid
 from collections.abc import Sequence
+from pathlib import Path
 
 import structlog
 from sqlalchemy import select
@@ -32,6 +43,8 @@ from sqlalchemy import select
 from app.config import DEFAULT_USER_ID, Settings, get_settings
 from app.db import session as db_session
 from app.db.models.exercise import ExerciseTemplate
+from app.integrations.health_auto_export.backfill import format_summary, run_backfill
+from app.integrations.health_auto_export.errors import HAEError
 from app.integrations.hevy.client import build_hevy_client
 from app.integrations.hevy.errors import HevyError
 from app.integrations.hevy.sync import HevySyncService, SyncMode, resource_status
@@ -67,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="python -m app.cli",
-        description="Trigger and inspect the Hevy sync.",
+        description="Trigger and inspect the Hevy sync, and backfill Apple Health history.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -105,6 +118,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_user_id(gaps)
 
+    backfill = subcommands.add_parser(
+        "backfill-apple-health",
+        help="One-time import of Apple Health history from a local export.xml (HEALTH-10).",
+    )
+    # Positional, and with no default. An implicit `export.xml` at the repo root would make it
+    # possible to import the wrong export without noticing, and the file that is being read is
+    # the one fact an operator must confirm before a write with no practical rollback.
+    backfill.add_argument(
+        "path",
+        type=Path,
+        help="Path to the Apple Health export.xml on this machine.",
+    )
+    # REQUIRED and mutually exclusive, which `sync-hevy`'s optional group is not. This command
+    # writes 4.5 years of history to a production database and has no practical rollback: a
+    # forgotten flag must be an argparse error, never a silent full write. D-03 asks for a
+    # dry-run mode; making the mode explicit on both sides is what makes it a gate rather than
+    # a habit.
+    selected_mode = backfill.add_mutually_exclusive_group(required=True)
+    selected_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse, aggregate and print the full summary. Writes nothing.",
+    )
+    selected_mode.add_argument(
+        "--write",
+        action="store_true",
+        help="Perform the import. Run --dry-run first and read the summary.",
+    )
+    _add_user_id(backfill)
+
     return parser
 
 
@@ -122,6 +165,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_status(settings, args))
     if args.command == "mapping-gaps":
         return asyncio.run(_run_mapping_gaps(settings, args))
+    if args.command == "backfill-apple-health":
+        return asyncio.run(_run_backfill(settings, args))
     return asyncio.run(_run_sync(settings, args))
 
 
@@ -274,6 +319,61 @@ async def _run_mapping_gaps(settings: Settings, args: argparse.Namespace) -> int
     # Exit 0 even with gaps. This is an inspection command, and D-03 makes an unmapped
     # exercise a supported state -- exiting non-zero would turn a curation backlog into a
     # broken pipeline the moment this is ever wired into CI.
+    return 0
+
+
+async def _run_backfill(settings: Settings, args: argparse.Namespace) -> int:
+    """HEALTH-10 as an operator command: export.xml -> the rows the webhook writes.
+
+    `print`, not a log line, for the summary: this is the answer to a question somebody asked
+    (`_run_status`'s reasoning), and D-06 wants one readable block even when the renderer is
+    JSON. The heartbeat during the write IS a log line, from `backfill.py`, because that is a
+    record of what the process did rather than an answer.
+
+    Local-only, like `sync-status` and `mapping-gaps`: it reads a file and a database and never
+    needs `HEVY_API_KEY` (`config.py` declares it `SecretStr | None = None`). D-02 supplies the
+    production `DATABASE_URL` as an inline environment override for one shell session, so no
+    production credential is ever written to disk.
+
+    The summary is rendered by `backfill.format_summary` rather than assembled here: this module
+    may not import HAE's metric registry or wire schemas (enforced by
+    `test_health_auto_export_isolation.py`), and a summary line naming a metric is HAE
+    vocabulary.
+    """
+    log = structlog.get_logger()
+    engine = db_session.make_engine(settings)
+    sessionmaker = db_session.make_sessionmaker(engine)
+    log.info("hevy_cli_started", command="backfill-apple-health", dry_run=args.dry_run)
+    try:
+        summary = await run_backfill(
+            sessionmaker,
+            user_id=args.user_id,
+            path=args.path,
+            dry_run=args.dry_run,
+        )
+    except HAEError as exc:
+        # The same curated channel every Hevy failure uses. `HAEExportFileError` deliberately
+        # carries no path and nothing read out of the file, so this line cannot become a byte
+        # offset into this person's health history.
+        log.error("health_backfill_cli_failed", reason=type(exc).__name__)
+        print(
+            f"Apple Health backfill failed: {exc.safe_message or type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return 1
+    except ValueError as exc:
+        # `_user_timezone`'s "unknown user": a caller error, not a failed import. Routed
+        # through `_safe_detail` for the same reason every other stderr line is -- the message
+        # this codebase constructed, or the class name, and never a rendered exception.
+        log.error("health_backfill_cli_failed", reason=type(exc).__name__)
+        print(f"Apple Health backfill failed: {_safe_detail(exc)}", file=sys.stderr)
+        return 1
+    finally:
+        await engine.dispose()
+        log.info("hevy_cli_stopped", command="backfill-apple-health")
+
+    for line in format_summary(summary, path=args.path):
+        print(line)
     return 0
 
 
