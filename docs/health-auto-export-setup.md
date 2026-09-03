@@ -257,6 +257,169 @@ one bad element is that element.
 
 ---
 
+## 10. The one-time historical backfill (HEALTH-10)
+
+*This section sits ahead of §9 on purpose. §9 is an append-only log that only ever grows at the
+bottom; everything above it is procedure, and this is procedure.*
+
+This runs **once**, maybe twice, ever. It imports the Apple Health history that predates the
+webhook — the file you exported by hand from the Health app — through the same normalizer and the
+same upsert the live webhook uses, so a day covered by both paths holds one value per metric rather
+than two.
+
+It is a **local** command run against the production database, not a deployed job. The source is a
+191 MB file on your own machine; Cloud Run caps a request body at 32 MiB, so no route could accept
+it, and a Cloud Run Job would only clear that ceiling by first uploading your entire gitignored
+health history to Cloud Storage to run a command exactly once (D-01). The file never leaves the
+laptop; only the rows do.
+
+### Before you run it
+
+1. **Confirm the file is where you think it is, and is the export you mean.** There are two exports
+   at the repo root (`export.xml` and `export_cda.xml`), and the path is a positional argument with
+   no default for exactly this reason:
+
+   ```bash
+   ls -l export.xml
+   head -c 400 export.xml | grep -o 'ExportDate value="[^"]*"'
+   ```
+
+2. **Confirm the production database is not behind the deployed code.** This has been the failure
+   mode **twice** (see `docs/runbook-sync-schedule.md`, "Schema drift is not detected before it
+   breaks a run"), and this command writes to `health_daily_metrics`, which migration `0005`
+   created:
+
+   ```bash
+   DATABASE_URL='<production-database-url>' uv run alembic current
+   DATABASE_URL='<production-database-url>' uv run alembic heads
+   # These must match. If they do not:
+   DATABASE_URL='<production-database-url>' uv run alembic upgrade head
+   ```
+
+   `/health` probes `SELECT 1`, which succeeds against any schema, so a database behind head looks
+   perfectly healthy until a query touches a table that does not exist.
+
+3. **Note what is already in the table**, so that afterwards you can tell what the backfill added
+   rather than inferring it:
+
+   ```sql
+   SELECT source, count(*), min(local_day), max(local_day)
+   FROM health_daily_metrics
+   GROUP BY source;
+   ```
+
+### Step 1 — dry run (always)
+
+```bash
+# The production URL is an INLINE override for this one shell session (D-02). Do not create a
+# .env.production and do not export it into your shell profile: a production credential should
+# not outlive the command that needed it. The leading space keeps the line out of shell history
+# in zsh/bash when HIST_IGNORE_SPACE / HISTCONTROL=ignorespace is set.
+ DATABASE_URL='<production-database-url>' PYTHONPATH=backend \
+   uv run python -m app.cli backfill-apple-health export.xml --dry-run
+```
+
+Nothing is written. The command parses and aggregates the whole file, reads `users.timezone`, and
+prints the summary block below.
+
+Check the printed summary against these figures. They were measured against the export dated
+`2026-08-26 10:09:33 +0700` (191,257,897 bytes). A **different** export legitimately produces
+different numbers — re-derive them from the new summary rather than assuming something is broken.
+
+| Line | Expected |
+|---|---|
+| records | 438,649 total = 230,395 in-scope + 208,175 unrecognized + 79 body-mass + 0 malformed |
+| datapoints | 230,395 seen, 209 dropped (209 Hevy-sourced) |
+| skipped elements | Workout=224 ActivitySummary=1,443 |
+| multi-point days | 7,403 |
+| date range | 2022-03-10 .. 2026-08-26 |
+| rows | 8,077 would write, 0 skipped |
+| freshness | not advanced (dry run) |
+
+Rows per metric: `step_count` 1,699 · `walking_running_distance` 1,699 · `basal_energy_burned`
+1,592 · `active_energy` 1,501 · `flights_climbed` 1,211 · `dietary_energy` 54 · `protein` 54 ·
+`total_fat` 54 · `dietary_sugar` 54 · `carbohydrates` 53 · `fiber` 53 · `sodium` 53.
+
+Two lines deserve to be read rather than skimmed:
+
+- **The four numbers on the `records:` line must add up to the total.** That identity is how you
+  know no record was silently dropped by the tag walk. A record that vanishes there leaves a
+  plausible-looking summary and a hole that only surfaces as a gap in a trend months later.
+- **Read the `date range:` line.** If its end date is on or after the first day the webhook
+  delivered, the backfill and the live feed overlap, and the overlapping days will be **replaced**
+  — not duplicated, not summed — by whichever ran last. That is by design; you just want to know it
+  happened, because it is also when §7's `sample_count` false positive appears.
+
+The same figures are asserted mechanically by `backend/tests/test_backfill_real_export.py`
+(`uv run pytest -m realfile`), so a doc that has drifted from the file cannot stay quietly wrong.
+
+### Step 2 — the real run
+
+```bash
+ DATABASE_URL='<production-database-url>' PYTHONPATH=backend \
+   uv run python -m app.cli backfill-apple-health export.xml --write
+```
+
+`--dry-run` and `--write` are mutually exclusive and **one of them is required**. A forgotten flag
+is an argparse error (exit 2) before the environment is even read — never a silent full write.
+
+Expected shape of the run: the parse is a few seconds. The write is the slow part, and its speed is
+round-trip latency to the database, not CPU. A `health_backfill_progress` line appears roughly
+every 500 rows — about 16 lines for a full 8,077-row run. Silence for minutes with no progress line
+means the connection, not the parser.
+
+### Afterwards
+
+```sql
+-- 1. What landed, and over what span.
+SELECT source, count(*) AS rows, min(local_day), max(local_day)
+FROM health_daily_metrics
+GROUP BY source;
+
+-- 2. Success criterion #3: no metric-day may hold two rows for the SAME source_name.
+SELECT metric, source_name, local_day, count(*)
+FROM health_daily_metrics
+GROUP BY 1, 2, 3
+HAVING count(*) > 1;
+-- Expect ZERO rows. Two rows for the same metric-day with DIFFERENT source_name values is
+-- correct and expected (two phones, two nutrition apps); two with the SAME one is the bug.
+
+-- 3. Success criterion #4: no Hevy-sourced row may exist.
+SELECT count(*) FROM health_daily_metrics WHERE lower(source_name) = 'hevy';
+-- Expect 0.
+
+-- 4. Freshness bookkeeping advanced for both resources.
+SELECT resource, status, last_synced_at
+FROM sync_state
+WHERE provider = 'apple_health';
+```
+
+Expect `sample_count` to fall from N to 1 on any day the webhook later re-delivers. That is the
+documented false positive in §7, not data loss.
+
+### If something goes wrong
+
+- **One bad row** is skipped and logged as `health_backfill_row_skipped` (metric, day, source name
+  and the exception's class name — never a value); the run continues. Re-running the command is
+  safe and is a no-op on rows that already landed correctly.
+- **A malformed XML element** is counted as `malformed` on the `records:` line and skipped; the run
+  continues to the end of the file (D-07). Aborting mid-parse on one bad element would throw away
+  4.5 years of otherwise-good history.
+- **An unreadable or non-HealthKit file** exits 1 with `Apple Health backfill failed: Apple Health
+  export file could not be read as a HealthKit export` and writes nothing. The message deliberately
+  names no path and echoes nothing read out of the file.
+- **The whole command is idempotent by construction**: replace semantics on the natural key
+  `(user_id, source, metric, source_name, local_day)`. Running it twice produces the same table.
+
+### Credential hygiene
+
+Every `DATABASE_URL` in this section is the placeholder `<production-database-url>`. Never paste a
+real connection string into this file, into a commit message, or into a chat transcript. `gitleaks`
+runs in pre-commit and will refuse the commit, but the rule is the point, not the hook — a
+transcript is not covered by a pre-commit hook.
+
+---
+
 ## 9. Verification record
 
 ### 2026-09-02 — deployment and endpoint contract
