@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Apple Health, Strength Tracking & Coaching Programs
 status: executing
-stopped_at: Phase 08 all 8 plans complete; running phase-completion verification
-last_updated: "2026-09-03T03:20:00.000Z"
-last_activity: 2026-09-03 -- Phase 08 plan 08-08 Task 3 completed (real device export verified live, production migration gap fixed)
+stopped_at: Phase 08 complete (8/8 plans, verified); ready to start Phase 9
+last_updated: "2026-09-03T03:33:02.150Z"
+last_activity: 2026-09-03 -- Phase 08 verified and marked complete; advanced to Phase 9
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 8
   completed_plans: 8
   percent: 100
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-02)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 08 — apple-health-nutrition-ingest
+**Current focus:** Phase 9 — historical-apple-health-backfill
 
 ## Current Position
 
-Phase: 08 (apple-health-nutrition-ingest) — ALL PLANS COMPLETE, running phase-completion verification
-Plan: 8 of 8 complete
-Status: Executing phase-completion steps (code review, verification, roadmap update)
-Last activity: 2026-09-03 -- 08-08 Task 3 completed live with the user; see Blockers for the outcome
+Phase: 9 (historical-apple-health-backfill) — not yet planned
+Plan: Not started
+Status: Phase 08 verified and complete. Ready to discuss/plan Phase 9
+Last activity: 2026-09-03 -- Phase 08 complete
 
 Progress: [██████████] 100% (v2.0) — 8 of 8 plans complete
 
@@ -36,7 +36,7 @@ Progress: [██████████] 100% (v2.0) — 8 of 8 plans complete
 
 **Velocity (v1.0, for reference):**
 
-- Total plans completed: 65 (v1.0 milestone, all phases)
+- Total plans completed: 73 (v1.0 milestone, all phases)
 - Average duration: —
 - Total execution time: —
 
@@ -45,6 +45,7 @@ Progress: [██████████] 100% (v2.0) — 8 of 8 plans complete
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-07 | 65 | - | - |
+| 08 | 8 | - | - |
 
 **Recent Trend:**
 
@@ -97,6 +98,6 @@ Items acknowledged and deferred at v1.0 milestone close on 2026-09-02:
 
 ## Session Continuity
 
-Last session: 2026-09-02T10:41:20.358Z
-Stopped at: Phase 08 plan 08-08 PAUSED at Task 3 blocking checkpoint (device export)
-Resume file: .planning/phases/08-apple-health-nutrition-ingest/08-08-PLAN.md
+Last session: 2026-09-03T03:33:02.150Z
+Stopped at: Phase 08 complete (8/8 plans, code-reviewed, verified passed)
+Resume: /gsd-discuss-phase 9 or /gsd-plan-phase 9

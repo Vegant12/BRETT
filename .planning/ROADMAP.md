@@ -26,7 +26,7 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 
 **Milestone Goal:** Extend BRETT beyond Hevy-only into a full recomposition coach — ingesting Apple Health activity and nutrition data, tracking strength the way the user actually trains (max weight, not just estimated 1RM), remembering physical progress over time, adapting to the active training program, and answering with concise, report-ready summaries.
 
-- [ ] **Phase 8: Apple Health & Nutrition Ingest** - Authenticated, idempotent, Hevy-filtered webhook receiver landing activity and nutrition data in BRETT
+- [x] **Phase 8: Apple Health & Nutrition Ingest** - Authenticated, idempotent, Hevy-filtered webhook receiver landing activity and nutrition data in BRETT (complete 2026-09-03)
 - [ ] **Phase 9: Historical Apple Health Backfill** - One-time streaming import of 4.5 years of history from the user's `export.xml`
 - [ ] **Phase 10: Max-Weight Strength Signal** - Progression and plateau verdicts driven by heaviest weight lifted, with estimated 1RM retained as a second opinion
 - [ ] **Phase 11: Body Measurement History** - Manual measurement entry, per-field source merging, and trends beyond weight-only
@@ -55,13 +55,15 @@ Plans:
 - [x] 08-05-PLAN.md — normalize: Hevy-source exclusion, unit conversion, whole-payload aggregation (wave 3)
 - [x] 08-06-PLAN.md — idempotent upsert + independent activity/nutrition freshness bookkeeping (wave 4)
 - [x] 08-07-PLAN.md — the webhook route, its wiring above the MCP mount, and the criterion-#4 proof (wave 5)
-- [ ] 08-08-PLAN.md — setup doc, secret creation, deploy, and the live device verification checkpoint (wave 6)
-      **IN PROGRESS, PAUSED.** Tasks 1-2 done (`4591c84`, `3b04cfc`): `docs/health-auto-export-setup.md`
-      written, `brett-health-ingest-secret` created, revision `brett-00010-kln` live at 1Gi with the
-      credential bound, live 401/health/MCP-discovery smoke tests recorded. Task 3 is a blocking
-      human-verify checkpoint needing a real Health Auto Export run from the user's iPhone.
-      `08-08-SUMMARY.md` exists but covers Tasks 1-2 only — do not read it as completion.
-      **Criteria #1, #3 (live) and #5 remain unverified; criteria #2 and #4 are met.**
+- [x] 08-08-PLAN.md — setup doc, secret creation, deploy, and the live device verification checkpoint (wave 6)
+      **COMPLETE (2026-09-03).** All three tasks done. A real Health Auto Export run from the
+      user's phone landed all 12 registry metrics live; a repeat run proved idempotency (23 rows,
+      unchanged). Two live incidents diagnosed and fixed along the way: a device misconfiguration
+      (413, Aggregate Data toggle off) and a production migration gap (0004 vs the deployed
+      code's 0005, fixed with `alembic upgrade head` against production). RESEARCH Assumption A1
+      closed as MOOT — Hevy is not currently writing to HealthKit for this user at all, so the
+      exclusion predicate had nothing live to match; it stays in place for Phase 9's `export.xml`
+      backfill. **All five success criteria verified** — see `08-VERIFICATION.md` (status: passed).
 
 Notes for planning:
 - Register the ingest route **above** `app.mount("/", mcp_app)` in `main.py` — the mount is a catch-all and a route below it is dead in production (PITFALLS #1).
@@ -174,7 +176,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 5. Progression, Records & Recomposition Analytics | v1.0 | 10/10 | Complete | 2026-08-31 |
 | 6. MCP Tools | v1.0 | 11/11 | Complete | 2026-09-01 |
 | 7. Production Hardening & Coaching Layer | v1.0 | 10/10 | Complete | 2026-09-01 |
-| 8. Apple Health & Nutrition Ingest | v2.0 | 0/8 | Planned | - |
+| 8. Apple Health & Nutrition Ingest | v2.0 | 8/8 | Complete | 2026-09-03 |
 | 9. Historical Apple Health Backfill | v2.0 | 0/TBD | Not started | - |
 | 10. Max-Weight Strength Signal | v2.0 | 0/TBD | Not started | - |
 | 11. Body Measurement History | v2.0 | 0/TBD | Not started | - |
