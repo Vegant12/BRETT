@@ -1,10 +1,15 @@
 """Coverage for the historical `export.xml` backfill: HEALTH-10, success criteria #3 and #4.
 
-This plan (09-01) builds the TEST BED only, so what is here is fixture integrity: assertions
-about `backend/tests/fixtures/hae/export_sample.xml` itself. Nothing here imports the reader
-module (`backfill.py`, inside the HAE package) -- it does not exist until plan 09-02, and a
-test file that cannot even be collected is a test file that proves nothing about the fixture it
-was written to guard.
+Two layers, in this order:
+
+1. **Fixture integrity** (plan 09-01) -- assertions about
+   `backend/tests/fixtures/hae/export_sample.xml` itself. A fixture that the behavioural
+   assertions below depend on gets its shape pinned, so an editor silently normalising it fails
+   loudly rather than quietly changing what a later test asserts.
+2. **The reader** (plan 09-02) -- the twelve-entry HealthKit identifier mapping and the
+   streaming `scan_export` walk over that fixture. Still pure and container-free: `backfill.py`
+   touches no database, so every case here runs in the FAST suite and fails on the commit that
+   breaks it rather than after a deploy.
 
 What deliberately lives ELSEWHERE:
 
@@ -23,10 +28,17 @@ different assertion. The XML fixture is the one place the literal is allowed to 
 it is data, read with an explicit `encoding="utf-8"`.
 """
 
+import inspect
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from app.integrations.health_auto_export.backfill import (
+    _HK_BODY_MASS,
+    HK_TO_WIRE,
+)
+from app.integrations.health_auto_export.errors import HAEExportFileError
+from app.integrations.health_auto_export.registry import METRIC_REGISTRY
 from tests.conftest import hae_fixture, hae_xml_fixture
 
 # The live-verified webhook source vocabulary (`fixtures/hae/device_capture.json`, captured
@@ -49,6 +61,15 @@ EXPECTED_ACTIVITY_SUMMARIES = 1
 # The real file's fingerprint is high-precision floats (RESEARCH measured up to 9 decimal
 # places). Synthetic values are round on purpose, so anything past this is a leak.
 MAX_SYNTHETIC_DECIMAL_PLACES = 4
+
+# One identifier per `METRIC_REGISTRY` entry. Written as its own number rather than as
+# `len(METRIC_REGISTRY)` so that deleting a registry entry AND its identifier together -- which
+# keeps the totality assertion green -- still fails here.
+EXPECTED_MAPPED_METRICS = 12
+
+# Every mapped identifier is a QUANTITY type. Category types carry a string `value=` and workout
+# types do not appear on a `Record` at all.
+HK_QUANTITY_PREFIX = "HKQuantityTypeIdentifier"
 
 
 def _fixture_path() -> Path:
@@ -195,3 +216,84 @@ def test_fixture_holds_no_high_precision_value() -> None:
             if len(fraction) > MAX_SYNTHETIC_DECIMAL_PLACES:
                 offenders.append((element.tag, attribute, raw))
     assert not offenders, f"high-precision values look copied from the real export: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# T-09-08: the HealthKit identifier -> wire metric mapping
+# ---------------------------------------------------------------------------
+
+
+def test_mapping_is_total() -> None:
+    """Both directions, because each has its own silent failure mode.
+
+    A `METRIC_REGISTRY` entry with no identifier pointing at it is a metric that can never be
+    backfilled -- the column simply stays empty for the historical period and nothing raises.
+    An identifier pointing at a name the registry does not hold is worse: `normalize_payload`'s
+    D-04 branch drops the whole metric with one log line and no test failure, so the records ARE
+    parsed, ARE counted as seen, and produce no rows.
+
+    `backfill.py` asserts the same thing at IMPORT time. This test is the one that names which
+    direction broke.
+    """
+    assert set(HK_TO_WIRE.values()) == set(METRIC_REGISTRY)
+    assert len(HK_TO_WIRE) == EXPECTED_MAPPED_METRICS
+
+
+def test_naming_traps() -> None:
+    """The five pairs a hand-written mapping gets wrong, asserted one per line.
+
+    HAE's `dietary_` prefix is inconsistent and `registry.py`'s own comment says a real
+    third-party fixture in the wild gets `protein` wrong. One assertion per trap so the failure
+    message names the trap rather than dumping a twelve-entry dict diff.
+    """
+    assert HK_TO_WIRE["HKQuantityTypeIdentifierDietaryFatTotal"] == "total_fat"
+    assert HK_TO_WIRE["HKQuantityTypeIdentifierDietarySugar"] == "dietary_sugar"
+    assert HK_TO_WIRE["HKQuantityTypeIdentifierDietaryProtein"] == "protein"
+    assert HK_TO_WIRE["HKQuantityTypeIdentifierDietaryEnergyConsumed"] == "dietary_energy"
+    distance = HK_TO_WIRE["HKQuantityTypeIdentifierDistanceWalkingRunning"]
+    assert distance == "walking_running_distance"
+
+
+def test_every_identifier_is_a_healthkit_quantity_type() -> None:
+    """A category or workout identifier in this table would mean an unparseable element shape.
+
+    `HKCategoryTypeIdentifier*` records carry `value="HKCategoryValueSleepAnalysisAsleep"` rather
+    than a number, and workout identifiers appear on `<Workout workoutActivityType=...>`, which is
+    not a `Record` at all. Either would reach the `Record` branch's `Decimal(raw_value)` and be
+    counted as malformed on every single row -- a plausible-looking counter that is entirely a
+    mapping bug.
+    """
+    offenders = [key for key in HK_TO_WIRE if not key.startswith(HK_QUANTITY_PREFIX)]
+    assert not offenders, f"not HKQuantityTypeIdentifier*: {offenders}"
+
+
+def test_body_mass_is_not_mapped() -> None:
+    """SC#4's FIRST line of defence is the allowlist, before the Hevy predicate ever runs.
+
+    52 of the 79 `BodyMass` records in the real export are Hevy's own write-back, but the other
+    27 are not -- and D-01 keeps ALL of them out, because `body_measurements` already holds this
+    data from Hevy at higher fidelity and there is no third source to arbitrate a disagreement.
+    Relying on `is_hevy_sourced` here would let the 27 through.
+    """
+    assert _HK_BODY_MASS not in HK_TO_WIRE
+    assert "weight_body_mass" not in METRIC_REGISTRY
+
+
+def test_export_file_error_carries_no_detail() -> None:
+    """T-09-07. Constructed from NOTHING, exactly like `HAEPayloadError`.
+
+    The two things a caller would naturally want to interpolate are the path and the parse
+    error's own message. The path is an operator argument the operator already knows; the parse
+    message renders a byte offset into a document that is this person's entire health history.
+    An `__init__` that accepted either would let a future edit put it in a log line, and no test
+    elsewhere would notice -- so the signature itself is the guard.
+    """
+    exc = HAEExportFileError()
+    assert exc.safe_message == "Apple Health export file could not be read as a HealthKit export"
+    assert str(exc) == exc.safe_message
+
+    parameters = list(inspect.signature(HAEExportFileError.__init__).parameters)
+    assert parameters == ["self"], (
+        f"HAEExportFileError.__init__ grew a parameter ({parameters}); a caller can now "
+        f"interpolate a path or a parse offset into a health-data exception"
+    )

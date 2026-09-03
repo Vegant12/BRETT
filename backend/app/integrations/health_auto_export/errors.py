@@ -62,3 +62,20 @@ class UnknownUnitError(HAEError):
         self.unit = unit[: self._MAX_UNIT_LEN]
         self.safe_message = f"unsupported unit {self.unit!r} for metric {metric!r}"
         super().__init__(self.safe_message)
+
+
+class HAEExportFileError(HAEError):
+    """The Apple Health export file could not be read as a HealthKit export.
+
+    Covers an unreadable path, a file whose root element is not ``HealthData``, and a parse
+    failure that is structural rather than per-record. Carries NO detail from the file and no
+    path: the path is an operator argument the operator already knows, and the parse error's own
+    message renders a byte offset into a document that is this person's entire health history
+    (T-09-07). Constructed from NOTHING, exactly like :class:`HAEPayloadError` -- an ``__init__``
+    that accepted a message would let a future caller interpolate the path, or the offending
+    line, straight into a log line.
+    """
+
+    def __init__(self) -> None:
+        self.safe_message = "Apple Health export file could not be read as a HealthKit export"
+        super().__init__(self.safe_message)
