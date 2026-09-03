@@ -128,7 +128,12 @@ Notes for planning:
   1. Asked "how has my waist changed?" (or any of the 16 non-weight `body_measurements` columns), Claude answers with a latest-vs-90-days-ago comparison sourced from already-synced Hevy data, or honestly reports insufficient coverage for that specific metric.
   2. A stale "latest" reading (2+ readings exist but the most recent is old) is reported as stale, distinct from a metric with no usable data at all.
   3. Existing weight-trend behavior (`fitness_get_body_weight_trend`, BODY-01) is unchanged — this phase adds a new, separate tool rather than modifying it.
-**Plans**: TBD
+**Plans**: 3 plans in 3 waves
+
+Plans:
+- [ ] 11-01-PLAN.md — `BodyMeasurementMetric` enum + `BodyMeasurementTrendResult`, the `{90: 2}` coverage floor, the column-scoped `earliest_metric_measurement_at`, and the `GoldenBuilder` fixture extension (wave 1)
+- [ ] 11-02-PLAN.md — `analytics/body_measurements.py`: the one generic latest-vs-earliest 90-day function, with the floor/staleness four-quadrant proof (wave 2)
+- [ ] 11-03-PLAN.md — `fitness_get_body_measurement_trend` (the 14th tool), its registration, the six structural drift guards, and the coaching-doc entry (wave 3)
 
 Notes for planning:
 - **Scope correction, 2026-09-03 discuss-phase session:** this phase was originally scoped (see PITFALLS #9, ROADMAP notes below the strikethrough) around a manual-entry write path (BODY-03) plus the source-merge fix that path would trigger (BODY-04). The user reversed this: Hevy's app already captures every measurement they log, and BRETT already syncs it automatically (`backend/app/integrations/hevy/body.py`) — there is no manual-entry need. BODY-03 and BODY-04 are **dropped from v2.0 entirely**, not deferred to a later phase. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md` for the full discussion.
@@ -193,7 +198,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 8. Apple Health & Nutrition Ingest | v2.0 | 8/8 | Complete | 2026-09-03 |
 | 9. Historical Apple Health Backfill | v2.0 | 0/7 | Planned | - |
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
-| 11. Body Measurement History | v2.0 | 0/TBD | Not started | - |
+| 11. Body Measurement History | v2.0 | 0/3 | Planned | - |
 | 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 0/TBD | Not started | - |
 | 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/TBD | Not started | - |
 
