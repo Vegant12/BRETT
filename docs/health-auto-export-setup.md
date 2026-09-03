@@ -21,7 +21,7 @@ automation on the iPhone is not. BRETT can neither read it nor enforce it: the s
 sees the POST bodies that arrive, and a body that arrives is indistinguishable from a correctly
 configured phone.
 
-One of those settings is a **correctness prerequisite, not a preference**. The aggregation interval
+One of those settings is a **correctness prerequisite, not a preference**. The Aggregate Data toggle
 decides whether re-sending an overlapping export window is a no-op or silent data loss. Get it wrong
 and BRETT does not error — it stores a plausible-looking number that is quietly smaller than the
 truth, which is this project's stated primary risk. Writing the setting down is the only control
@@ -65,8 +65,8 @@ Configure in the Health Auto Export iOS app under **Automations → REST API**.
 | Setting | Required value | Why |
 |---|---|---|
 | Automation type | **REST API** | The only mode that POSTs JSON to a URL. Export-to-file and iCloud modes do not reach BRETT |
-| Aggregation interval | **Daily** | **Correctness prerequisite.** BRETT stores one row per metric per source per local day and uses REPLACE semantics (`SET value = excluded.value`) when a day is re-sent. With a Daily interval each metric emits exactly one datapoint per day, so a batch boundary can only ever fall *between* days and a re-send is a genuine no-op. At any finer interval a single day can be split across two POSTs, and the second POST silently overwrites the first instead of adding to it. It also shrinks the payload by roughly two orders of magnitude — a real captured export carried 189 datapoints for one metric-day |
-| Batch Requests | **Off** | With a Daily interval the payload is small enough that batching buys nothing, and turning it on reintroduces the split-day risk above. The vendor documents Batch Requests as "splits one export across multiple POSTs" and guarantees nothing about where the boundary falls |
+| Aggregate Data | **On** | **Correctness prerequisite, not a dropdown.** Despite the name "Aggregation interval" that earlier documentation drafts used, on this app version (verified against 9.1.1) the control is a single boolean toggle called **Aggregate Data**, not an interval picker — turning it on is what collapses each metric to one point per local day. BRETT stores one row per metric per source per local day and uses REPLACE semantics (`SET value = excluded.value`) when a day is re-sent, so with Aggregate Data on, a batch boundary can only ever fall *between* days and a re-send is a genuine no-op. With it off, HAE sends raw per-sample datapoints — a real device attempt with it off produced a **~115 MB** payload from two days of data and was rejected outright at `413` before it reached the day-splitting risk described below. At any finer-than-daily granularity a single day can also be split across two POSTs, and the second POST would silently overwrite the first instead of adding to it. Confirmed live 2026-09-03: with Aggregate Data on, a real export produced exactly one datapoint per metric per day and zero `health_ingest_multi_point_day` events |
+| Batch Requests | **Off** | With Aggregate Data on the payload is small enough that batching buys nothing, and turning it on reintroduces the split-day risk above. The vendor documents Batch Requests as "splits one export across multiple POSTs" and guarantees nothing about where the boundary falls |
 | Data type | **Health Metrics** | Workouts are deliberately not ingested (D-02, see §5) |
 | Export period / window | **A rolling window of several days (e.g. 7)** | Overlap is safe and desirable. Re-sending a day BRETT already holds is a no-op (HEALTH-09), and a window wider than the schedule lets a missed or failed run self-heal on the next one |
 | Schedule | **Hourly, or on-arrival** | The ingest path has its own rate-limit bucket (30 requests/minute, burst 30) sized for this and kept separate from the bucket Claude's connector uses, so phone exports can never throttle a coaching turn |
@@ -74,8 +74,9 @@ Configure in the Health Auto Export iOS app under **Automations → REST API**.
 Two limits worth knowing, because Health Auto Export has **no documented retry** and a rejected
 delivery is permanent loss of that window:
 
-- Bodies above **10 MiB** are rejected with `413` before they are parsed. A Daily interval keeps a
-  7-day window three orders of magnitude below this.
+- Bodies above **10 MiB** are rejected with `413` before they are parsed. With Aggregate Data on, a
+  7-day window stays roughly three orders of magnitude below this; a real device attempt with
+  Aggregate Data **off** measured ~115 MB for just two days and was rejected immediately.
 - Above 30 requests/minute the endpoint answers `429`. An hourly schedule uses 1.
 
 ---
@@ -172,10 +173,11 @@ health_ingest_multi_point_day   metric= source_name= local_day= points=
 ```
 
 **Under a correct configuration this event never fires.** It fires when a single delivery carries
-more than one datapoint for one `(metric, source_name, local_day)` key — which is exactly what a
-Daily aggregation interval makes impossible.
+more than one datapoint for one `(metric, source_name, local_day)` key — which is exactly what
+Aggregate Data being on makes impossible. Confirmed live 2026-09-03: two real exports with
+Aggregate Data on produced zero occurrences of this event.
 
-If it appears, the device's aggregation interval has drifted off Daily (or Batch Requests was turned
+If it appears, the device's Aggregate Data toggle has drifted off (or Batch Requests was turned
 on). The consequence is not cosmetic: re-sends are no longer lossless, and a day split across two
 POSTs loses whichever half arrived first. BRETT's within-payload aggregation still adds up the
 datapoints it receives *in one delivery*, so a single POST is always internally correct — the loss
@@ -183,7 +185,7 @@ happens between deliveries, which is the half no code can fix.
 
 Remedy:
 
-1. Set the aggregation interval back to **Daily** in the app (§3).
+1. Turn **Aggregate Data** back on in the app (§3).
 2. Re-run the export for the affected days. Because re-sending is a no-op under a correct
    configuration and a full replace under any configuration, the corrected export restores the day.
 
@@ -196,7 +198,7 @@ Two related events, both safe to read — none of them carries a measured value:
 | Event | Fields | Read it as |
 |---|---|---|
 | `health_ingest_completed` | `rows_upserted` `rows_skipped` `datapoints_seen` … | A delivery landed |
-| `health_ingest_hevy_source_excluded` | `metric=` `points=` | The HEALTH-08 filter matched Hevy's write-back. Expected on any training day in the window; its **absence** on a training day means the filter is not matching and Hevy's active energy is being double-counted |
+| `health_ingest_hevy_source_excluded` | `metric=` `points=` | The HEALTH-08 filter matched Hevy's write-back. **Its absence is not by itself evidence of a problem** — as of 2026-09-03, Hevy is not writing `active_energy` (or anything) to HealthKit for this user at all, so this event does not fire on any day, training or not. If Hevy resumes HealthKit write-back in the future, check the Health app directly (Browse → a metric → a day → sources) to see whether Hevy appears as a source before assuming the filter itself is broken |
 | `health_ingest_unrecognized_metric` | `metric=` | An unlisted metric was dropped (see §8) |
 | `health_ingest_datapoint_dropped` | `metric=` `unit=` `reason=` | One datapoint failed conversion — most often a unit changed in the app's per-metric settings |
 | `health_ingest_unauthorized` | — | A request was rejected. Expected: this endpoint is on the public internet |
@@ -264,6 +266,42 @@ long token-shaped string after the word `Bearer` is exactly the pattern this fil
 To repeat it, substitute any long string of your own into the `-H 'authorization: Bearer …'` header
 of the row 2 command.
 
-### First real device export
+### 2026-09-03 — first real device export
 
-_Pending — plan 08-08 Task 3._
+Two configuration problems surfaced before the first successful delivery, both instructive for the
+next reader:
+
+1. **`413 Payload too large`** on the first attempt (~115 MB). The automation had **Aggregate
+   Data off** (`"exportAggregation": "Default"` in the app's own diagnostics export) — see §3's
+   correction above. Fixed by turning Aggregate Data on.
+2. **Export "accepted" but every row skipped** (`reason: "ProgrammingError"`, `rows_upserted: 0`)
+   on the second attempt. Not a device problem: the live production database was one migration
+   behind the deployed code (`alembic current` == `0004`; the deployed revision needed `0005` for
+   `health_daily_metrics`, the table plan 08-01 created). `scripts/deploy-cloud-run.sh` has no
+   migration step — fixed with `alembic upgrade head` against production, with the user's
+   confirmation before running it. See `.planning/STATE.md`'s blockers section for the follow-up
+   this deserves before Phase 9 deploys its own migration.
+
+The third export succeeded:
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | `health_ingest_completed` | `rows_upserted > 0` | `datapoints_seen: 23, rows_upserted: 23, rows_skipped: 0` | **PASS** |
+| 2 | All 12 registry metrics present | across the exported days | All 12 present for the full day (2026-09-02); 11 of 12 for the partial day (2026-09-03) — `sodium` had not been logged in the nutrition app yet that day, not a bug | **PASS** |
+| 3 | `sodium` units | `mg` | `mg` | **PASS** |
+| 4 | `health_ingest_multi_point_day` | absent | Not present in the delivery's logs | **PASS** |
+| 5 | Repeat export changes nothing | same row count, same `sum(sample_count)` | 23 rows / 23 total samples, unchanged before and after the repeat | **PASS** |
+| 6 | `device_capture.json` fixture | scrubbed, real shape and source vocabulary | Created; see its file and `backend/tests/conftest.py`'s `hae_fixture` docstring — reconstructed from confirmed-live metric names, units and source strings, not a literal captured request body (the app has no feature to export one) | **PASS** |
+
+**Assumption A1 (does the exclusion filter match Hevy's real webhook spelling): MOOT, not
+confirmed or refuted.** No `health_ingest_hevy_source_excluded` event fired, despite a Hevy
+workout ("Upper 1") on the exported day. The user checked the native Health app directly
+(Browse → Active Energy → Sep 2 → sources): **Hevy is not a source at all** for that day. Read
+together with §5's note that Hevy's Apple Health body-mass write-back "stops in May 2025", the
+most likely explanation is that Hevy stopped writing to HealthKit generally around then — there
+is currently nothing live for the exclusion filter to catch. The filter (`_HEVY_SOURCE_ALIASES`
+in `normalize.py`) is unchanged and stays in place: Phase 9's `export.xml` historical backfill
+covers the period when Hevy demonstrably did write to HealthKit (52/79 body-mass records, 218/221
+workouts — see §5), so the predicate is still load-bearing there. If Hevy ever resumes writing to
+HealthKit, treat the first live delivery on a training day as the real test of this filter, not
+this checkpoint.

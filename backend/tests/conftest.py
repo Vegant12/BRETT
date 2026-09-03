@@ -155,6 +155,18 @@ def hae_fixture(name: str) -> dict[str, Any]:
     rather than an ASCII apostrophe (Pitfall N-3). Reading under a locale default would either
     mangle them or raise, and a mangled source name is exactly the failure that makes the
     HEALTH-08 exclusion predicate stop matching.
+
+    A fourth file, `device_capture.json`, was added at the 08-08 live-deployment checkpoint
+    (2026-09-03). Its `qty` values are synthetic (a plausible constant per metric, not the
+    user's real numbers) -- the app has no way to export the raw request body it sends, so
+    this is NOT a byte-for-byte capture of a real request. What IS real, confirmed live
+    against the deployed service and the resulting database rows in the same session: the
+    metric-name and units vocabulary (unchanged from the other three files), and this
+    device's CURRENT source vocabulary, which has drifted since the original Phase 8
+    research capture -- the phone now reports as `V’s iPhone` (still U+2019, still not
+    ASCII) rather than `Vegant’s iPhone`, and the nutrition source is `Foodvisor` rather
+    than `カロミル`. Its purpose is exactly the same as the other three: pinning the shape
+    and the source strings a real normalize call must handle, not the values.
     """
     payload: dict[str, Any] = json.loads(
         (HAE_FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8")

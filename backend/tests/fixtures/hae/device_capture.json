@@ -1,0 +1,90 @@
+{
+  "data": {
+    "metrics": [
+      {
+        "name": "step_count",
+        "units": "count",
+        "data": [
+          {"qty": 6500.0, "date": "2026-09-02 08:00:00 +0700", "source": "V’s iPhone"}
+        ]
+      },
+      {
+        "name": "active_energy",
+        "units": "kcal",
+        "data": [
+          {"qty": 560.0, "date": "2026-09-02 08:02:00 +0700", "source": "V’s iPhone"}
+        ]
+      },
+      {
+        "name": "basal_energy_burned",
+        "units": "kcal",
+        "data": [
+          {"qty": 1560.0, "date": "2026-09-02 00:00:00 +0700", "source": "V’s iPhone"}
+        ]
+      },
+      {
+        "name": "walking_running_distance",
+        "units": "km",
+        "data": [
+          {"qty": 4.2, "date": "2026-09-02 08:02:00 +0700", "source": "V’s iPhone"}
+        ]
+      },
+      {
+        "name": "flights_climbed",
+        "units": "count",
+        "data": [
+          {"qty": 7.0, "date": "2026-09-02 08:02:00 +0700", "source": "V’s iPhone"}
+        ]
+      },
+      {
+        "name": "dietary_energy",
+        "units": "kcal",
+        "data": [
+          {"qty": 2170.0, "date": "2026-09-02 00:00:00 +0700", "source": "Foodvisor"}
+        ]
+      },
+      {
+        "name": "protein",
+        "units": "g",
+        "data": [
+          {"qty": 163.0, "date": "2026-09-02 00:00:00 +0700", "source": "Foodvisor"}
+        ]
+      },
+      {
+        "name": "carbohydrates",
+        "units": "g",
+        "data": [
+          {"qty": 265.0, "date": "2026-09-02 00:00:00 +0700", "source": "Foodvisor"}
+        ]
+      },
+      {
+        "name": "total_fat",
+        "units": "g",
+        "data": [
+          {"qty": 38.0, "date": "2026-09-02 00:00:00 +0700", "source": "Foodvisor"}
+        ]
+      },
+      {
+        "name": "fiber",
+        "units": "g",
+        "data": [
+          {"qty": 25.0, "date": "2026-09-02 00:00:00 +0700", "source": "Foodvisor"}
+        ]
+      },
+      {
+        "name": "dietary_sugar",
+        "units": "g",
+        "data": [
+          {"qty": 51.0, "date": "2026-09-02 00:00:00 +0700", "source": "Foodvisor"}
+        ]
+      },
+      {
+        "name": "sodium",
+        "units": "mg",
+        "data": [
+          {"qty": 83.0, "date": "2026-09-02 00:00:00 +0700", "source": "Foodvisor"}
+        ]
+      }
+    ]
+  }
+}

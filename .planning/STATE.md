@@ -3,19 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Apple Health, Strength Tracking & Coaching Programs
 status: executing
-stopped_at: Phase 08 plan 08-08 PAUSED at Task 3 blocking checkpoint (device export)
-last_updated: "2026-09-02T10:41:20.365Z"
-last_activity: 2026-09-02 -- Phase 08 plan 08-08 paused at its blocking checkpoint
+stopped_at: Phase 08 all 8 plans complete; running phase-completion verification
+last_updated: "2026-09-03T03:20:00.000Z"
+last_activity: 2026-09-03 -- Phase 08 plan 08-08 Task 3 completed (real device export verified live, production migration gap fixed)
 progress:
-  # 08-08-SUMMARY.md exists on disk but its plan is NOT complete -- it was written to carry
-  # Tasks 1-2 across a blocking checkpoint. `state record-session` derives these numbers by
-  # counting SUMMARY files and therefore reported 8/8 and 100%; hand-corrected to 7/8.
-  # Re-derive only after 08-08 Task 3 lands.
   total_phases: 6
   completed_phases: 0
   total_plans: 8
-  completed_plans: 7
-  percent: 88
+  completed_plans: 8
+  percent: 100
 ---
 
 # Project State
@@ -29,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-09-02)
 
 ## Current Position
 
-Phase: 08 (apple-health-nutrition-ingest) — EXECUTING, PAUSED AT A BLOCKING CHECKPOINT
-Plan: 8 of 8 (Tasks 1-2 of 3 done; Task 3 awaits a real iPhone export)
-Status: Awaiting user action — see Blockers
-Last activity: 2026-09-02 -- 08-08 Tasks 1-2 committed, deploy live, checkpoint reached
+Phase: 08 (apple-health-nutrition-ingest) — ALL PLANS COMPLETE, running phase-completion verification
+Plan: 8 of 8 complete
+Status: Executing phase-completion steps (code review, verification, roadmap update)
+Last activity: 2026-09-03 -- 08-08 Task 3 completed live with the user; see Blockers for the outcome
 
-Progress: [█████████░] 88% (v2.0) — 7 of 8 plans complete; 08-08 is in progress, not done
+Progress: [██████████] 100% (v2.0) — 8 of 8 plans complete
 
 ## Performance Metrics
 
@@ -86,7 +82,9 @@ None yet.
 - **Phase 10 open question:** the re-derived max-weight dead-band values cannot be settled on paper — they need live-data calibration, like D-18's original.
 - **Phase 8 open question:** `weight_body_mass` vs `weight_&_body_mass` metric-name spelling is unsettled across sources; capture one real Health Auto Export payload before writing the normalizer.
 - **Deploy prerequisite for Phase 8:** Cloud Run `--memory=512Mi` is too small for JSON ingest (measured peak ~235 MB on a 10 MB body). Raise to 1Gi and add a body-size cap before the first real device sync.
-- Phase 8 plan 08-08 is PAUSED at its Task 3 blocking checkpoint. Tasks 1-2 are done: brett-health-ingest-secret exists in Secret Manager and Cloud Run revision brett-00010-kln runs at 1Gi with HEALTH_INGEST_SECRET bound. OUTSTANDING: the user must configure the Health Auto Export iOS automation and trigger one real export that includes a training day. Until then ROADMAP criterion #1 is unmet, RESEARCH Assumption A1 (does the HAE webhook spell Hevy as 'hevy'?) is still OPEN, and HEALTH-06 + NUTR-02 remain pending. If A1 is refuted, _HEVY_SOURCE_ALIASES in backend/app/integrations/health_auto_export/normalize.py needs the real spelling added and Phase 9 inherits the answer.
+- **Resolved 2026-09-03:** Phase 8 plan 08-08 Task 3 completed. A real Health Auto Export run landed all 12 metrics live; a repeat run proved idempotency (23 rows / 23 samples unchanged). HEALTH-06 and NUTR-02 are now complete. RESEARCH Assumption A1 closed as **MOOT** (not confirmed, not refuted): the user's native Health app confirms Hevy is not currently writing `active_energy` to HealthKit at all, despite a Hevy workout existing on the exported day — consistent with D-01's note that Hevy's body-mass write-back "stops in May 2025", suggesting Hevy stopped writing to HealthKit generally around then. `_HEVY_SOURCE_ALIASES` was left unchanged (no live spelling was observed to add); the exclusion predicate remains necessary for Phase 9's `export.xml` historical backfill, which covers the pre-2025 period when Hevy demonstrably did write to HealthKit. **New open item:** if Hevy ever resumes HealthKit write-back, the exclusion predicate's string-matching is still formally unverified against a live payload — worth a periodic check, not urgent.
+- **New (2026-09-03):** During Task 3, the live production database was found one migration behind deployed code (`alembic current` == `0004`, code needed `0005` for `health_daily_metrics`) — `scripts/deploy-cloud-run.sh` has no migration step, and this is the **second** occurrence of the exact failure mode already documented in `docs/runbook-sync-schedule.md`. Fixed live with the user's confirmation (`alembic upgrade head` against production). Recommend a structural fix (pre-deploy migration step, or an enforced `alembic current` vs `alembic heads` pre-flight check) before Phase 9 deploys its own migration and repeats this a third time.
+- **Resolved 2026-09-03:** `docs/health-auto-export-setup.md` originally described the Daily-aggregation setting as an "Aggregation interval" dropdown; the user's HAE build (9.1.1) actually exposes it as a boolean **"Aggregate Data"** toggle, discovered when the doc's wrong wording sent them looking for a setting that doesn't exist. Corrected throughout the doc (§1, §3, §6, §7, §9) in the same session.
 
 ## Deferred Items
 
