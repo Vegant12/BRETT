@@ -28,7 +28,7 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 
 - [x] **Phase 8: Apple Health & Nutrition Ingest** - Authenticated, idempotent, Hevy-filtered webhook receiver landing activity and nutrition data in BRETT (complete 2026-09-03)
 - [ ] **Phase 9: Historical Apple Health Backfill** - One-time streaming import of 4.5 years of history from the user's `export.xml`
-- [ ] **Phase 10: Max-Weight Strength Signal** - Last max-weight-lifted surfaced as a labelled secondary display field on progression/plateau responses; estimated-1RM classification unchanged
+- [x] **Phase 10: Max-Weight Strength Signal** - Last max-weight-lifted surfaced as a labelled secondary display field on progression/plateau responses; estimated-1RM classification unchanged (completed 2026-09-03)
 - [ ] **Phase 11: Body Measurement History** - Manual measurement entry, per-field source merging, and trends beyond weight-only
 - [ ] **Phase 12: Training Programs & Confirm-Gated Write Tool** - Programs as real data, program-aware thresholds, and BRETT's only MCP write path
 - [ ] **Phase 13: Health Analytics, Reports & Coaching Style** - Activity/nutrition trends, weekly and monthly report tools, and a tightened coaching document
@@ -110,7 +110,7 @@ Notes for planning:
 **Plans**: 1 plan in 1 wave
 
 Plans:
-- [ ] 10-01-PLAN.md — `PlateauResult.last_max_weight_kg` (schemas.py + get_plateaus), D-07/D-08 regression tests, MCP passthrough proof, budget check, and STR-01/STR-03/STR-04 regression confirmation (wave 1)
+- [x] 10-01-PLAN.md — `PlateauResult.last_max_weight_kg` (schemas.py + get_plateaus), D-07/D-08 regression tests, MCP passthrough proof, budget check, and STR-01/STR-03/STR-04 regression confirmation (wave 1)
 
 Notes for planning:
 - **Scope correction, 2026-09-03 discuss-phase session, two rounds:** (1) this phase was originally scoped (see PITFALLS #10/#11/#12, ARCHITECTURE.md §3) as max-weight becoming the primary classifier with e1RM as secondary — a new classifier, re-derived dead-bands, changed insufficient-data semantics. The user reversed this: e1RM keeps classifying, unchanged; max weight is a labelled display-only field. (2) Follow-up investigation during the same session found `ExerciseTrend` (PROG-02) is never exposed through any MCP tool — it only feeds the aggregate whole-account signal in `fitness_get_recomposition_status`/`fitness_get_training_summary` — and `fitness_get_exercise_progression` already returns `best_weight_kg` per day. So the only response with an actual gap (e1RM-derived numbers only, no real weight figure) is `PlateauResult`. The user confirmed: scope narrows to `PlateauResult` only. Do **not** add a field to `ExerciseTrend` — it would be dead weight nothing reads.
@@ -192,7 +192,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 7. Production Hardening & Coaching Layer | v1.0 | 10/10 | Complete | 2026-09-01 |
 | 8. Apple Health & Nutrition Ingest | v2.0 | 8/8 | Complete | 2026-09-03 |
 | 9. Historical Apple Health Backfill | v2.0 | 0/7 | Planned | - |
-| 10. Max-Weight Strength Signal | v2.0 | 0/TBD | Not started | - |
+| 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
 | 11. Body Measurement History | v2.0 | 0/TBD | Not started | - |
 | 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 0/TBD | Not started | - |
 | 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/TBD | Not started | - |
