@@ -48,7 +48,8 @@ findings:
   warning: 1
   info: 1
   total: 2
-status: issues_found
+status: fixed
+fixed_in: c183ffd
 ---
 
 # Phase 08: Code Review Report
@@ -155,6 +156,21 @@ shape from `ACCEPTED_KEYS`.
 
 ---
 
+## Resolution
+
+Both findings fixed in `c183ffd`, same session:
+
+- **WR-01:** `updated_at` added to `upsert_health_metric`'s `on_conflict_do_update` `set_` dict.
+  New test `test_updated_at_advances_on_a_resync` added and verified non-vacuous (fails when the
+  fix is reverted locally, passes with it applied).
+- **IN-01:** Module docstring corrected from "five integer counts" to "four integer counts".
+
+Full suite: 852 passed (851 + 1 new). `ruff check`, `ruff format --check`, `mypy` all clean on
+the touched files.
+
+---
+
 _Reviewed: 2026-09-03T03:24:53Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+_Fixed: 2026-09-03T03:29:00Z_
