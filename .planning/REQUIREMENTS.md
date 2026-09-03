@@ -34,10 +34,10 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 ### Strength Tracking
 
-- [ ] **STR-01**: Max-weight-lifted becomes the primary signal for exercise progression trend classification, replacing estimated-1RM as the default basis
-- [ ] **STR-02**: Plateau detection uses max-weight-lifted as its primary signal, with dead-band/window thresholds re-derived against live training data rather than reused from the e1RM-tuned constants
-- [ ] **STR-03**: Estimated-1RM remains available as a secondary data point on progression/records responses wherever it's already gated and valid — not removed from the system
-- [ ] **STR-04**: Recomposition status's progression input reflects the max-weight-based trend rather than the e1RM-based one
+- [ ] **STR-01**: Progression and plateau trend classification continue to be driven by estimated-1RM, unchanged — no new classifier, no dead-band re-derivation
+- [ ] **STR-02**: `PlateauResult` (`fitness_get_plateaus`) carries the last max-weight-lifted figure as a labelled secondary display field, sourced from the existing `SessionBest.best_weight_kg` fold — Claude can cite it when explaining a plateau without it affecting `plateaued` or any other field. (`ExerciseTrend` is not exposed through any MCP tool and is out of scope; `fitness_get_exercise_progression` already returns `best_weight_kg` per day and needs no change.)
+- [ ] **STR-03**: Estimated-1RM remains the value progression/records responses classify against wherever it's already gated and valid — not removed or displaced from that role
+- [ ] **STR-04**: Recomposition status's progression input continues to reflect the e1RM-based trend, unchanged
 
 ### Reports
 

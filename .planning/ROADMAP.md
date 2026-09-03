@@ -24,11 +24,11 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 
 ### 🚧 v2.0 Apple Health, Strength Tracking & Coaching Programs (In Progress)
 
-**Milestone Goal:** Extend BRETT beyond Hevy-only into a full recomposition coach — ingesting Apple Health activity and nutrition data, tracking strength the way the user actually trains (max weight, not just estimated 1RM), remembering physical progress over time, adapting to the active training program, and answering with concise, report-ready summaries.
+**Milestone Goal:** Extend BRETT beyond Hevy-only into a full recomposition coach — ingesting Apple Health activity and nutrition data, surfacing max weight lifted alongside estimated 1RM so Claude can explain strength trends the way the user actually thinks about them, remembering physical progress over time, adapting to the active training program, and answering with concise, report-ready summaries.
 
 - [x] **Phase 8: Apple Health & Nutrition Ingest** - Authenticated, idempotent, Hevy-filtered webhook receiver landing activity and nutrition data in BRETT (complete 2026-09-03)
 - [ ] **Phase 9: Historical Apple Health Backfill** - One-time streaming import of 4.5 years of history from the user's `export.xml`
-- [ ] **Phase 10: Max-Weight Strength Signal** - Progression and plateau verdicts driven by heaviest weight lifted, with estimated 1RM retained as a second opinion
+- [ ] **Phase 10: Max-Weight Strength Signal** - Last max-weight-lifted surfaced as a labelled secondary display field on progression/plateau responses; estimated-1RM classification unchanged
 - [ ] **Phase 11: Body Measurement History** - Manual measurement entry, per-field source merging, and trends beyond weight-only
 - [ ] **Phase 12: Training Programs & Confirm-Gated Write Tool** - Programs as real data, program-aware thresholds, and BRETT's only MCP write path
 - [ ] **Phase 13: Health Analytics, Reports & Coaching Style** - Activity/nutrition trends, weekly and monthly report tools, and a tightened coaching document
@@ -98,22 +98,24 @@ Notes for planning:
 - Must reuse Phase 8's normalizer and upsert path verbatim. Two parsers produce two shapes and the historical trend silently disagrees with the ongoing one.
 
 ### Phase 10: Max-Weight Strength Signal
-**Goal**: Progression and plateau verdicts reflect the heaviest weight the user actually lifted, with estimated 1RM retained as a visible second opinion rather than deleted.
+**Goal**: Claude can cite the actual last weight the user lifted when explaining why an exercise is flagged as plateaued, without that figure ever driving, contradicting, or being confused with the estimated-1RM classification that continues to produce every verdict.
 **Depends on**: Nothing in v2.0 (independent of Phases 8-9; movable earlier if Apple Health configuration stalls)
 **Requirements**: STR-01, STR-02, STR-03, STR-04
 **Success Criteria** (what must be TRUE):
-  1. Asked "am I progressing on bench press?", Claude reports a trend classified from max weight lifted, with the estimated-1RM view carried alongside it as a labelled secondary signal.
-  2. Plateau reports name the max-weight threshold and window they used, with both re-derived against plate increments and still sharing one underlying number so the trend and plateau verdicts cannot contradict each other.
-  3. An exercise where load is flat but reps are climbing is visibly distinguishable — "max weight flat, estimated 1RM improving" — instead of being silently reported as stable.
-  4. The recomposition verdict's progression input comes from the max-weight trend, and the before/after verdict distribution on live data is recorded rather than assumed unchanged.
-  5. A bodyweight or duration-only exercise still reports "we could not tell" rather than a max weight of 0 kg presented as a real observation.
+  1. Trend and plateau classification (`ExerciseTrend.verdict`, `PlateauResult.plateaued`) remain fully driven by estimated-1RM, unchanged from today — a before/after comparison on live data shows identical verdicts.
+  2. `PlateauResult` (`fitness_get_plateaus`) carries a last-max-weight-lifted figure, sourced from the existing `best_set_per_day`/`SessionBest.best_weight_kg` fold, clearly labelled as a secondary display field that plays no role in computing `plateaued`, `threshold_percent`, or any other existing field.
+  3. Recomposition status's progression input still comes from the e1RM-based trend, unchanged — confirmed, not merely assumed, against live data.
+  4. A bodyweight or duration-only exercise reports "we could not tell" for the new field (None + reason) rather than a weight of 0 kg presented as a real observation.
+  5. `ExerciseTrend` and `fitness_get_exercise_progression` are unchanged — the latter already returns `best_weight_kg` per day, which is why "am I progressing on bench press?" needs no code change to answer with the last weight lifted.
 **Plans**: TBD
 
 Notes for planning:
-- `progression.py`'s own docstring argues *against* max weight and explains why. Quote and answer it in the phase context; do not delete it (PITFALLS #10).
-- Two-signal design, not a substitution — `best_set_per_day` already computes `best_weight_kg`; add a second projection of the same fold, never a second "best set" rule.
-- Max weight is ungated where e1RM is gated, so `UNCLEAR`, `no_estimate_reason`, and `scan_plateau`'s skip semantics all change meaning. Decide per consumer what "insufficient" means before writing code (PITFALLS #11).
-- **Research flag:** the re-derived dead-band values have no correct answer on paper. Live-data calibration, reported as an improving/stable/declining split like D-18's original, is the actual work (PITFALLS #12).
+- **Scope correction, 2026-09-03 discuss-phase session, two rounds:** (1) this phase was originally scoped (see PITFALLS #10/#11/#12, ARCHITECTURE.md §3) as max-weight becoming the primary classifier with e1RM as secondary — a new classifier, re-derived dead-bands, changed insufficient-data semantics. The user reversed this: e1RM keeps classifying, unchanged; max weight is a labelled display-only field. (2) Follow-up investigation during the same session found `ExerciseTrend` (PROG-02) is never exposed through any MCP tool — it only feeds the aggregate whole-account signal in `fitness_get_recomposition_status`/`fitness_get_training_summary` — and `fitness_get_exercise_progression` already returns `best_weight_kg` per day. So the only response with an actual gap (e1RM-derived numbers only, no real weight figure) is `PlateauResult`. The user confirmed: scope narrows to `PlateauResult` only. Do **not** add a field to `ExerciseTrend` — it would be dead weight nothing reads.
+- The dead-band re-derivation research flag (PITFALLS #12) and the insufficient-data semantics question (PITFALLS #11) **no longer apply** — the classifier's input isn't changing, so nothing downstream of it needs recalibrating. Treat PITFALLS #10/#11/#12 and the ARCHITECTURE.md §3 table as historical context for why this scope was originally proposed, not as instructions to implement.
+- Two-signal design still applies, just not for classification: `best_set_per_day` already computes `best_weight_kg` for every session (including the ~17% with no e1RM-qualifying set) — reuse that fold directly as the source of the new field; do not add a second "best set" rule.
+- Reuse the existing `_NO_WEIGHT_RANK` sentinel handling so a bodyweight/duration-only exercise's new field comes back as `None` with a reason, not a real `0 kg` — same honesty requirement PITFALLS #11 described, now scoped to this one display field instead of a classifier input.
+- **Decided in discussion:** the new field is the most recent training day in the lookback window (`series[-1].best_weight_kg` after the ascending-by-`local_day` sort `get_plateaus` already produces), regardless of whether that day qualified for the e1RM plateau streak — not the most recent streak-qualifying session. On a deload/high-rep week these can differ; the literal "last weight you lifted" wins.
+- **Ripple effect, not yet resolved:** Phase 12's "Depends on: Phase 10 (recomposition thresholds settle once, not twice)" assumed Phase 10 would recalibrate `RECOMP_PROGRESSION_NET_BAND` against a new verdict distribution. Under this narrower scope, Phase 10 doesn't touch that constant at all, so the dependency rationale is stale. Re-examine it when Phase 12 is discussed rather than assuming it still holds.
 
 ### Phase 11: Body Measurement History
 **Goal**: The user can record the measurements Hevy never captures, and see how circumference and composition — not just body weight — have moved over time.
