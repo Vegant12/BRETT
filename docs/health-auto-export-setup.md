@@ -290,11 +290,18 @@ laptop; only the rows do.
    created:
 
    ```bash
+   cd backend    # alembic.ini lives here; from the repo root alembic exits with
+                 # "No 'script_location' key found in configuration"
    DATABASE_URL='<production-database-url>' uv run alembic current
    DATABASE_URL='<production-database-url>' uv run alembic heads
    # These must match. If they do not:
    DATABASE_URL='<production-database-url>' uv run alembic upgrade head
    ```
+
+   The inline `DATABASE_URL` is what makes `cd backend` safe here: settings read `.env` relative to
+   the working directory, so nothing under `backend/` would otherwise be configured — and an
+   environment override beats `.env` regardless. Return to the repo root before Step 1; the
+   backfill command below is written from there.
 
    `/health` probes `SELECT 1`, which succeeds against any schema, so a database behind head looks
    perfectly healthy until a query touches a table that does not exist.
