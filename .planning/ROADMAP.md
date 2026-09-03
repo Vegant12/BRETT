@@ -89,7 +89,7 @@ Plans:
 - [x] 09-03-PLAN.md — write half: chunked `ON CONFLICT` upsert with a per-row SAVEPOINT fallback, dry-run gate, freshness bookkeeping, and the SC#3 container proof (wave 3)
 - [x] 09-04-PLAN.md — `backfill-apple-health` CLI verb with a required `--dry-run`/`--write` choice, and its parser/bootstrap guards (wave 4)
 - [x] 09-05-PLAN.md — opt-in `realfile` test pinning the real 191 MB export, plus the `sample_count` false-positive note in the operator doc (wave 3)
-- [ ] 09-06-PLAN.md — §10 backfill runbook, then the rehearsed `--dry-run` against the real file with its figures recorded (wave 5)
+- [x] 09-06-PLAN.md — §10 backfill runbook, then the rehearsed `--dry-run` against the real file with its figures recorded (wave 5)
 - [ ] 09-07-PLAN.md — the production import (human-gated on the D-02 credential) and the dated verification record (wave 6)
 
 Notes for planning:
