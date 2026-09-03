@@ -421,9 +421,7 @@ async def test_backfill_then_webhook_on_the_same_day_is_one_row(engine: AsyncEng
         assert seeded[3] == BACKFILL_STEPS
         assert seeded[5] == BACKFILL_STEP_SAMPLES
 
-        await ingest_payload(
-            maker, user_id=DEFAULT_USER_ID, payload=_payload("device_capture")
-        )
+        await ingest_payload(maker, user_id=DEFAULT_USER_ID, payload=_payload("device_capture"))
         stored = await _read_one(maker, "step_count", DEVICE_CURRENT, BUSY_DAY)
 
         assert stored[3] == WEBHOOK_STEPS, (
@@ -469,9 +467,7 @@ async def test_webhook_then_backfill_on_the_same_day_is_one_row(engine: AsyncEng
     """
     maker = _maker(engine)
     try:
-        await ingest_payload(
-            maker, user_id=DEFAULT_USER_ID, payload=_payload("device_capture")
-        )
+        await ingest_payload(maker, user_id=DEFAULT_USER_ID, payload=_payload("device_capture"))
         seeded = await _read_one(maker, "step_count", DEVICE_CURRENT, BUSY_DAY)
         assert seeded[3] == WEBHOOK_STEPS
 
@@ -515,9 +511,7 @@ async def test_dry_run_writes_nothing(engine: AsyncEngine) -> None:
     """
     maker = _maker(engine)
     try:
-        await ingest_payload(
-            maker, user_id=DEFAULT_USER_ID, payload=_payload("device_capture")
-        )
+        await ingest_payload(maker, user_id=DEFAULT_USER_ID, payload=_payload("device_capture"))
         before_rows = await _read_all_rows(maker)
         before_state = await _all_apple_state(maker)
         assert before_rows, "the seeding delivery wrote nothing; the comparison would be vacuous"
@@ -622,9 +616,7 @@ async def test_one_bad_row_is_skipped_and_the_rest_of_the_chunk_lands(
         encoding="utf-8",
     )
     try:
-        summary, entries = await _run_capturing_logs(
-            monkeypatch, lambda: _run(maker, path=path)
-        )
+        summary, entries = await _run_capturing_logs(monkeypatch, lambda: _run(maker, path=path))
         rows = await _read_all_rows(maker)
 
         assert summary.rows_skipped == 1, (
