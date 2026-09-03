@@ -56,6 +56,7 @@ testpaths = ["backend/tests"]
 pythonpath = ["backend"]
 markers = [
     "integration: test requires a live Postgres container (deselect with -m 'not integration')",
+    "realfile: test requires the user's gitignored export.xml at the repo root (deselect with -m 'not realfile')",
 ]
 
 [tool.ruff]

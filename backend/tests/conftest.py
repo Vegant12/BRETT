@@ -174,6 +174,23 @@ def hae_fixture(name: str) -> dict[str, Any]:
     return payload
 
 
+def hae_xml_fixture(name: str) -> Path:
+    """The PATH of a synthetic Apple Health `export.xml` fixture, not its parsed contents.
+
+    Returns a path rather than a parsed tree on purpose: the module under test owns the parse,
+    and Phase 9's whole memory argument is about HOW the file is read (`iterparse` with the
+    two-clear discipline), which a pre-parsed fixture would hide.
+
+    Provenance, same rule as `hae_fixture`: `export_sample.xml` is HAND-WRITTEN and every
+    quantity in it is synthetic. The user's real `export.xml` is gitignored health data and no
+    measured value from it may be committed. What IS real is the shape -- the HealthKit type
+    identifiers, the unit strings, the attribute order, the `<WorkoutStatistics>` nesting, and
+    the source names `V’s iPhone` / `Vegant’s iPhone` / `Hevy` / `Foodvisor`, the
+    first two carrying U+2019 RIGHT SINGLE QUOTATION MARK rather than an ASCII apostrophe.
+    """
+    return HAE_FIXTURE_DIR / f"{name}.xml"
+
+
 # ---------------------------------------------------------------------------
 # Mocking Hevy: `pytest-httpx2` is a thin adapter over `respx`, and respx asserts
 # internally that a mocked response is an `httpx` (0.x) `Response`. The client under
