@@ -47,9 +47,9 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 ### Body Measurements
 
-- [ ] **BODY-03**: User can manually record a body measurement (weight and/or any circumference/composition field) through a write path, stored with `source='manual'`
-- [ ] **BODY-04**: Manual and Hevy-sourced measurements on the same day merge by field rather than one source overwriting the other's data — fixes `bodyweight.py`'s `_dedupe_by_day` all-or-nothing precedence before manual entry can trigger it
-- [ ] **BODY-05**: System calculates trend/comparison analytics across circumference and composition measurements, not weight-only as today, following the existing body-weight-trend pattern
+- [ ] ~~**BODY-03**: User can manually record a body measurement (weight and/or any circumference/composition field) through a write path, stored with `source='manual'`~~ **DROPPED 2026-09-03** (Phase 11 discuss-phase). The user's real workflow is Hevy-only — measurements are logged in the Hevy app and already sync automatically; no manual-entry need exists. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md`.
+- [ ] ~~**BODY-04**: Manual and Hevy-sourced measurements on the same day merge by field rather than one source overwriting the other's data — fixes `bodyweight.py`'s `_dedupe_by_day` all-or-nothing precedence before manual entry can trigger it~~ **DROPPED 2026-09-03**, same session — BODY-04 only exists to fix a bug that manual entry (BODY-03) would trigger. With BODY-03 dropped, `_dedupe_by_day`'s row-grain precedence stays dormant (zero manual rows will ever exist), exactly as it is today. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md`.
+- [ ] **BODY-05**: System calculates trend/comparison analytics across circumference and composition measurements, not weight-only as today. **Design note (2026-09-03):** does NOT reuse the body-weight-trend's rolling-average shape — coverage is too thin (waist 15/123 live days, fat%/lean-mass 0/123) for that design to ever return a real answer. Instead: latest reading vs. earliest reading in a 90-day window, with staleness flagged separately from insufficient data. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md`.
 
 ### Training Programs
 
@@ -116,8 +116,8 @@ Which phases cover which requirements. Populated during roadmap creation.
 | RPT-01 | Phase 13 | Pending |
 | RPT-02 | Phase 13 | Pending |
 | RPT-03 | Phase 13 | Pending |
-| BODY-03 | Phase 11 | Pending |
-| BODY-04 | Phase 11 | Pending |
+| ~~BODY-03~~ | Phase 11 | **Dropped 2026-09-03** |
+| ~~BODY-04~~ | Phase 11 | **Dropped 2026-09-03** |
 | BODY-05 | Phase 11 | Pending |
 | GOAL-01 | Phase 12 | Pending |
 | GOAL-02 | Phase 12 | Pending |
@@ -127,8 +127,8 @@ Which phases cover which requirements. Populated during roadmap creation.
 | COACH-03 | Phase 13 | Pending |
 
 **Coverage:**
-- v2.0 requirements: 28 total
-- Mapped to phases: 28 ✓
+- v2.0 requirements: 28 total (26 active, 2 dropped — BODY-03/BODY-04, Phase 11 discuss-phase, 2026-09-03)
+- Mapped to phases: 28 ✓ (26 delivered by their phase, 2 dropped with no replacement phase)
 - Unmapped: 0
 
 **By phase:**
@@ -138,7 +138,7 @@ Which phases cover which requirements. Populated during roadmap creation.
 | 8. Apple Health & Nutrition Ingest | HEALTH-06, HEALTH-07, HEALTH-08, HEALTH-09, HEALTH-11, NUTR-02, NUTR-03, NUTR-05 | 8 |
 | 9. Historical Apple Health Backfill | HEALTH-10 | 1 |
 | 10. Max-Weight Strength Signal | STR-01, STR-02, STR-03, STR-04 | 4 |
-| 11. Body Measurement History | BODY-03, BODY-04, BODY-05 | 3 |
+| 11. Body Measurement History | BODY-05 (~~BODY-03~~, ~~BODY-04~~ dropped) | 1 |
 | 12. Training Programs & Confirm-Gated Write Tool | GOAL-01, GOAL-02, GOAL-03, GOAL-04 | 4 |
 | 13. Health Analytics, Reports & Coaching Style | HEALTH-12, NUTR-04, NUTR-06, RPT-01, RPT-02, RPT-03, COACH-02, COACH-03 | 8 |
 

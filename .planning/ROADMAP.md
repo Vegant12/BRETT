@@ -29,7 +29,7 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 - [x] **Phase 8: Apple Health & Nutrition Ingest** - Authenticated, idempotent, Hevy-filtered webhook receiver landing activity and nutrition data in BRETT (complete 2026-09-03)
 - [ ] **Phase 9: Historical Apple Health Backfill** - One-time streaming import of 4.5 years of history from the user's `export.xml`
 - [x] **Phase 10: Max-Weight Strength Signal** - Last max-weight-lifted surfaced as a labelled secondary display field on progression/plateau responses; estimated-1RM classification unchanged (completed 2026-09-03)
-- [ ] **Phase 11: Body Measurement History** - Manual measurement entry, per-field source merging, and trends beyond weight-only
+- [ ] **Phase 11: Body Measurement History** - Trend/comparison analytics across circumference and body-composition measurements — not weight-only — over data already synced from Hevy
 - [ ] **Phase 12: Training Programs & Confirm-Gated Write Tool** - Programs as real data, program-aware thresholds, and BRETT's only MCP write path
 - [ ] **Phase 13: Health Analytics, Reports & Coaching Style** - Activity/nutrition trends, weekly and monthly report tools, and a tightened coaching document
 
@@ -121,21 +121,21 @@ Notes for planning:
 - **Ripple effect, not yet resolved:** Phase 12's "Depends on: Phase 10 (recomposition thresholds settle once, not twice)" assumed Phase 10 would recalibrate `RECOMP_PROGRESSION_NET_BAND` against a new verdict distribution. Under this narrower scope, Phase 10 doesn't touch that constant at all, so the dependency rationale is stale. Re-examine it when Phase 12 is discussed rather than assuming it still holds.
 
 ### Phase 11: Body Measurement History
-**Goal**: The user can record the measurements Hevy never captures, and see how circumference and composition — not just body weight — have moved over time.
+**Goal**: Asked how a circumference or body-composition metric has changed — not just body weight — Claude answers from data already synced from Hevy, or honestly reports insufficient coverage.
 **Depends on**: Nothing in v2.0 (independent; sequenced here to sit beside Phase 12's data-model work and before reports need it)
-**Requirements**: BODY-03, BODY-04, BODY-05
+**Requirements**: BODY-05 (~~BODY-03~~, ~~BODY-04~~ dropped — see Scope Reversal below)
 **Success Criteria** (what must be TRUE):
-  1. User can record a body measurement — weight and/or any circumference/composition field — and it is stored as a manual entry.
-  2. A manual entry on a day that already has a Hevy row keeps both sources' data: the manual weight wins, and the Hevy waist and chest readings for that day survive rather than disappearing.
-  3. Asked "how has my waist changed?", Claude answers with a trend across circumference/composition columns, or honestly reports insufficient coverage for that specific metric.
+  1. Asked "how has my waist changed?" (or any of the 16 non-weight `body_measurements` columns), Claude answers with a latest-vs-90-days-ago comparison sourced from already-synced Hevy data, or honestly reports insufficient coverage for that specific metric.
+  2. A stale "latest" reading (2+ readings exist but the most recent is old) is reported as stale, distinct from a metric with no usable data at all.
+  3. Existing weight-trend behavior (`fitness_get_body_weight_trend`, BODY-01) is unchanged — this phase adds a new, separate tool rather than modifying it.
 **Plans**: TBD
 
 Notes for planning:
-- BODY-04 must ship **in this phase**, with BODY-03, not after. `_dedupe_by_day`'s row-grain "manual wins" rule is dormant only because zero manual rows exist; the first manual entry activates it (PITFALLS #9).
-- Replace alphabetical source ordering with an explicit `MappingProxyType` precedence map that raises on an unknown source, and resolve **per column**, not per row.
-- Regression test that does not exist today: one day, multiple sources, partially overlapping columns, every column resolving independently.
-- Data is thin (`fat_percent`/`lean_mass_kg` are 0 of 123 live rows, `waist_cm` is 15 of 123) — per-metric coverage floors are required or most windows honestly return `insufficient_data`.
-- Write path: CLI (`add-measurement` + bulk import) is recommended over a new authenticated HTTP route; confirm explicitly in the phase context rather than defaulting.
+- **Scope correction, 2026-09-03 discuss-phase session:** this phase was originally scoped (see PITFALLS #9, ROADMAP notes below the strikethrough) around a manual-entry write path (BODY-03) plus the source-merge fix that path would trigger (BODY-04). The user reversed this: Hevy's app already captures every measurement they log, and BRETT already syncs it automatically (`backend/app/integrations/hevy/body.py`) — there is no manual-entry need. BODY-03 and BODY-04 are **dropped from v2.0 entirely**, not deferred to a later phase. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md` for the full discussion.
+- Because no manual rows will ever be written, `_dedupe_by_day`'s row-grain "manual wins" precedence bug (PITFALLS #9) stays dormant — exactly as it is today. No source-precedence map, no per-column merge logic, no regression test for multi-source column resolution. This is a deliberate no-op, not an oversight.
+- BODY-05's design does **not** reuse BODY-01's rolling-average shape. Data is thin (`fat_percent`/`lean_mass_kg` are 0 of 123 live rows, `waist_cm` is 15 of 123) — a 7/14/30-day-average design with 3/5/10-measured-day floors would return `insufficient_data` almost universally. Instead: latest reading vs. earliest reading inside a fixed 90-day window, with its own (lower) coverage floor tailored to spot-check metrics, and staleness flagged separately from insufficient data.
+- Architecture: one generic metric-parameterized analytics function + one MCP tool taking a metric selector (a `StrEnum`, matching `PersonalRecordType`/`TrendVerdict` in `analytics/schemas.py` — not a free string), covering all 16 non-weight columns. Not 16 near-duplicate per-metric functions.
+- No CLI write path, no bulk import format — those were discussed before the scope reversal and are now moot.
 
 ### Phase 12: Training Programs & Confirm-Gated Write Tool
 **Goal**: The user's training program is real, switchable data — and switching it takes a genuine two-step confirmation, while every other MCP tool stays provably read-only.
@@ -199,17 +199,19 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 
 ## Requirement Coverage (v2.0)
 
-All 28 v2.0 requirements map to exactly one phase. No orphans, no duplicates.
+All 28 originally-defined v2.0 requirements map to exactly one phase. No orphans, no duplicates.
+2 (BODY-03, BODY-04) were dropped from Phase 11 during its 2026-09-03 discuss-phase session — see
+`.planning/phases/11-body-measurement-history/11-CONTEXT.md`. 26 remain active.
 
 | Phase | Requirements | Count |
 |-------|--------------|-------|
 | 8. Apple Health & Nutrition Ingest | HEALTH-06, HEALTH-07, HEALTH-08, HEALTH-09, HEALTH-11, NUTR-02, NUTR-03, NUTR-05 | 8 |
 | 9. Historical Apple Health Backfill | HEALTH-10 | 1 |
 | 10. Max-Weight Strength Signal | STR-01, STR-02, STR-03, STR-04 | 4 |
-| 11. Body Measurement History | BODY-03, BODY-04, BODY-05 | 3 |
+| 11. Body Measurement History | BODY-05 (~~BODY-03~~, ~~BODY-04~~ dropped) | 1 |
 | 12. Training Programs & Confirm-Gated Write Tool | GOAL-01, GOAL-02, GOAL-03, GOAL-04 | 4 |
 | 13. Health Analytics, Reports & Coaching Style | HEALTH-12, NUTR-04, NUTR-06, RPT-01, RPT-02, RPT-03, COACH-02, COACH-03 | 8 |
-| **Total** | | **28** |
+| **Total (active)** | | **26** |
 
 ---
 *v2.0 roadmap created: 2026-09-02*
