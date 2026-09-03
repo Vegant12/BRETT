@@ -76,8 +76,13 @@ The T-09-05 disposition is ACCEPT, recorded on the ``ET`` import below rather th
 threat register, because the ``noqa`` is where a future reader meets the decision.
 """
 
-from collections.abc import Mapping
+import logging
+from collections import defaultdict
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from types import MappingProxyType
 
 # ruff's `S` (bandit) set flags stdlib XML parsing and recommends `defusedxml`. The disposition
@@ -92,8 +97,14 @@ from xml.etree import ElementTree as ET  # noqa: S314
 
 import structlog
 
-from app.integrations.health_auto_export.normalize import NormalizeResult
+from app.integrations.health_auto_export.errors import HAEExportFileError
+from app.integrations.health_auto_export.normalize import (
+    NormalizeResult,
+    is_hevy_sourced,
+    normalize_payload,
+)
 from app.integrations.health_auto_export.registry import METRIC_REGISTRY
+from app.integrations.health_auto_export.schemas import HAEPayload
 
 log = structlog.get_logger()
 
@@ -188,3 +199,243 @@ class BackfillScan:
     hevy_datapoints_excluded: int
     multi_point_days: int
     unrecognized_types: Mapping[str, int]
+
+
+class _MultiPointDayCounter(logging.Filter):
+    """Swallow ``health_ingest_multi_point_day`` and count it instead (Pitfall 4).
+
+    For the WEBHOOK that warning means the device's daily aggregation has drifted and replace
+    semantics has become lossy -- ``ingest.py`` is explicit that "under a correct device
+    configuration that warning never fires". For the BACKFILL it means raw HealthKit samples are
+    per-event, which they always are: 7,403 of 8,077 rows on the real file, 91.7%. Left alone it
+    inverts the warning's documented meaning and buries the Hevy-exclusion and skipped-record
+    lines that actually matter.
+
+    Attached to the root HANDLERS rather than to a logger: ``configure_logging`` installs one root
+    ``StreamHandler``, a handler-level filter sees propagated records while a logger-level one
+    does not, and every module in this package logs through its own ``structlog.get_logger()``.
+
+    With ``ProcessorFormatter.wrap_for_formatter``, ``record.msg`` IS the structlog event dict --
+    the final processor calls ``logger.warning(event_dict, extra=...)`` -- which is why this reads
+    a key rather than matching on a rendered string.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        event = record.msg.get("event") if isinstance(record.msg, dict) else None
+        if event == "health_ingest_multi_point_day":
+            self.count += 1
+            return False
+        return True
+
+
+@contextmanager
+def _suppressing_multi_point_days() -> Iterator[_MultiPointDayCounter]:
+    """Suppress-and-count for the duration of ONE ``normalize_payload`` call.
+
+    Scoped deliberately narrowly. ``normalize.py`` is NOT changed: the webhook path must keep
+    warning, because there the condition is real. Removal happens in a ``finally`` so a raising
+    ``normalize_payload`` cannot leave a process-wide filter installed that silently eats the
+    webhook's warning for the rest of the run.
+
+    A process that never called ``configure_logging`` has no root handlers, and unconfigured
+    structlog does not route through stdlib logging at all -- so the warnings print and the count
+    reads 0. That degrades the D-06 summary line rather than failing the run, and it cannot
+    happen on the real path: ``cli.py`` calls ``configure_logging(settings)`` as the first thing
+    ``main()`` does, before any logger or engine exists.
+    """
+    counter = _MultiPointDayCounter()
+    # Snapshot the handler list: `configure_logging` replaces `root.handlers` wholesale, so
+    # iterating the live list on the way out could remove the filter from a different handler
+    # than the one it was added to.
+    handlers = list(logging.getLogger().handlers)
+    for handler in handlers:
+        handler.addFilter(counter)
+    try:
+        yield counter
+    finally:
+        for handler in handlers:
+            handler.removeFilter(counter)
+
+
+def scan_export(path: Path, *, tz: str) -> BackfillScan:
+    """Stream one ``export.xml`` into the rows the webhook would have written.
+
+    PURE and synchronous: no database, no network, and no I/O beyond reading ``path``. The whole
+    file is aggregated before anything is returned, for the two reasons the module docstring
+    gives -- replace semantics is only safe on a complete aggregate, and a dict-keyed row set is
+    what makes duplicate conflict keys structurally impossible.
+
+    ``tz`` is keyword-only with no default, for the reason ``normalize._user_timezone`` states: a
+    hardcoded default is how a wrong-timezone bug passes every test, and at UTC+7 it moves every
+    evening datapoint onto the wrong local day.
+    """
+    try:
+        it: Iterator[_XMLEvent] = ET.iterparse(path, events=("start", "end"))  # noqa: S314
+        _, root = next(it)
+    except (OSError, ET.ParseError, StopIteration) as exc:
+        # Class name only, and no path. `str(ParseError)` renders a byte offset into a document
+        # that is this person's entire health history (T-09-07), and the path is an operator
+        # argument the operator already knows. `from None` for the reason `parse_hae_datetime`
+        # gives: chaining re-attaches the exception whose message is the problem.
+        log.error("health_backfill_unreadable", reason=type(exc).__name__)
+        raise HAEExportFileError from None
+    if root.tag != "HealthData":
+        # Not a HealthKit export. A structural failure, not a salvageable element -- the same
+        # distinction `parse_payload` draws between a broken envelope and an odd datapoint.
+        log.error("health_backfill_unreadable", reason="root_element_is_not_healthdata")
+        raise HAEExportFileError
+
+    # Keyed on the METRIC NAME *and* the UNIT STRING, which costs nothing and closes a real hole:
+    # HAE units are a per-metric user preference that changes silently on the next export, and one
+    # `HAEMetric` carries exactly one metric-level `units`. Two entries with the same `name` and
+    # different `units` both convert correctly through `to_canonical` and land in the SAME
+    # `normalize_payload` bucket, so a mid-file unit change is handled with zero extra logic
+    # instead of being silently mis-converted.
+    buckets: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    unrecognized_types: dict[str, int] = defaultdict(int)
+    skipped: dict[str, int] = defaultdict(int)
+    records_total = 0
+    records_unrecognized = 0
+    records_malformed = 0
+    body_mass_skipped = 0
+    hevy_excluded = 0
+
+    try:
+        for event, elem in it:
+            if event != "end":
+                continue
+            tag = elem.tag
+            if tag == _RECORD_TAG:
+                # The tag check comes FIRST and the `type=` read lives inside it: a
+                # `<WorkoutStatistics>` carries the same `type=` string and no `sourceName`
+                # (T-09-06). See the module docstring.
+                records_total += 1
+                hk_type = elem.get("type", "")
+                if hk_type == _HK_BODY_MASS:
+                    # Its own counter, not "unrecognized": D-01 is a decision, and a decision
+                    # that reads as an accident on the summary invites someone to "fix" it.
+                    body_mass_skipped += 1
+                elif (wire := HK_TO_WIRE.get(hk_type)) is None:
+                    unrecognized_types[hk_type] += 1
+                    records_unrecognized += 1
+                else:
+                    raw_value = elem.get("value")
+                    raw_date = elem.get("startDate")
+                    unit = elem.get("unit", "")
+                    source = elem.get("sourceName")
+                    qty = _read_quantity(raw_value, raw_date, hk_type=hk_type)
+                    if qty is None:
+                        records_malformed += 1
+                    else:
+                        if is_hevy_sourced(source):
+                            # ADVISORY ONLY -- the datapoint is still appended. The actual
+                            # exclusion stays inside `normalize_payload`, so there is exactly one
+                            # implementation of HEALTH-08 and the two paths cannot drift. Do not
+                            # "fix" this apparent double handling by dropping the point here.
+                            hevy_excluded += 1
+                        point: dict[str, object] = {"qty": qty, "date": raw_date}
+                        if source is not None:
+                            # OMIT the key when absent, which is NOT the same as null: that is
+                            # the gait-metric case `HAEDataPoint` models deliberately.
+                            point["source"] = source
+                        buckets[(wire, unit)].append(point)
+            elif tag in _SKIP_AND_COUNT:
+                skipped[tag] += 1
+            # Nothing above may `continue` past these two. `MetadataEntry` and
+            # `WorkoutStatistics` fall through uncounted and are still cleared --
+            # `WorkoutStatistics` is accounted for by its parent `Workout`, and counting it
+            # separately would suggest 224 extra skipped things.
+            elem.clear()
+            root.clear()  # BOTH clears. Without `root.clear()`: 53.5 MB instead of 16.2 MB.
+    except ET.ParseError as exc:
+        # A STRUCTURAL break, not a bad element: expat cannot continue, so there is no remaining
+        # file for D-07's log-and-continue to salvage. Class name only, same T-09-07 reason as
+        # above -- the message carries a line and column into this person's health history.
+        log.error("health_backfill_unreadable", reason=type(exc).__name__)
+        raise HAEExportFileError from None
+
+    datapoints = sum(len(points) for points in buckets.values())
+    log.info(
+        "health_backfill_parsed",
+        records_total=records_total,
+        datapoints=datapoints,
+        unrecognized_records=records_unrecognized,
+        body_mass_skipped=body_mass_skipped,
+        malformed=records_malformed,
+        workouts_skipped=skipped["Workout"],
+        activity_summaries_skipped=skipped["ActivitySummary"],
+    )
+    # One line per DISTINCT identifier -- about 35 on the real file. One line per unrecognized
+    # RECORD would be 208,175 lines. This mirrors `health_ingest_unrecognized_metric`'s
+    # per-metric granularity, which is the same trade for the same reason.
+    for hk_type, count in sorted(unrecognized_types.items()):
+        log.warning("health_backfill_unrecognized_type", hk_type=hk_type, records=count)
+
+    payload = HAEPayload.model_validate(
+        {
+            "data": {
+                "metrics": [
+                    {"name": name, "units": unit, "data": points}
+                    # `sorted` because `normalize_payload`'s deterministic row order is part of
+                    # its contract, and a nondeterministic metric order would make two runs over
+                    # the same file produce different SAVEPOINT sequences -- a difference that
+                    # only ever shows up under a partial failure.
+                    for (name, unit), points in sorted(buckets.items())
+                ]
+            }
+        }
+    )
+    with _suppressing_multi_point_days() as counter:
+        normalized = normalize_payload(payload, tz=tz)
+
+    return BackfillScan(
+        normalized=normalized,
+        records_total=records_total,
+        records_unrecognized=records_unrecognized,
+        records_malformed=records_malformed,
+        body_mass_skipped=body_mass_skipped,
+        workouts_skipped=skipped["Workout"],
+        activity_summaries_skipped=skipped["ActivitySummary"],
+        hevy_datapoints_excluded=hevy_excluded,
+        multi_point_days=counter.count,
+        # A plain, immutable snapshot. Handing the live `defaultdict` out would let a caller's
+        # missing-key read silently create a zero entry and change what the summary reports.
+        unrecognized_types=MappingProxyType(dict(unrecognized_types)),
+    )
+
+
+def _read_quantity(raw_value: str | None, raw_date: str | None, *, hk_type: str) -> Decimal | None:
+    """D-07 per-record validation. Returns ``None`` for a record that must be skipped and counted.
+
+    Not duplicated work, and not optional. ``HAEPayload.model_validate`` validates the payload
+    ATOMICALLY, so a single ``value="not-a-number"`` anywhere in a 191 MB ``export.xml`` would
+    raise ``ValidationError`` for all 230,395 datapoints at once. D-07 says one bad element must
+    never cost the run.
+
+    ``reason`` is a short fixed token, NEVER the offending string: that string is a raw attribute
+    value out of a health-data file, and the token already says everything a reader can act on
+    (T-09-07).
+    """
+    if raw_value is None:
+        log.warning("health_backfill_record_skipped", hk_type=hk_type, reason="missing_value")
+        return None
+    if raw_date is None:
+        log.warning("health_backfill_record_skipped", hk_type=hk_type, reason="missing_start_date")
+        return None
+    try:
+        qty = Decimal(raw_value)
+    except (InvalidOperation, ValueError):
+        log.warning("health_backfill_record_skipped", hk_type=hk_type, reason="unparsable_value")
+        return None
+    if not qty.is_finite():
+        # `Decimal("NaN")` and `Decimal("Infinity")` PARSE. Left through, they propagate into
+        # `normalize_payload`'s sum and land in a `Numeric(14, 4)` column that accepts NaN --
+        # a plausible-looking number that is quietly wrong, which is this project's stated
+        # primary risk.
+        log.warning("health_backfill_record_skipped", hk_type=hk_type, reason="non_finite_value")
+        return None
+    return qty
