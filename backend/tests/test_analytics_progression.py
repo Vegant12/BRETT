@@ -1495,6 +1495,86 @@ async def test_plateaued_exercise_reports_window_and_threshold(
 
 @pytest.mark.integration
 @time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_plateau_reports_literal_last_weight_lifted(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-07: ``last_max_weight_kg`` is the most recent in-window training day's weight.
+
+    Same flat-week fixture as ``test_plateaued_exercise_reports_window_and_threshold`` -- here
+    the streak-qualifying weight and the literal last weight lifted happen to agree (both are the
+    ``_DAY_4`` session), so this pins the ordinary case before the divergence test below pins the
+    case where they do not.
+    """
+    await golden_workout.template(external_id=_PLATEAU, title="Plateau Press")
+    await _seed_plateau_sessions(golden_workout, sessions=_flat_weeks("100.000"))
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID)
+
+    assert result.exercises[0].last_max_weight_kg == Decimal("100.000")
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_last_max_weight_diverges_from_streak_qualifying_weight(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-07's load-bearing case: the last weight lifted is NOT the last streak-qualifying weight.
+
+    Four flat weeks at 100 kg establish the plateau streak, plus one more session on ``_PR_DAY``
+    at 50 kg x 20 reps -- reps above ``MAX_TRUSTED_REPS`` (12), so ``NoEstimateReason.REP_RANGE``
+    applies and ``best_e1rm_kg`` is ``None``. Per
+    ``test_null_estimate_session_neither_extends_nor_breaks``, D-07a SKIPS this session in the
+    streak scan: it neither extends nor breaks it, so every classification field is identical to
+    the 4-session-only case (proving SC#1). But it IS the most recent training day, so
+    ``last_max_weight_kg`` must report its literal weight -- 50 kg, not the streak's 100 kg.
+    """
+    await golden_workout.template(external_id=_PLATEAU, title="Plateau Press")
+    await _seed_plateau_sessions(golden_workout, sessions=_flat_weeks("100.000"))
+    await _seed_plateau_sessions(
+        golden_workout,
+        sessions=[(_PR_DAY, Decimal("50.000"))],
+        reps=20,
+    )
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID)
+
+    row = result.exercises[0]
+    assert row.plateaued is True
+    assert row.qualifying_sessions_in_streak == 4
+    assert row.recent_performance_kg == Decimal("116.667"), (
+        "unchanged from the 4-session-only case -- the skip session neither extends nor breaks "
+        "the streak"
+    )
+    assert row.last_max_weight_kg == Decimal("50.000"), (
+        "the literal most recent training day's weight, not the last streak-qualifying day"
+    )
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
+async def test_last_max_weight_is_none_not_zero_for_bodyweight_exercise(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-08: a bodyweight/duration-only exercise's ``last_max_weight_kg`` is ``None``, never ``0``.
+
+    A pull-up day has reps and no weight recorded at all, so there is nothing to report as a
+    weight -- ``Decimal("0")`` would falsely claim the lifter moved zero kilograms of load.
+    """
+    await golden_workout.template(external_id=_PULLUP, title="Pull Up", exercise_type="reps_only")
+    await golden_workout.workout(
+        start_time=_DAY_4,
+        exercises=[_bench_exercise(GoldenSet(reps=12), template_external_id=_PULLUP)],
+    )
+
+    result = await get_plateaus(session, user_id=DEFAULT_USER_ID)
+
+    row = result.exercises[0]
+    assert row.exercise_template_external_id == _PULLUP
+    assert row.last_max_weight_kg is None
+
+
+@pytest.mark.integration
+@time_machine.travel(_PLATEAU_NOW, tick=False)
 async def test_historical_best_is_seeded_from_before_the_lookback(
     session: AsyncSession, golden_workout: GoldenBuilder
 ) -> None:
