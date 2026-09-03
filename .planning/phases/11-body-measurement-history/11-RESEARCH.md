@@ -648,7 +648,7 @@ catch a wrongly-reused function.
 **If this table is empty:** N/A — see entries above; A3 is inherited/pre-existing rather than
 newly introduced by this phase's research.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Exact staleness threshold (A2) and exact floor (A1) — final numbers**
    - What we know: Both must be ≥ the mathematical/logical minimum (floor ≥ 2; staleness > 0
@@ -659,6 +659,9 @@ newly introduced by this phase's research.
    - Recommendation: Plan should lock in the numbers above (floor=2, stale_after_days=30) as
      defaults, since both are echoed as response fields (`stale_after_days`) rather than
      hardcoded invisibly — a future adjustment is a one-constant change, not a schema migration.
+   - **RESOLVED:** floor=2, stale_after_days=30 (see 11-CONTEXT.md D-07/D-08). Implemented
+     verbatim in 11-01-PLAN.md Task 2 (`MEASURED_DAY_FLOORS[90] = 2`) and 11-03-PLAN.md Task 1
+     (`stale_after_days` response field default 30).
 
 2. **Exact tool name**
    - What we know: CONTEXT.md's discretion note suggests `fitness_get_body_measurement_trend`;
@@ -669,6 +672,8 @@ newly introduced by this phase's research.
    - Recommendation: Lock in `fitness_get_body_measurement_trend` unless the planner has a
      stronger alternative; it matches the `fitness_get_body_weight_trend` naming convention
      exactly (singular metric, `_trend` suffix).
+   - **RESOLVED:** `fitness_get_body_measurement_trend` (see 11-CONTEXT.md Claude's Discretion).
+     Implemented in 11-03-PLAN.md Task 1/2.
 
 ## Environment Availability
 
