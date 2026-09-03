@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE HealthData [
+<!-- HealthKit Export Version: 14 -->
+<!ELEMENT HealthData (ExportDate,(Record|Workout|ActivitySummary)*)>
+<!ATTLIST HealthData
+  locale CDATA #REQUIRED
+>
+<!ELEMENT ExportDate EMPTY>
+<!ATTLIST ExportDate
+  value CDATA #REQUIRED
+>
+<!ELEMENT Record ((MetadataEntry)*)>
+<!ATTLIST Record
+  type          CDATA #REQUIRED
+  unit          CDATA #IMPLIED
+  value         CDATA #IMPLIED
+  sourceName    CDATA #REQUIRED
+  sourceVersion CDATA #IMPLIED
+  device        CDATA #IMPLIED
+  creationDate  CDATA #IMPLIED
+  startDate     CDATA #REQUIRED
+  endDate       CDATA #REQUIRED
+>
+<!ELEMENT MetadataEntry EMPTY>
+<!ATTLIST MetadataEntry
+  key   CDATA #REQUIRED
+  value CDATA #REQUIRED
+>
+<!ELEMENT Workout ((MetadataEntry|WorkoutStatistics)*)>
+<!ATTLIST Workout
+  workoutActivityType   CDATA #REQUIRED
+  duration              CDATA #IMPLIED
+  durationUnit          CDATA #IMPLIED
+  totalEnergyBurned     CDATA #IMPLIED
+  totalEnergyBurnedUnit CDATA #IMPLIED
+  sourceName            CDATA #REQUIRED
+  sourceVersion         CDATA #IMPLIED
+  device                CDATA #IMPLIED
+  creationDate          CDATA #IMPLIED
+  startDate             CDATA #REQUIRED
+  endDate               CDATA #REQUIRED
+>
+<!ELEMENT WorkoutStatistics EMPTY>
+<!ATTLIST WorkoutStatistics
+  type                 CDATA #REQUIRED
+  startDate            CDATA #REQUIRED
+  endDate              CDATA #REQUIRED
+  average              CDATA #IMPLIED
+  minimum              CDATA #IMPLIED
+  maximum              CDATA #IMPLIED
+  sum                  CDATA #IMPLIED
+  unit                 CDATA #IMPLIED
+>
+<!ELEMENT ActivitySummary EMPTY>
+<!ATTLIST ActivitySummary
+  dateComponents           CDATA #IMPLIED
+  activeEnergyBurned       CDATA #IMPLIED
+  activeEnergyBurnedGoal   CDATA #IMPLIED
+  activeEnergyBurnedUnit   CDATA #IMPLIED
+  appleExerciseTime        CDATA #IMPLIED
+  appleExerciseTimeGoal    CDATA #IMPLIED
+  appleStandHours          CDATA #IMPLIED
+  appleStandHoursGoal      CDATA #IMPLIED
+>
+]>
+<!-- Synthetic. Every value here is invented; NOTHING is copied from the user's real
+     export.xml, which is gitignored health data. What IS real and must not be "cleaned up":
+     the element/attribute shapes, the HealthKit type identifiers, the unit strings, and the
+     source names. `V’s iPhone` and `Vegant’s iPhone` carry U+2019 RIGHT SINGLE QUOTATION
+     MARK, not an ASCII apostrophe. An editor normalising it silently breaks the
+     source-name pinning test that success criterion #3 depends on. -->
+<HealthData locale="en_ID">
+ <ExportDate value="2026-08-26 10:09:33 +0700"/>
+
+ <!-- Activity, current phone. Records 1 and 2 share a local day on purpose: that pair is what
+      makes a multi-point day, which RESEARCH Pitfall 4 says the backfill must not warn about. -->
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="V’s iPhone" sourceVersion="26.0" device="&lt;&lt;HKDevice: 0x0000000000000001&gt;, name:iPhone, manufacturer:Apple Inc., model:iPhone, hardware:iPhone18,1, software:26.0&gt;" unit="count" creationDate="2026-09-02 08:01:00 +0700" startDate="2026-09-02 08:00:00 +0700" endDate="2026-09-02 08:30:00 +0700" value="1000"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="V’s iPhone" sourceVersion="26.0" unit="count" creationDate="2026-09-02 09:01:00 +0700" startDate="2026-09-02 09:00:00 +0700" endDate="2026-09-02 09:30:00 +0700" value="500"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="V’s iPhone" sourceVersion="26.0" unit="count" creationDate="2026-09-03 08:01:00 +0700" startDate="2026-09-03 08:00:00 +0700" endDate="2026-09-03 08:30:00 +0700" value="2000"/>
+
+ <!-- The one non-leaf Record: the parser must survive a Record that has children. -->
+ <Record type="HKQuantityTypeIdentifierActiveEnergyBurned" sourceName="V’s iPhone" sourceVersion="26.0" unit="kcal" creationDate="2026-09-02 08:06:00 +0700" startDate="2026-09-02 08:05:00 +0700" endDate="2026-09-02 08:35:00 +0700" value="300">
+  <MetadataEntry key="HKWasUserEntered" value="1"/>
+ </Record>
+
+ <Record type="HKQuantityTypeIdentifierBasalEnergyBurned" sourceName="V’s iPhone" sourceVersion="26.0" unit="kcal" creationDate="2026-09-02 00:11:00 +0700" startDate="2026-09-02 00:10:00 +0700" endDate="2026-09-02 01:10:00 +0700" value="1500"/>
+ <Record type="HKQuantityTypeIdentifierDistanceWalkingRunning" sourceName="V’s iPhone" sourceVersion="26.0" unit="km" creationDate="2026-09-02 08:06:00 +0700" startDate="2026-09-02 08:05:00 +0700" endDate="2026-09-02 08:35:00 +0700" value="4.5"/>
+ <Record type="HKQuantityTypeIdentifierFlightsClimbed" sourceName="V’s iPhone" sourceVersion="26.0" unit="count" creationDate="2026-09-02 08:06:00 +0700" startDate="2026-09-02 08:05:00 +0700" endDate="2026-09-02 08:35:00 +0700" value="3"/>
+
+ <!-- The OLD phone name. Same metric, same local day as the two records above, different
+      sourceName, so two source names must stay two rows. That is the same natural-key
+      property success criterion #3 relies on (source_name is INSIDE the key). -->
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="Vegant’s iPhone" sourceVersion="18.5" device="&lt;&lt;HKDevice: 0x0000000000000002&gt;, name:iPhone, manufacturer:Apple Inc., model:iPhone, hardware:iPhone14,5, software:18.5&gt;" unit="count" creationDate="2026-09-02 07:01:00 +0700" startDate="2026-09-02 07:00:00 +0700" endDate="2026-09-02 07:30:00 +0700" value="700"/>
+
+ <!-- SC#4 / HEALTH-08: the Hevy exclusion. The ActiveEnergyBurned record below is INSIDE the
+      allowlist and must be dropped by `is_hevy_sourced`, not by the registry. The BodyMass
+      record is dropped earlier, by the allowlist: `weight_body_mass` is absent from
+      METRIC_REGISTRY (D-01), so it never reaches the predicate at all. -->
+ <Record type="HKQuantityTypeIdentifierActiveEnergyBurned" sourceName="Hevy" sourceVersion="1.0" unit="kcal" creationDate="2026-09-02 19:05:00 +0700" startDate="2026-09-02 18:00:00 +0700" endDate="2026-09-02 19:00:00 +0700" value="228"/>
+ <Record type="HKQuantityTypeIdentifierBodyMass" sourceName="Hevy" sourceVersion="1.0" unit="kg" creationDate="2026-09-02 06:01:00 +0700" startDate="2026-09-02 06:00:00 +0700" endDate="2026-09-02 06:00:00 +0700" value="80"/>
+
+ <!-- Nutrition, all seven macros on one local day, anchored at local midnight the way a
+      logging app writes a daily total. Note the naming traps these pin: DietaryFatTotal ->
+      total_fat, DietaryProtein -> protein (prefix DROPPED), DietarySugar -> dietary_sugar
+      (prefix KEPT), DietaryEnergyConsumed -> dietary_energy. -->
+ <Record type="HKQuantityTypeIdentifierDietaryEnergyConsumed" sourceName="Foodvisor" sourceVersion="2.0" unit="kcal" creationDate="2026-09-02 21:00:00 +0700" startDate="2026-09-02 00:00:00 +0700" endDate="2026-09-02 00:00:00 +0700" value="2000"/>
+ <Record type="HKQuantityTypeIdentifierDietaryProtein" sourceName="Foodvisor" sourceVersion="2.0" unit="g" creationDate="2026-09-02 21:00:00 +0700" startDate="2026-09-02 00:00:00 +0700" endDate="2026-09-02 00:00:00 +0700" value="150"/>
+ <Record type="HKQuantityTypeIdentifierDietaryCarbohydrates" sourceName="Foodvisor" sourceVersion="2.0" unit="g" creationDate="2026-09-02 21:00:00 +0700" startDate="2026-09-02 00:00:00 +0700" endDate="2026-09-02 00:00:00 +0700" value="200"/>
+ <Record type="HKQuantityTypeIdentifierDietaryFatTotal" sourceName="Foodvisor" sourceVersion="2.0" unit="g" creationDate="2026-09-02 21:00:00 +0700" startDate="2026-09-02 00:00:00 +0700" endDate="2026-09-02 00:00:00 +0700" value="70"/>
+ <Record type="HKQuantityTypeIdentifierDietaryFiber" sourceName="Foodvisor" sourceVersion="2.0" unit="g" creationDate="2026-09-02 21:00:00 +0700" startDate="2026-09-02 00:00:00 +0700" endDate="2026-09-02 00:00:00 +0700" value="25"/>
+ <Record type="HKQuantityTypeIdentifierDietarySugar" sourceName="Foodvisor" sourceVersion="2.0" unit="g" creationDate="2026-09-02 21:00:00 +0700" startDate="2026-09-02 00:00:00 +0700" endDate="2026-09-02 00:00:00 +0700" value="40"/>
+ <Record type="HKQuantityTypeIdentifierDietarySodium" sourceName="Foodvisor" sourceVersion="2.0" unit="mg" creationDate="2026-09-02 21:00:00 +0700" startDate="2026-09-02 00:00:00 +0700" endDate="2026-09-02 00:00:00 +0700" value="2300"/>
+
+ <!-- D-04: types with no METRIC_REGISTRY entry. 47.5% of the real file looks like this. They
+      must be dropped by the allowlist with ONE log line per type, never one per record. -->
+ <Record type="HKQuantityTypeIdentifierWalkingSpeed" sourceName="V’s iPhone" sourceVersion="26.0" unit="km/hr" creationDate="2026-09-02 08:06:00 +0700" startDate="2026-09-02 08:05:00 +0700" endDate="2026-09-02 08:35:00 +0700" value="5"/>
+ <Record type="HKQuantityTypeIdentifierWaistCircumference" sourceName="Hevy" sourceVersion="1.0" unit="cm" creationDate="2026-09-02 06:01:00 +0700" startDate="2026-09-02 06:00:00 +0700" endDate="2026-09-02 06:00:00 +0700" value="80"/>
+
+ <!-- D-07: a malformed Record must be SKIPPED and counted, never abort the run. The first has
+      a non-numeric value; the second omits startDate entirely (the attribute the DTD marks
+      #REQUIRED, which a real truncated export can still violate). -->
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="V’s iPhone" sourceVersion="26.0" unit="count" creationDate="2026-09-04 08:01:00 +0700" startDate="2026-09-04 08:00:00 +0700" endDate="2026-09-04 08:30:00 +0700" value="not-a-number"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="V’s iPhone" sourceVersion="26.0" unit="count" creationDate="2026-09-04 09:01:00 +0700" endDate="2026-09-04 09:30:00 +0700" value="50"/>
+
+ <!-- Pitfall 3: the back door. WorkoutStatistics carries type= but is NOT a Record, uses sum=
+      rather than value=, and has NO sourceName of its own, so `is_hevy_sourced(None)` returns
+      False by design and would not filter it. A parser that keyed on type= instead of on the
+      element tag would ingest Hevy's own workout energy here while the D-04 skip counter still
+      cheerfully reported the workout as skipped. -->
+ <Workout workoutActivityType="HKWorkoutActivityTypeTraditionalStrengthTraining" duration="60" durationUnit="min" totalEnergyBurned="228" totalEnergyBurnedUnit="kcal" sourceName="Hevy" sourceVersion="1.0" creationDate="2026-09-02 19:05:00 +0700" startDate="2026-09-02 18:00:00 +0700" endDate="2026-09-02 19:00:00 +0700">
+  <MetadataEntry key="HKIndoorWorkout" value="1"/>
+  <WorkoutStatistics type="HKQuantityTypeIdentifierActiveEnergyBurned" startDate="2026-09-02 18:00:00 +0700" endDate="2026-09-02 19:00:00 +0700" sum="228" unit="kcal"/>
+ </Workout>
+
+ <!-- D-04: ActivitySummary is a per-day rollup Apple computes. It carries no `type` and no
+      `sourceName`, and must never produce a row: ingesting it would double-count the same
+      active energy the Records above already carry. -->
+ <ActivitySummary dateComponents="2026-09-02" activeEnergyBurned="500" activeEnergyBurnedGoal="600" activeEnergyBurnedUnit="kcal" appleExerciseTime="30" appleExerciseTimeGoal="30" appleStandHours="10" appleStandHoursGoal="12"/>
+</HealthData>
