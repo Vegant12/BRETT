@@ -73,6 +73,13 @@ BUDGETS: dict[str, int] = {
     # against the worst-case history on 2026-09-04.
     "fitness_get_body_measurement_trend": 2_048,
     "fitness_get_body_weight_trend": 4_096,
+    # A fixed-shape object: five metrics x three windows, no caller-widenable list, so this does
+    # not grow with data once the 30-day fetch is saturated. Measured 10,861 bytes against
+    # worst_case_history's 45 seeded Apple Health days on 2026-09-04.
+    "fitness_get_activity_trend": 16_384,
+    # Seven metrics x three windows -- the same fixed shape, wider by two metrics. Measured
+    # 14,875 bytes on 2026-09-04.
+    "fitness_get_nutrition_trend": 20_480,
     "fitness_get_personal_records": 8_192,
     "fitness_get_recomposition_status": 12_288,
     "fitness_get_muscle_group_volume": 12_288,
@@ -111,6 +118,8 @@ WORST_CASE_ARGS: dict[str, dict[str, object]] = {
     "fitness_ping": {},
     "fitness_get_body_measurement_trend": {"metric": "waist_cm"},
     "fitness_get_body_weight_trend": {},
+    "fitness_get_activity_trend": {},
+    "fitness_get_nutrition_trend": {},
     "fitness_get_recomposition_status": {},
     "fitness_get_muscle_group_volume": {"weeks": 52},
     "fitness_get_weekly_volume": {"weeks": 52},
