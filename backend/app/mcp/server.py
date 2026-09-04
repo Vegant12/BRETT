@@ -39,6 +39,7 @@ from app.config import get_settings
 from app.mcp.auth import build_token_verifier
 from app.mcp.context import mcp_lifespan
 from app.mcp.tools.body import (
+    fitness_get_body_measurement_trend,
     fitness_get_body_weight_trend,
     fitness_get_recomposition_status,
 )
@@ -200,6 +201,11 @@ _TOOLS: tuple[tuple[Callable[..., Any], str], ...] = (
     (
         fitness_compare_periods,
         "Two explicit date periods compared, every figure normalized per week.",
+    ),
+    (
+        fitness_get_body_measurement_trend,
+        "Latest-vs-earliest 90-day comparison for one circumference or body-composition "
+        "metric, with staleness and coverage.",
     ),
     (
         fitness_get_body_weight_trend,

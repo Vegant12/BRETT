@@ -34,6 +34,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict
 
 from app.analytics.schemas import (
+    BodyMeasurementTrendResult,
     BodyWeightTrendResult,
     ComparisonLevel,
     ComparisonRate,
@@ -179,6 +180,21 @@ class BodyWeightTrendResponse(_McpModel):
 
     data_available: bool
     trend: BodyWeightTrendResult | None
+
+
+class BodyMeasurementTrendResponse(_McpModel):
+    """BODY-05 for MCP. ``trend`` is the analytics result verbatim, matching
+    ``BodyWeightTrendResponse``.
+
+    ``data_available=False`` means the SERVER could not reach the data. It is NOT the same
+    claim as "this metric has no readings" -- that is
+    ``trend.coverage.insufficient_data=True`` arriving alongside ``data_available=True``, and
+    conflating the two would let Claude narrate an outage as "you have never measured your
+    waist".
+    """
+
+    data_available: bool
+    trend: BodyMeasurementTrendResult | None
 
 
 class RecompositionResponse(_McpModel):
