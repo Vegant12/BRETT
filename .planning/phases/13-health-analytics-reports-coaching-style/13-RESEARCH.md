@@ -651,7 +651,11 @@ still-unresolved external reports rather than training-data recall — but it is
 substitute for D-12's live, human-gated spike, which remains the only way to confirm current
 behavior against BRETT's actual connector.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All three questions below were resolved during planning (2026-09-04). See
+`13-PATTERNS.md`'s "Resolved at plan time" section and the planner's return summary for full
+reasoning; the resolutions are implemented in the plans cited below, not left open.
 
 1. **Is "closed period" the current week/month-to-date, or the most recently completed one?**
    - What we know: `window_from_weeks(weeks=1)` gives "Monday through today" for free; D-04's own
@@ -662,6 +666,12 @@ behavior against BRETT's actual connector.
    - Recommendation: default to "current period, through today" (A1 above) since it costs zero
      new code and matches D-04's literal wording; confirm explicitly in the plan/discuss step if
      there's any doubt, since it changes the date-math for both report tools.
+   - **RESOLVED:** "current period, through today" (A1), confirmed consistent with D-01's
+     Monday–Sunday/calendar-month framing. Derived from `core/time.py::local_week_start`/new
+     `local_month_start` (not `_common.window_from_weeks`, since `app.analytics` may not import
+     `app.mcp`) — implemented in plan 13-03 (helper) and 13-07/13-08 (composer, with a test
+     asserting the analytics-layer Monday matches the MCP-layer Monday exactly, so the two
+     copies cannot drift).
 
 2. **How should "PR highlights" be defined, given no existing cross-exercise PR scan?**
    - What we know: two real options exist (new analytics function vs. reusing `get_plateaus`'
@@ -669,6 +679,12 @@ behavior against BRETT's actual connector.
    - What's unclear: which the user/planner prefers, and how it trades off against the
      query-budget concern.
    - Recommendation: raise explicitly at plan time; this is a real scope decision, not a detail.
+   - **RESOLVED:** Option 1 — a real cross-exercise scan, `get_recent_records`, added to
+     `analytics/records.py` in plan 13-03. `rollup.qualifying_set_rows(template_external_ids=None)`
+     already returns every non-warm-up set in one query (measured 889 rows / 10.07 ms at 12
+     weeks), so the scan is one query and a fold, not a fan-out. Chosen over reusing
+     `get_plateaus`' fields because that option would silently drop `MAX_REPS` and
+     `SESSION_VOLUME`, two of four `PersonalRecordType` members.
 
 3. **Exact nutrition coverage floors (D-06).**
    - What we know: historical data is very sparse (≈3.3%); live-era data (2 days) is
@@ -676,6 +692,13 @@ behavior against BRETT's actual connector.
    - What's unclear: the true ongoing logging rate once more live days accumulate.
    - Recommendation: re-run the SQL in Pitfall 3 at Wave 0/plan time; default to
      `bodyweight.py`'s existing floors in the meantime.
+   - **RESOLVED:** Plan 13-02 (Task 2, wave 1) runs this session's SQL against production via
+     `gcloud secrets versions access latest --secret="brett-database-url"`, with an explicit
+     "reuse existing floors, mark UNMEASURED, follow-up required" fallback branch if production
+     is unreachable during execution too — matching BODY-05's Phase 11 precedent for the
+     equivalent gap. Plan 13-04 then derives
+     `period_measured_day_floor(n) = min(max(2, ceil(0.33n)), n)`, reproducing the 3/7, 5/14,
+     10/30 floors, asserted against `MEASURED_DAY_FLOORS` rather than hardcoded literals.
 
 ## Environment Availability
 
