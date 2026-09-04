@@ -61,6 +61,7 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
 | "Which exercises have stalled?" | `fitness_get_plateaus` | `lookback_weeks`, `plateaued_only` |
 | "Compare my last 4 weeks to the previous 4" | `fitness_compare_periods` | **`period_a_start`, `period_a_end`, `period_b_start`, `period_b_end`**, `include_muscle_groups` |
 | "Has my weight trend changed?" / "am I gaining too fast?" | `fitness_get_body_weight_trend` | *(none)* |
+| "How has my waist/chest/[any circumference] changed?" / "is my body fat down?" | `fitness_get_body_measurement_trend` | **`metric`** (e.g. `waist_cm`, `fat_percent`) |
 | "Is my training appropriate for recomposition?" | `fitness_get_recomposition_status` | *(none)* |
 | "What did I do this week?" / "my last few sessions" | `fitness_get_recent_workouts` | `limit` (max 25) |
 | "What exactly did I do in that session?" | `fitness_get_workout` | **`workout_id`** (from `fitness_get_recent_workouts`) |
@@ -119,6 +120,7 @@ Each is annotated with the tool call it should open with.
   `fitness_get_recomposition_status`
 - "Has my weight trend changed?" → `fitness_get_body_weight_trend`
 - "Is my weight increasing too quickly?" → `fitness_get_body_weight_trend`
+- "Has my waist changed over the last few months?" → `fitness_get_body_measurement_trend`
 
 A broad opener resolves to one call, not five. Start there, read the envelope, and only reach for
 a second tool when the first one leaves the actual question unanswered.
