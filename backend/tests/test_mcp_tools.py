@@ -24,12 +24,12 @@ code in an MCP tool result to carry the bad news, so the tool must still report
 protocol-level error with an SDK-generated message -- which is exactly the
 uncontrolled string this project refuses to let near a driver exception.
 
-**From Phase 6 on, this module covers SIXTEEN tools, not one** (MCP-02, MCP-06).
+**From Phase 6 on, this module covers EIGHTEEN tools, not one** (MCP-02, MCP-06).
 MCP-02's claim is behavioural -- "Claude can call tools covering eleven analytics
 areas" -- so a schema test cannot discharge it. Every registered tool therefore
 gets at least one case here that asserts a real structured answer against seeded
-data, and the dead-database leak test is parametrized over all sixteen rather
-than proving one tool's ``except`` branch and assuming the other fifteen.
+data, and the dead-database leak test is parametrized over all eighteen rather
+than proving one tool's ``except`` branch and assuming the other seventeen.
 
 **``committed_history`` is the fixture to use here, NEVER ``golden_workout``.**
 ``golden_workout`` flushes and rolls back, which is correct for the analytics
@@ -88,7 +88,7 @@ LEAK_MARKERS = (
 # Fixed literals rather than clock-relative dates because nothing here depends on "now"; only the
 # ordering and the span do.
 #
-# Exported rather than private: `test_secret_redaction.py` drives the same sixteen calls against
+# Exported rather than private: `test_secret_redaction.py` drives the same eighteen calls against
 # a HEALTHY database, and two copies of "the minimal call for every tool" is one copy that stops
 # covering a tool the day a signature changes.
 MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
@@ -110,6 +110,8 @@ MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
     },
     "fitness_get_body_measurement_trend": {"metric": "waist_cm"},
     "fitness_get_body_weight_trend": {},
+    "fitness_get_activity_trend": {},
+    "fitness_get_nutrition_trend": {},
     "fitness_get_recomposition_status": {},
     "fitness_get_training_program": {},
     # `lean_bulk` is the seeded active program, so the minimal call is a REFUSAL that writes
@@ -368,11 +370,11 @@ async def test_every_tool_degradation_leaks_nothing(client: TestClient) -> None:
     standing in that path.
 
     Every registered tool is exercised, not just ``fitness_ping``. The guard is applied
-    per-function, so proving one ``except`` branch runs proves nothing about the other fifteen;
-    the equality assertion below makes "all sixteen" structural, so a seventeenth tool registered
+    per-function, so proving one ``except`` branch runs proves nothing about the other seventeen;
+    the equality assertion below makes "all eighteen" structural, so a nineteenth tool registered
     without an entry in ``MINIMAL_TOOL_ARGUMENTS`` fails here rather than being silently skipped.
 
-    One swap for all sixteen, and failures are COLLECTED rather than asserted in the loop: a bare
+    One swap for all eighteen, and failures are COLLECTED rather than asserted in the loop: a bare
     ``assert`` on the first tool would hide every tool after it, and the interesting fact is which
     tools leak, not that one does.
 
@@ -488,7 +490,7 @@ async def test_ping_output_schema_requires_both_fields(client: TestClient) -> No
     async with Client(mcp) as mcp_client:
         tools = (await mcp_client.list_tools()).tools
 
-    # Indexed BY NAME, never positionally. With sixteen tools registered, positional indexing
+    # Indexed BY NAME, never positionally. With eighteen tools registered, positional indexing
     # asserts against whichever tool the SDK happens to list first -- a green test about the
     # wrong tool, and nothing in the failure message would say so.
     ping = {tool.name: tool for tool in tools}["fitness_ping"]
@@ -1103,6 +1105,101 @@ async def test_program_status_is_reported_with_its_start_date_and_what_it_replac
     assert payload["started_on"] == switch_day.isoformat()
     assert payload["previous_program"] == "lean_bulk"
     assert payload["previous_period_ended_on"] == switch_day.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# HEALTH-12/NUTR-06: activity and nutrition trend.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_activity_trend_returns_all_five_metrics(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """HEALTH-12: a real rolling average against seeded step_count/active_energy, and all five
+    activity metrics present in the response regardless of which ones have data.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    anchor_day = _reference_anchor().date()
+    for offset in range(30):
+        local_day = anchor_day - dt.timedelta(days=offset)
+        await committed_history.health_metric(
+            metric="step_count", local_day=local_day, value=Decimal("8000") + Decimal(offset)
+        )
+        await committed_history.health_metric(
+            metric="active_energy", local_day=local_day, value=Decimal("500") + Decimal(offset)
+        )
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_activity_trend", {})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["data_available"] is True
+    trend = payload["trend"]
+    metrics = trend["metrics"]
+    assert len(metrics) == 5, (
+        "ActivityTrendResult always holds all five activity metrics, present even with no data"
+    )
+    by_metric = {row["metric"]: row for row in metrics}
+    step_windows = {w["window_days"]: w for w in by_metric["step_count"]["windows"]}
+    assert step_windows[7]["average"] is not None
+    assert step_windows[7]["coverage"]["insufficient_data"] is False
+
+
+@pytest.mark.integration
+async def test_nutrition_trend_returns_all_seven_metrics_with_independent_coverage(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """NUTR-06's Pitfall 2 proof at the wire level: dietary_energy and sodium carry INDEPENDENT
+    per-metric coverage in the same response -- one shared coverage flag would advertise sodium
+    as trustworthy on the strength of days that recorded no sodium at all.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    anchor_day = _reference_anchor().date()
+    # dietary_energy on 6 of the trailing 7 days -- passes the 3-of-7 floor.
+    for offset in range(6):
+        await committed_history.health_metric(
+            metric="dietary_energy",
+            local_day=anchor_day - dt.timedelta(days=offset),
+            value=Decimal("2000"),
+        )
+    # sodium on only 1 of the trailing 7 days -- fails the 3-of-7 floor.
+    await committed_history.health_metric(
+        metric="sodium", local_day=anchor_day, value=Decimal("2000")
+    )
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_nutrition_trend", {})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["data_available"] is True
+    trend = payload["trend"]
+    metrics = trend["metrics"]
+    assert len(metrics) == 7, (
+        "NutritionTrendResult always holds all seven macros (D-08 -- no metric selector, ever)"
+    )
+    by_metric = {row["metric"]: row for row in metrics}
+    energy_7d = {w["window_days"]: w for w in by_metric["dietary_energy"]["windows"]}[7]
+    sodium_7d = {w["window_days"]: w for w in by_metric["sodium"]["windows"]}[7]
+    assert energy_7d["coverage"]["insufficient_data"] is False, (
+        "6 of 7 trailing days logged must pass the 3-of-7 floor"
+    )
+    assert sodium_7d["coverage"]["insufficient_data"] is True, (
+        "1 of 7 trailing days logged must fail the 3-of-7 floor, in the SAME response as "
+        "dietary_energy passing it -- proving the coverage is per-metric, not shared"
+    )
 
 
 # ---------------------------------------------------------------------------

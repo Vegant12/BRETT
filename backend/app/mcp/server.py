@@ -44,6 +44,10 @@ from app.mcp.tools.body import (
     fitness_get_recomposition_status,
 )
 from app.mcp.tools.comparison import fitness_compare_periods
+from app.mcp.tools.health import (
+    fitness_get_activity_trend,
+    fitness_get_nutrition_trend,
+)
 from app.mcp.tools.ping import fitness_ping
 from app.mcp.tools.program_switch import fitness_switch_training_program
 from app.mcp.tools.programs import fitness_get_training_program
@@ -213,6 +217,16 @@ _TOOLS: tuple[tuple[Callable[..., Any], str], ...] = (
     (
         fitness_get_body_weight_trend,
         "7/14/30-day rolling body-weight averages and the smoothed weekly rate of change.",
+    ),
+    (
+        fitness_get_activity_trend,
+        "7/14/30-day rolling activity averages: steps, active and basal energy, distance and "
+        "flights climbed, with per-window coverage.",
+    ),
+    (
+        fitness_get_nutrition_trend,
+        "7/14/30-day rolling nutrition averages: calories and all six macros in one call, each "
+        "with its own coverage.",
     ),
     (
         fitness_get_training_program,

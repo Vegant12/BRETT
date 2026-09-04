@@ -1,6 +1,6 @@
 """What Claude actually sees: the registry, the annotations, the schemas, the caps.
 
-This file asserts the TOOL SURFACE -- the sixteen names, their read-only annotations, their
+This file asserts the TOOL SURFACE -- the eighteen names, their read-only annotations, their
 published input and output schemas, and the `maximum` on every window argument. It does not
 assert what any tool returns; `test_mcp_tools.py` owns that, and `test_mcp_readonly.py` owns the
 runtime read-only enforcement that the annotations here only *claim*.
@@ -49,6 +49,8 @@ EXPECTED_TOOLS = frozenset(
         "fitness_compare_periods",
         "fitness_get_body_measurement_trend",
         "fitness_get_body_weight_trend",
+        "fitness_get_activity_trend",
+        "fitness_get_nutrition_trend",
         "fitness_get_recomposition_status",
         "fitness_get_training_program",
         "fitness_switch_training_program",
@@ -103,7 +105,7 @@ def _mcp_state() -> Iterator[None]:
 # the payload Claude actually parses.
 
 
-async def test_tool_registry_is_exactly_the_sixteen(_mcp_state: None) -> None:
+async def test_tool_registry_is_exactly_the_eighteen(_mcp_state: None) -> None:
     """MCP-02: the whole tool surface, named.
 
     An exact set rather than a count. A count of 13 stays green through a rename, and a renamed
@@ -136,7 +138,7 @@ _WRITE_ANNOTATION_KEYS = ("readOnlyHint", "destructiveHint", "idempotentHint", "
 
 
 async def test_annotations_are_an_exact_partition(_mcp_state: None) -> None:
-    """MCP-05 / GOAL-04 / T-12-08: fifteen read-only tools and exactly one write tool.
+    """MCP-05 / GOAL-04 / T-12-08: seventeen read-only tools and exactly one write tool.
 
     Written as a PARTITION rather than as "every tool except the known exception".
     Skipping an exception makes the assertion silently weaker with each new exception;
@@ -448,7 +450,7 @@ async def test_a_missing_required_argument_is_rejected_before_the_body_runs(
 async def test_every_tool_has_a_description(_mcp_state: None) -> None:
     """The description is the tool's entire pitch to the model.
 
-    Claude chooses between sixteen tools on their names and descriptions alone. An empty or
+    Claude chooses between eighteen tools on their names and descriptions alone. An empty or
     one-word description is not a cosmetic problem: it is a tool that gets called for the wrong
     question, or never called at all, and the symptom is "Claude ignored my data" rather than
     anything that looks like a bug.

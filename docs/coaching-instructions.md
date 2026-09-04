@@ -62,6 +62,8 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
 | "Compare my last 4 weeks to the previous 4" | `fitness_compare_periods` | **`period_a_start`, `period_a_end`, `period_b_start`, `period_b_end`**, `include_muscle_groups` |
 | "Has my weight trend changed?" / "am I gaining too fast?" | `fitness_get_body_weight_trend` | *(none)* |
 | "How has my waist/chest/[any circumference] changed?" / "is my body fat down?" | `fitness_get_body_measurement_trend` | **`metric`** (e.g. `waist_cm`, `fat_percent`) |
+| "How active have I been?" / "am I hitting my step goal?" | `fitness_get_activity_trend` | *(none)* |
+| "How's my nutrition been?" / "am I hitting my protein?" | `fitness_get_nutrition_trend` | *(none)* |
 | "Is my training appropriate for recomposition?" | `fitness_get_recomposition_status` | *(none)* |
 | "What program am I on?" / "when did I start cutting?" | `fitness_get_training_program` | *(none)* |
 | "Switch me to a cut" / "I'm bulking now" | `fitness_switch_training_program` | **`program`**, then **`confirmation_token`** — two calls |
@@ -85,7 +87,7 @@ Every analytics-backed response carries this envelope. Read it before you answer
 
 | Field | Do this |
 |---|---|
-| `freshness.resources` (`workouts`, `exercise_templates`, `body_measurements`) | Compare each `last_synced_at` against today. If the relevant one is more than a few days old — or `null` — say so **before** answering, and name which resource. A stale `exercise_templates` sync silently changes every per-muscle number. |
+| `freshness.resources` (`workouts`, `exercise_templates`, `body_measurements`, `activity`, `nutrition`) | Compare each `last_synced_at` against today. If the relevant one is more than a few days old — or `null` — say so **before** answering, and name which resource. A stale `exercise_templates` sync silently changes every per-muscle number. |
 | `coverage.sessions_in_window` | State it whenever it is low. Three sessions is not a trend. |
 | `coverage.insufficient_data` | When `true`, give no verdict. Say what is missing and what would make the answer possible. |
 | `coverage.earliest_data_at` | Use it before concluding the user stopped training: it distinguishes "you did not train in this window" from "your synced history does not reach back that far". |
