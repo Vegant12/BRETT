@@ -27,11 +27,13 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 import pytest
+import sqlalchemy as sa
 import time_machine
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import analytics as analytics_package
 from app.analytics.recomposition import (
+    _THRESHOLDS,
     INTERPRETATION_DISCLAIMER,
     RECOMP_MIN_CLASSIFIED_EXERCISES,
     RECOMP_PROGRESSION_NET_BAND,
@@ -44,7 +46,14 @@ from app.analytics.recomposition import (
     classify_recomposition,
     get_recomposition_status,
 )
-from app.analytics.schemas import ProgressionSignal, RecompositionStatus, TrendVerdict
+from app.analytics.schemas import (
+    ProgressionSignal,
+    RecompositionStatus,
+    TrainingProgram,
+    TrendVerdict,
+)
+from app.db.models.program import ProgramPeriod
+from app.db.repositories.programs import get_active_period
 from tests.conftest import (
     ANALYTICS_SECOND_USER_ID,
     DEFAULT_USER_ID,
@@ -58,51 +67,134 @@ from tests.conftest import (
 _RECOMP_NOW = "2026-08-30T02:00:00+00:00"
 _ANCHOR = dt.date(2026, 8, 30)
 
-# Local aliases, for this module only. The 24-pair table below is the whole point of the test and
-# it has to be readable as a TABLE; spelled in full, every row wraps onto three lines and the
-# shape stops being visible.
+# Local aliases, for this module only. The per-program tables below are the whole point of the
+# test and have to be readable as TABLES; spelled in full, every row wraps onto three lines and
+# the shape stops being visible.
 _RS = RecompositionStatus
 _PS = ProgressionSignal
 _WB = _WeightBucket
 _TV = TrendVerdict
+_TP = TrainingProgram
 
-# One rate per bucket, chosen well inside its band so the matrix test cannot pass by landing on a
-# boundary -- the edges are pinned separately by the three threshold tests below.
-_REPRESENTATIVE_RATE: dict[_WeightBucket, Decimal | None] = {
-    _WB.TOO_FAST_GAIN: Decimal("0.50"),
-    _WB.ON_TARGET_GAIN: Decimal("0.20"),
-    _WB.STABLE: Decimal("0.00"),
-    _WB.LOSING: Decimal("-0.50"),
-    _WB.TOO_FAST_LOSS: Decimal("-1.50"),
-    _WB.INSUFFICIENT: None,
+# One rate per bucket per program, chosen well inside its band so the matrix test cannot pass by
+# landing on a boundary -- the edges are pinned separately by the threshold tests below. Every
+# bucket a program's ladder CAN return appears; no bucket it cannot return does.
+_REPRESENTATIVE_RATE_BY_PROGRAM: dict[TrainingProgram, dict[_WeightBucket, Decimal | None]] = {
+    _TP.LEAN_BULK: {
+        _WB.TOO_FAST_GAIN: Decimal("0.50"),
+        _WB.ON_TARGET_GAIN: Decimal("0.20"),
+        _WB.STABLE: Decimal("0.00"),
+        _WB.LOSING: Decimal("-0.50"),
+        _WB.TOO_FAST_LOSS: Decimal("-1.50"),
+        _WB.INSUFFICIENT: None,
+    },
+    _TP.CUT: {
+        _WB.TOO_FAST_GAIN: Decimal("0.50"),
+        _WB.GAINING: Decimal("0.20"),
+        _WB.STABLE: Decimal("0.00"),
+        _WB.SLOW_LOSS: Decimal("-0.30"),
+        _WB.ON_TARGET_LOSS: Decimal("-0.75"),
+        _WB.TOO_FAST_LOSS: Decimal("-1.50"),
+        _WB.INSUFFICIENT: None,
+    },
+    _TP.RECOMP: {
+        _WB.TOO_FAST_GAIN: Decimal("0.75"),
+        _WB.GAINING: Decimal("0.35"),
+        _WB.STABLE: Decimal("0.00"),
+        _WB.LOSING: Decimal("-0.35"),
+        _WB.TOO_FAST_LOSS: Decimal("-0.75"),
+        _WB.INSUFFICIENT: None,
+    },
 }
 
-# D-20's label matrix, restated INDEPENDENTLY of the implementation. All 24 pairs, written out.
-_EXPECTED_MATRIX: dict[tuple[_WeightBucket, ProgressionSignal], RecompositionStatus] = {
-    (_WB.TOO_FAST_GAIN, _PS.POSITIVE): _RS.WEIGHT_GAIN_TOO_FAST,
-    (_WB.TOO_FAST_GAIN, _PS.NEUTRAL): _RS.WEIGHT_GAIN_TOO_FAST,
-    (_WB.TOO_FAST_GAIN, _PS.NEGATIVE): _RS.WEIGHT_GAIN_TOO_FAST,
-    (_WB.TOO_FAST_GAIN, _PS.INSUFFICIENT): _RS.WEIGHT_GAIN_TOO_FAST,
-    (_WB.ON_TARGET_GAIN, _PS.POSITIVE): _RS.LIKELY_MUSCLE_GAIN,
-    (_WB.ON_TARGET_GAIN, _PS.NEUTRAL): _RS.LIKELY_MUSCLE_GAIN,
-    (_WB.ON_TARGET_GAIN, _PS.NEGATIVE): _RS.LIKELY_MUSCLE_GAIN,
-    (_WB.ON_TARGET_GAIN, _PS.INSUFFICIENT): _RS.LIKELY_MUSCLE_GAIN,
-    (_WB.STABLE, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
-    (_WB.STABLE, _PS.NEUTRAL): _RS.WEIGHT_STABLE,
-    (_WB.STABLE, _PS.NEGATIVE): _RS.WEIGHT_STABLE,
-    (_WB.STABLE, _PS.INSUFFICIENT): _RS.WEIGHT_STABLE,
-    (_WB.LOSING, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
-    (_WB.LOSING, _PS.NEUTRAL): _RS.LIKELY_FAT_LOSS,
-    (_WB.LOSING, _PS.NEGATIVE): _RS.LIKELY_FAT_LOSS,
-    (_WB.LOSING, _PS.INSUFFICIENT): _RS.LIKELY_FAT_LOSS,
-    (_WB.TOO_FAST_LOSS, _PS.POSITIVE): _RS.WEIGHT_LOSS_TOO_FAST,
-    (_WB.TOO_FAST_LOSS, _PS.NEUTRAL): _RS.WEIGHT_LOSS_TOO_FAST,
-    (_WB.TOO_FAST_LOSS, _PS.NEGATIVE): _RS.WEIGHT_LOSS_TOO_FAST,
-    (_WB.TOO_FAST_LOSS, _PS.INSUFFICIENT): _RS.WEIGHT_LOSS_TOO_FAST,
-    (_WB.INSUFFICIENT, _PS.POSITIVE): _RS.INSUFFICIENT_DATA,
-    (_WB.INSUFFICIENT, _PS.NEUTRAL): _RS.INSUFFICIENT_DATA,
-    (_WB.INSUFFICIENT, _PS.NEGATIVE): _RS.INSUFFICIENT_DATA,
-    (_WB.INSUFFICIENT, _PS.INSUFFICIENT): _RS.INSUFFICIENT_DATA,
+# D-06/D-20's three label matrices, restated INDEPENDENTLY of the implementation. 24 bulk cells
+# (copied unchanged from today), 28 cut cells, 24 recomp cells -- 76 total. Hand-written and NOT
+# derived from the module: a test that asserts a mapping against itself proves nothing.
+_EXPECTED_MATRIX_BY_PROGRAM: dict[
+    TrainingProgram, dict[tuple[_WeightBucket, ProgressionSignal], RecompositionStatus]
+] = {
+    _TP.LEAN_BULK: {
+        (_WB.TOO_FAST_GAIN, _PS.POSITIVE): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.NEUTRAL): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.NEGATIVE): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.INSUFFICIENT): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.ON_TARGET_GAIN, _PS.POSITIVE): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.ON_TARGET_GAIN, _PS.NEUTRAL): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.ON_TARGET_GAIN, _PS.NEGATIVE): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.ON_TARGET_GAIN, _PS.INSUFFICIENT): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.STABLE, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
+        (_WB.STABLE, _PS.NEUTRAL): _RS.WEIGHT_STABLE,
+        (_WB.STABLE, _PS.NEGATIVE): _RS.WEIGHT_STABLE,
+        (_WB.STABLE, _PS.INSUFFICIENT): _RS.WEIGHT_STABLE,
+        (_WB.LOSING, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
+        (_WB.LOSING, _PS.NEUTRAL): _RS.LIKELY_FAT_LOSS,
+        (_WB.LOSING, _PS.NEGATIVE): _RS.LIKELY_FAT_LOSS,
+        (_WB.LOSING, _PS.INSUFFICIENT): _RS.LIKELY_FAT_LOSS,
+        (_WB.TOO_FAST_LOSS, _PS.POSITIVE): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.NEUTRAL): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.NEGATIVE): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.INSUFFICIENT): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.INSUFFICIENT, _PS.POSITIVE): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.NEUTRAL): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.NEGATIVE): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.INSUFFICIENT): _RS.INSUFFICIENT_DATA,
+    },
+    _TP.CUT: {
+        (_WB.TOO_FAST_GAIN, _PS.POSITIVE): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.NEUTRAL): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.NEGATIVE): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.INSUFFICIENT): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.GAINING, _PS.POSITIVE): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.GAINING, _PS.NEUTRAL): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.GAINING, _PS.NEGATIVE): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.GAINING, _PS.INSUFFICIENT): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.STABLE, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
+        (_WB.STABLE, _PS.NEUTRAL): _RS.WEIGHT_STABLE,
+        (_WB.STABLE, _PS.NEGATIVE): _RS.WEIGHT_STABLE,
+        (_WB.STABLE, _PS.INSUFFICIENT): _RS.WEIGHT_STABLE,
+        (_WB.SLOW_LOSS, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
+        (_WB.SLOW_LOSS, _PS.NEUTRAL): _RS.LIKELY_FAT_LOSS,
+        (_WB.SLOW_LOSS, _PS.NEGATIVE): _RS.LIKELY_FAT_LOSS,
+        (_WB.SLOW_LOSS, _PS.INSUFFICIENT): _RS.LIKELY_FAT_LOSS,
+        (_WB.ON_TARGET_LOSS, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
+        (_WB.ON_TARGET_LOSS, _PS.NEUTRAL): _RS.LIKELY_FAT_LOSS,
+        (_WB.ON_TARGET_LOSS, _PS.NEGATIVE): _RS.LIKELY_FAT_LOSS,
+        (_WB.ON_TARGET_LOSS, _PS.INSUFFICIENT): _RS.LIKELY_FAT_LOSS,
+        (_WB.TOO_FAST_LOSS, _PS.POSITIVE): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.NEUTRAL): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.NEGATIVE): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.INSUFFICIENT): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.INSUFFICIENT, _PS.POSITIVE): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.NEUTRAL): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.NEGATIVE): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.INSUFFICIENT): _RS.INSUFFICIENT_DATA,
+    },
+    _TP.RECOMP: {
+        (_WB.TOO_FAST_GAIN, _PS.POSITIVE): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.NEUTRAL): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.NEGATIVE): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.TOO_FAST_GAIN, _PS.INSUFFICIENT): _RS.WEIGHT_GAIN_TOO_FAST,
+        (_WB.GAINING, _PS.POSITIVE): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.GAINING, _PS.NEUTRAL): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.GAINING, _PS.NEGATIVE): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.GAINING, _PS.INSUFFICIENT): _RS.LIKELY_MUSCLE_GAIN,
+        (_WB.STABLE, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
+        (_WB.STABLE, _PS.NEUTRAL): _RS.WEIGHT_STABLE,
+        (_WB.STABLE, _PS.NEGATIVE): _RS.WEIGHT_STABLE,
+        (_WB.STABLE, _PS.INSUFFICIENT): _RS.WEIGHT_STABLE,
+        (_WB.LOSING, _PS.POSITIVE): _RS.LIKELY_RECOMP_PROGRESSING,
+        (_WB.LOSING, _PS.NEUTRAL): _RS.LIKELY_FAT_LOSS,
+        (_WB.LOSING, _PS.NEGATIVE): _RS.LIKELY_FAT_LOSS,
+        (_WB.LOSING, _PS.INSUFFICIENT): _RS.LIKELY_FAT_LOSS,
+        (_WB.TOO_FAST_LOSS, _PS.POSITIVE): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.NEUTRAL): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.NEGATIVE): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.TOO_FAST_LOSS, _PS.INSUFFICIENT): _RS.WEIGHT_LOSS_TOO_FAST,
+        (_WB.INSUFFICIENT, _PS.POSITIVE): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.NEUTRAL): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.NEGATIVE): _RS.INSUFFICIENT_DATA,
+        (_WB.INSUFFICIENT, _PS.INSUFFICIENT): _RS.INSUFFICIENT_DATA,
+    },
 }
 
 
@@ -133,77 +225,238 @@ def _verdicts(
 # ---------------------------------------------------------------------------
 
 
-def test_full_label_matrix() -> None:
-    """All 24 (bucket, signal) pairs, against a hand-written expected table.
+@pytest.mark.parametrize(
+    ("program", "expected_cells"),
+    [(_TP.LEAN_BULK, 24), (_TP.CUT, 28), (_TP.RECOMP, 24)],
+)
+def test_full_label_matrix(program: TrainingProgram, expected_cells: int) -> None:
+    """All (bucket, signal) pairs for ONE program, against a hand-written expected table.
 
     Without exhaustive coverage a missing branch falls through to a plausible-looking default and
     no single-scenario test notices. The matrix is data precisely so that a gap is a ``KeyError``
-    rather than a silent fallthrough, and this is the test that would surface it.
+    rather than a silent fallthrough, and this is the test that would surface it -- once per
+    program, since D-04 gives each one its own table.
     """
     produced: dict[tuple[_WeightBucket, ProgressionSignal], RecompositionStatus] = {}
-    for bucket, rate in _REPRESENTATIVE_RATE.items():
+    for bucket, rate in _REPRESENTATIVE_RATE_BY_PROGRAM[program].items():
         # Guard on the fixture table itself: a representative rate that lands in the wrong bucket
-        # would silently retarget a quarter of the assertions below.
-        assert _weight_bucket(rate) is bucket, f"{rate!r} does not land in {bucket}"
+        # would silently retarget a chunk of the assertions below.
+        assert _weight_bucket(program=program, rate_percent_per_week=rate) is bucket, (
+            f"{rate!r} does not land in {bucket} for {program}"
+        )
         for signal in ProgressionSignal:
             produced[(bucket, signal)] = classify_recomposition(
-                rate_percent_per_week=rate, signal=signal
+                program=program, rate_percent_per_week=rate, signal=signal
             )
 
-    assert len(produced) == 24
-    assert produced == _EXPECTED_MATRIX
+    assert len(produced) == expected_cells, (
+        f"{program}: expected {expected_cells} cells, a dropped row would produce fewer"
+    )
+    assert produced == _EXPECTED_MATRIX_BY_PROGRAM[program]
 
     assert set(produced.values()) <= set(RecompositionStatus), (
-        "an eighth status is reachable; blueprint 26's enum is the contract Phase 6 codes against"
+        f"an eighth status is reachable on {program}; blueprint 26's enum is the contract "
+        f"Phase 6 codes against"
     )
     recomp_pairs = {
         pair for pair, status in produced.items() if status is _RS.LIKELY_RECOMP_PROGRESSING
     }
-    assert recomp_pairs == {
-        (_WB.STABLE, _PS.POSITIVE),
-        (_WB.LOSING, _PS.POSITIVE),
-    }, (
-        "recomposition was claimed outside the stable and losing rows, or without a positive "
-        "progression signal -- weight flat-or-down WHILE strength rises is the whole claim"
+    expected_recomp_pairs = {
+        _TP.LEAN_BULK: {(_WB.STABLE, _PS.POSITIVE), (_WB.LOSING, _PS.POSITIVE)},
+        _TP.CUT: {
+            (_WB.STABLE, _PS.POSITIVE),
+            (_WB.SLOW_LOSS, _PS.POSITIVE),
+            (_WB.ON_TARGET_LOSS, _PS.POSITIVE),
+        },
+        _TP.RECOMP: {(_WB.STABLE, _PS.POSITIVE), (_WB.LOSING, _PS.POSITIVE)},
+    }[program]
+    assert recomp_pairs == expected_recomp_pairs, (
+        "recomposition was claimed outside the stable/loss rows, or without a positive "
+        "progression signal -- weight flat-or-down WHILE strength rises is the whole claim, and "
+        "on the cut that includes BOTH loss rows because losing at (or slower than) the "
+        "intended pace while strength rises is the same observation"
     )
 
 
 def test_gain_threshold_both_sides() -> None:
-    """D-11, from each side. One side alone is satisfiable by a constant."""
+    """D-01, from each side. One side alone is satisfiable by a constant."""
     assert (
-        classify_recomposition(rate_percent_per_week=Decimal("0.26"), signal=_PS.NEUTRAL)
+        classify_recomposition(
+            program=_TP.LEAN_BULK, rate_percent_per_week=Decimal("0.26"), signal=_PS.NEUTRAL
+        )
         is _RS.WEIGHT_GAIN_TOO_FAST
     )
     for rate in (Decimal("0.25"), Decimal("0.24")):
-        assert classify_recomposition(rate_percent_per_week=rate, signal=_PS.NEUTRAL) is (
-            _RS.LIKELY_MUSCLE_GAIN
-        ), "D-11 is strict: exactly +0.25%/week is on target, not too fast"
+        assert (
+            classify_recomposition(
+                program=_TP.LEAN_BULK, rate_percent_per_week=rate, signal=_PS.NEUTRAL
+            )
+            is _RS.LIKELY_MUSCLE_GAIN
+        ), "D-01 is strict: exactly +0.25%/week is on target, not too fast"
 
 
 def test_loss_threshold_both_sides() -> None:
-    """D-12, from each side. Exactly -1.00%/week is still the losing row."""
+    """D-01, from each side. Exactly -1.00%/week is still the losing row."""
     assert (
-        classify_recomposition(rate_percent_per_week=Decimal("-1.01"), signal=_PS.POSITIVE)
+        classify_recomposition(
+            program=_TP.LEAN_BULK, rate_percent_per_week=Decimal("-1.01"), signal=_PS.POSITIVE
+        )
         is _RS.WEIGHT_LOSS_TOO_FAST
     )
     for rate in (Decimal("-1.00"), Decimal("-0.99")):
-        assert classify_recomposition(rate_percent_per_week=rate, signal=_PS.POSITIVE) is (
-            _RS.LIKELY_RECOMP_PROGRESSING
-        ), "D-12 is strict: exactly -1.00%/week is losing, not too-fast loss"
-        assert classify_recomposition(rate_percent_per_week=rate, signal=_PS.NEUTRAL) is (
-            _RS.LIKELY_FAT_LOSS
+        assert classify_recomposition(
+            program=_TP.LEAN_BULK, rate_percent_per_week=rate, signal=_PS.POSITIVE
+        ) is (_RS.LIKELY_RECOMP_PROGRESSING), (
+            "D-01 is strict: exactly -1.00%/week is losing, not too-fast loss"
         )
+        assert classify_recomposition(
+            program=_TP.LEAN_BULK, rate_percent_per_week=rate, signal=_PS.NEUTRAL
+        ) is (_RS.LIKELY_FAT_LOSS)
 
 
 def test_stable_band_both_edges() -> None:
     """The dead band is INCLUSIVE at both edges; one step outside either is a direction."""
     for rate in (Decimal("0.10"), Decimal("-0.10"), Decimal("0.00")):
-        assert _weight_bucket(rate) is _WB.STABLE
-        assert classify_recomposition(rate_percent_per_week=rate, signal=_PS.NEUTRAL) is (
-            _RS.WEIGHT_STABLE
+        assert _weight_bucket(program=_TP.LEAN_BULK, rate_percent_per_week=rate) is _WB.STABLE
+        assert classify_recomposition(
+            program=_TP.LEAN_BULK, rate_percent_per_week=rate, signal=_PS.NEUTRAL
+        ) is (_RS.WEIGHT_STABLE)
+    assert (
+        _weight_bucket(program=_TP.LEAN_BULK, rate_percent_per_week=Decimal("0.11"))
+        is _WB.ON_TARGET_GAIN
+    )
+    assert (
+        _weight_bucket(program=_TP.LEAN_BULK, rate_percent_per_week=Decimal("-0.11")) is _WB.LOSING
+    )
+
+
+def test_cut_on_target_loss_band_both_edges() -> None:
+    """D-02. -0.50 and -1.00 are BOTH on-target; -0.49 is slow loss and -1.01 is too fast."""
+    for rate in (Decimal("-0.50"), Decimal("-1.00")):
+        assert _weight_bucket(program=_TP.CUT, rate_percent_per_week=rate) is _WB.ON_TARGET_LOSS
+        assert (
+            classify_recomposition(program=_TP.CUT, rate_percent_per_week=rate, signal=_PS.NEUTRAL)
+            is _RS.LIKELY_FAT_LOSS
         )
-    assert _weight_bucket(Decimal("0.11")) is _WB.ON_TARGET_GAIN
-    assert _weight_bucket(Decimal("-0.11")) is _WB.LOSING
+    assert _weight_bucket(program=_TP.CUT, rate_percent_per_week=Decimal("-0.49")) is (
+        _WB.SLOW_LOSS
+    )
+    assert _weight_bucket(program=_TP.CUT, rate_percent_per_week=Decimal("-1.01")) is (
+        _WB.TOO_FAST_LOSS
+    )
+    assert (
+        classify_recomposition(
+            program=_TP.CUT, rate_percent_per_week=Decimal("-1.01"), signal=_PS.POSITIVE
+        )
+        is _RS.WEIGHT_LOSS_TOO_FAST
+    )
+
+
+def test_cut_gain_side_is_one_coarse_bucket() -> None:
+    """D-05. Every gain from just above the dead band to +0.25 reads GAINING -- the cut's
+    ladder has no on-target gain row, because gaining is not the goal."""
+    for rate in (Decimal("0.11"), Decimal("0.20"), Decimal("0.25")):
+        assert _weight_bucket(program=_TP.CUT, rate_percent_per_week=rate) is _WB.GAINING
+    assert _weight_bucket(program=_TP.CUT, rate_percent_per_week=Decimal("0.26")) is (
+        _WB.TOO_FAST_GAIN
+    )
+    assert _weight_bucket(program=_TP.CUT, rate_percent_per_week=Decimal("0.10")) is _WB.STABLE
+
+
+def test_recomp_band_is_wider_than_the_directional_programs() -> None:
+    """D-03. +/-0.25 are stable on recomp and are NOT stable on a bulk or a cut -- the same
+    rate, three programs, and the wider band is the whole point."""
+    for rate in (Decimal("0.25"), Decimal("-0.25"), Decimal("0.00")):
+        assert _weight_bucket(program=_TP.RECOMP, rate_percent_per_week=rate) is _WB.STABLE
+    assert _weight_bucket(program=_TP.LEAN_BULK, rate_percent_per_week=Decimal("0.25")) is not (
+        _WB.STABLE
+    ), "+0.25 is beyond the bulk's +-0.10 stable band -- ON_TARGET_GAIN, not STABLE"
+    assert _weight_bucket(program=_TP.CUT, rate_percent_per_week=Decimal("-0.25")) is (
+        _WB.SLOW_LOSS
+    )
+
+
+def test_recomp_danger_lines_are_symmetric() -> None:
+    """D-03. +0.50 and -0.50 are the last non-danger values; +0.51 and -0.51 are not."""
+    assert _weight_bucket(program=_TP.RECOMP, rate_percent_per_week=Decimal("0.50")) is (
+        _WB.GAINING
+    )
+    assert _weight_bucket(program=_TP.RECOMP, rate_percent_per_week=Decimal("0.51")) is (
+        _WB.TOO_FAST_GAIN
+    )
+    assert _weight_bucket(program=_TP.RECOMP, rate_percent_per_week=Decimal("-0.50")) is (
+        _WB.LOSING
+    )
+    assert _weight_bucket(program=_TP.RECOMP, rate_percent_per_week=Decimal("-0.51")) is (
+        _WB.TOO_FAST_LOSS
+    )
+
+
+def test_program_thresholds_carry_the_locked_values() -> None:
+    """A guard on D-01 through D-03 themselves.
+
+    Every test above drives the thresholds through the classifier, so a silently retuned number
+    would move the boundary and the expectation together. Pinning the literals is what stops
+    that -- the same shape ``test_constants_carry_the_locked_values`` uses for the bulk's own
+    five constants.
+    """
+    bulk = _THRESHOLDS[_TP.LEAN_BULK]
+    assert bulk.stable_band == Decimal("0.10")
+    assert bulk.gain_too_fast == Decimal("0.25")
+    assert bulk.loss_too_fast == Decimal("-1.00")
+    assert bulk.on_target_loss_near is None
+    assert bulk.on_target_loss_far is None
+
+    cut = _THRESHOLDS[_TP.CUT]
+    assert cut.stable_band == Decimal("0.10")
+    assert cut.gain_too_fast == Decimal("0.25")
+    assert cut.loss_too_fast == Decimal("-1.00")
+    assert cut.on_target_loss_near == Decimal("-0.50")
+    assert cut.on_target_loss_far == Decimal("-1.00")
+
+    recomp = _THRESHOLDS[_TP.RECOMP]
+    assert recomp.stable_band == Decimal("0.25")
+    assert recomp.gain_too_fast == Decimal("0.50")
+    assert recomp.loss_too_fast == Decimal("-0.50")
+    assert recomp.on_target_loss_near is None
+    assert recomp.on_target_loss_far is None
+
+
+def test_the_same_rate_classifies_differently_per_program() -> None:
+    """GOAL-02 in one assertion. -0.60%/week with a neutral signal is ``likely_fat_loss`` on a
+    lean bulk (the coarse "losing" catch-all), ``likely_fat_loss`` on a cut too -- but from the
+    ON_TARGET_LOSS bucket rather than an off-target one -- and ``weight_loss_too_fast`` on a
+    recomp, where -0.50 is the danger line. The BUCKETS are asserted as well as the statuses:
+    two programs agreeing on a label for different reasons is exactly the case a status-only
+    assertion cannot see.
+    """
+    rate = Decimal("-0.60")
+
+    bulk_bucket = _weight_bucket(program=_TP.LEAN_BULK, rate_percent_per_week=rate)
+    cut_bucket = _weight_bucket(program=_TP.CUT, rate_percent_per_week=rate)
+    recomp_bucket = _weight_bucket(program=_TP.RECOMP, rate_percent_per_week=rate)
+
+    assert bulk_bucket is _WB.LOSING
+    assert cut_bucket is _WB.ON_TARGET_LOSS
+    assert recomp_bucket is _WB.TOO_FAST_LOSS
+    assert bulk_bucket is not cut_bucket, "same status, different bucket -- not the same reason"
+
+    bulk_status = classify_recomposition(
+        program=_TP.LEAN_BULK, rate_percent_per_week=rate, signal=_PS.NEUTRAL
+    )
+    cut_status = classify_recomposition(
+        program=_TP.CUT, rate_percent_per_week=rate, signal=_PS.NEUTRAL
+    )
+    recomp_status = classify_recomposition(
+        program=_TP.RECOMP, rate_percent_per_week=rate, signal=_PS.NEUTRAL
+    )
+
+    assert bulk_status is _RS.LIKELY_FAT_LOSS
+    assert cut_status is _RS.LIKELY_FAT_LOSS
+    assert recomp_status is _RS.WEIGHT_LOSS_TOO_FAST, (
+        "-0.60%/week is past recomp's -0.50 danger line; the same rate that is a fine cut pace "
+        "is a safety flag on a program with no directional goal"
+    )
 
 
 def test_constants_carry_the_locked_values() -> None:
@@ -684,3 +937,112 @@ async def test_second_users_data_does_not_change_the_verdict(
     # Anti-vacuous guard: this user really was classified, rather than reaching the expected
     # label through an empty progression signal.
     assert result.progression_signal.classified_exercises >= 1
+
+
+# ---------------------------------------------------------------------------
+# D-10: the program-switch straddle. `committed_history`, not `golden_workout` -- closing the
+# migration-seeded open period and opening a new one needs the same close-then-open sequence
+# `test_db_program_history.py` proves, and `committed_history`'s purge-and-reseed teardown is
+# what keeps that seeded period intact for every later test in the file.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_an_unstraddled_window_reports_no_switch(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """The seeded single open period: no switch is reported, and it names ``lean_bulk``."""
+    await _seed_stable_weight(committed_history)
+    await _seed_training(committed_history, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+    await session.commit()
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.active_program is _TP.LEAN_BULK
+    assert result.program_started_on is not None
+    assert result.program_switch_in_window is False
+    assert result.previous_program is None
+    assert result.program_switched_on is None
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_a_window_that_straddles_a_switch_names_the_prior_program_and_date(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """D-10 / SC#2. Close the lean_bulk period mid-window and open a `cut` period on the same
+    day, then read the status: a verdict is STILL produced (never `insufficient_data` for this
+    reason), `active_program` is `cut`, `program_switch_in_window` is True, `previous_program`
+    is `lean_bulk`, and `program_switched_on` is the switch day.
+    """
+    await _seed_stable_weight(committed_history)
+    await _seed_training(committed_history, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    active = await get_active_period(session, user_id=DEFAULT_USER_ID)
+    assert active is not None
+    switch_day = _ANCHOR - dt.timedelta(days=21)
+    # `started_on` is rewritten too, not just `ended_on`: the seeded period's real `started_on`
+    # is today's actual wall-clock day (`_reseed_program_history` derives it outside the frozen
+    # clock), which can land AFTER `_ANCHOR` and fall outside the 12-week lookback entirely.
+    # Backdating it here is what makes this fixture's period a PRIOR period relative to the
+    # frozen `_RECOMP_NOW`, matching what a real multi-week-old lean_bulk period would look like.
+    await session.execute(
+        sa.update(ProgramPeriod)
+        .where(ProgramPeriod.id == active.id)
+        .values(started_on=_ANCHOR - dt.timedelta(days=90), ended_on=switch_day)
+    )
+    await committed_history.program_period(program="cut", started_on=switch_day, ended_on=None)
+    await session.commit()
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.status is not _RS.INSUFFICIENT_DATA, (
+        "a straddled window is still CLASSIFIED (D-10) -- refusing to classify would hide the "
+        "verdict the user asked for"
+    )
+    assert result.active_program is _TP.CUT
+    assert result.program_switch_in_window is True
+    assert result.previous_program is _TP.LEAN_BULK
+    assert result.program_switched_on == switch_day
+
+
+@pytest.mark.integration
+@time_machine.travel(_RECOMP_NOW, tick=False)
+async def test_a_straddled_window_classifies_against_the_current_program(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """D-10's other half, and the one a reader could get backwards. -0.60%/week reads
+    `likely_recomp_progressing` on the PRIOR program (lean_bulk, positive signal, the LOSING
+    bucket) and `weight_loss_too_fast` on the CURRENT program (recomp, past its -0.50 danger
+    line) -- the two programs DISAGREE on the status, not just the bucket. Switching mid-window
+    and asserting the CURRENT program's answer is what proves classification is not a blend and
+    not stuck on the prior program.
+    """
+    await _seed_weigh_ins(committed_history, offsets=_WINDOW_CURRENT, weight="65.00")
+    await _seed_weigh_ins(committed_history, offsets=_WINDOW_D16_ANCHOR, weight="66.56")
+    await _seed_training(committed_history, templates=_THREE_LIFTS, weights=_IMPROVING_WEIGHTS)
+
+    active = await get_active_period(session, user_id=DEFAULT_USER_ID)
+    assert active is not None
+    switch_day = _ANCHOR - dt.timedelta(days=21)
+    # Backdate `started_on` along with closing the period -- see the sibling straddle test for
+    # why: the seeded period's real `started_on` is today's wall-clock day and can otherwise
+    # land after `_ANCHOR`, outside the 12-week lookback entirely.
+    await session.execute(
+        sa.update(ProgramPeriod)
+        .where(ProgramPeriod.id == active.id)
+        .values(started_on=_ANCHOR - dt.timedelta(days=90), ended_on=switch_day)
+    )
+    await committed_history.program_period(program="recomp", started_on=switch_day, ended_on=None)
+    await session.commit()
+
+    result = await get_recomposition_status(session, user_id=DEFAULT_USER_ID)
+
+    assert result.weight_trend.trend_rate_percent_per_week == Decimal("-0.60")
+    assert result.active_program is _TP.RECOMP
+    assert result.program_switch_in_window is True
+    assert result.status is _RS.WEIGHT_LOSS_TOO_FAST, (
+        "classified against the prior (lean_bulk) program would read likely_recomp_progressing "
+        "instead -- the CURRENT program's thresholds must win"
+    )
