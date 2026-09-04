@@ -78,4 +78,12 @@ UNION ALL
   SELECT 'sync_state', count(*),
          md5(string_agg(md5(x::text), ',' ORDER BY x.id))
     FROM sync_state x
+UNION ALL
+  SELECT 'user_program_history', count(*),
+         md5(string_agg(md5(x::text), ',' ORDER BY x.id))
+    FROM user_program_history x
+UNION ALL
+  SELECT 'program_switch_tokens', count(*),
+         md5(string_agg(md5(x::text), ',' ORDER BY x.id))
+    FROM program_switch_tokens x
 ORDER BY 1;

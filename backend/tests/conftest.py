@@ -45,10 +45,11 @@ from sqlalchemy.ext.asyncio import (
 )
 from testcontainers.community.postgres import PostgresContainer
 
-from app.core.time import utc_now
+from app.core.time import local_day, utc_now
 from app.db.models.body import BodyMeasurement
 from app.db.models.exercise import ExerciseMuscle, ExerciseMuscleOverride, ExerciseTemplate
 from app.db.models.health import HealthDailyMetric
+from app.db.models.program import ProgramPeriod, ProgramSwitchToken
 from app.db.models.sync_state import SyncState
 from app.db.models.user import User
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
@@ -507,6 +508,60 @@ class GoldenBuilder:
         )
         await self._session.flush()
 
+    async def program_period(
+        self,
+        *,
+        program: str,
+        started_on: dt.date,
+        ended_on: dt.date | None = None,
+        user_id: uuid.UUID = DEFAULT_USER_ID,
+    ) -> uuid.UUID:
+        """One `user_program_history` row. `ended_on=None` means the OPEN period.
+
+        The partial unique index permits only one open period per user, so a test seeding a
+        history must close every period but the last -- that refusal is the invariant, not an
+        obstacle to work around.
+        """
+        period_id = uuid.uuid4()
+        await self._session.execute(
+            insert(ProgramPeriod).values(
+                id=period_id,
+                user_id=user_id,
+                program=program,
+                started_on=started_on,
+                ended_on=ended_on,
+            )
+        )
+        await self._session.flush()
+        return period_id
+
+    async def switch_token(
+        self,
+        *,
+        nonce: str,
+        from_period_id: uuid.UUID,
+        to_program: str,
+        expires_at: dt.datetime,
+        consumed_at: dt.datetime | None = None,
+        user_id: uuid.UUID = DEFAULT_USER_ID,
+    ) -> uuid.UUID:
+        """One `program_switch_tokens` row, including deliberately expired or already-consumed
+        ones -- both are states the consume path must refuse, so both must be constructible."""
+        token_id = uuid.uuid4()
+        await self._session.execute(
+            insert(ProgramSwitchToken).values(
+                id=token_id,
+                user_id=user_id,
+                nonce=nonce,
+                from_period_id=from_period_id,
+                to_program=to_program,
+                expires_at=expires_at,
+                consumed_at=consumed_at,
+            )
+        )
+        await self._session.flush()
+        return token_id
+
     async def override(
         self,
         *,
@@ -667,6 +722,9 @@ _MCP_PURGE_TABLES: tuple[str, ...] = (
     # A child of `users` only, like `body_measurements` -- nothing references it, so it sits
     # beside its sibling rather than earlier in the chain.
     "health_daily_metrics",
+    # Tokens FK to `user_program_history`, so they are purged first.
+    "program_switch_tokens",
+    "user_program_history",
     "sync_state",
 )
 
@@ -706,9 +764,44 @@ def _mcp_purge_statements() -> list[Executable]:
         "health_daily_metrics": delete(HealthDailyMetric).where(
             HealthDailyMetric.user_id == DEFAULT_USER_ID
         ),
+        "program_switch_tokens": delete(ProgramSwitchToken).where(
+            ProgramSwitchToken.user_id == DEFAULT_USER_ID
+        ),
+        "user_program_history": delete(ProgramPeriod).where(
+            ProgramPeriod.user_id == DEFAULT_USER_ID
+        ),
         "sync_state": delete(SyncState).where(SyncState.user_id == DEFAULT_USER_ID),
     }
     return [by_table[table] for table in _MCP_PURGE_TABLES]
+
+
+async def _reseed_program_history(session: AsyncSession) -> None:
+    """Restore the one open Lean Bulk period migration 0006 seeded.
+
+    The purge above deletes every `user_program_history` row for the default user -- it has
+    to, because a test that switched programs leaves a CLOSED period plus a new open one, and
+    the partial unique index would refuse the next test's own seeding. Deleting the seed and
+    not restoring it would leave every later test facing a user with no program at all.
+
+    The value re-derived here is the one migration 0006's COALESCE fallback produced in this
+    container: the session-scoped database is migrated before any workout exists, so the
+    seeded `started_on` IS `users.created_at` in the user's local timezone. This helper
+    reproduces that branch rather than inventing a second convention.
+    """
+    row = (
+        await session.execute(
+            select(User.created_at, User.timezone).where(User.id == DEFAULT_USER_ID)
+        )
+    ).one()
+    await session.execute(
+        insert(ProgramPeriod).values(
+            id=uuid.uuid4(),
+            user_id=DEFAULT_USER_ID,
+            program="lean_bulk",
+            started_on=local_day(row.created_at, row.timezone),
+            ended_on=None,
+        )
+    )
 
 
 @pytest_asyncio.fixture
@@ -741,6 +834,9 @@ async def committed_history(session: AsyncSession) -> AsyncIterator[GoldenBuilde
         # Second users are rare and always fixture-created; CASCADE takes their
         # whole tree with them, which is why this is the only extra delete needed.
         await session.execute(delete(User).where(User.id == ANALYTICS_SECOND_USER_ID))
+        # The purge above took out `user_program_history` along with everything else,
+        # so the next test would find the default user with no program at all.
+        await _reseed_program_history(session)
         await session.commit()
 
 
