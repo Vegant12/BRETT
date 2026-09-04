@@ -24,12 +24,12 @@ code in an MCP tool result to carry the bad news, so the tool must still report
 protocol-level error with an SDK-generated message -- which is exactly the
 uncontrolled string this project refuses to let near a driver exception.
 
-**From Phase 6 on, this module covers THIRTEEN tools, not one** (MCP-02, MCP-06).
+**From Phase 6 on, this module covers FOURTEEN tools, not one** (MCP-02, MCP-06).
 MCP-02's claim is behavioural -- "Claude can call tools covering eleven analytics
 areas" -- so a schema test cannot discharge it. Every registered tool therefore
 gets at least one case here that asserts a real structured answer against seeded
-data, and the dead-database leak test is parametrized over all thirteen rather
-than proving one tool's ``except`` branch and assuming the other twelve.
+data, and the dead-database leak test is parametrized over all fourteen rather
+than proving one tool's ``except`` branch and assuming the other thirteen.
 
 **``committed_history`` is the fixture to use here, NEVER ``golden_workout``.**
 ``golden_workout`` flushes and rolls back, which is correct for the analytics
@@ -85,7 +85,7 @@ LEAK_MARKERS = (
 # Fixed literals rather than clock-relative dates because nothing here depends on "now"; only the
 # ordering and the span do.
 #
-# Exported rather than private: `test_secret_redaction.py` drives the same thirteen calls against
+# Exported rather than private: `test_secret_redaction.py` drives the same fourteen calls against
 # a HEALTHY database, and two copies of "the minimal call for every tool" is one copy that stops
 # covering a tool the day a signature changes.
 MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
@@ -105,6 +105,7 @@ MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
         "period_b_start": "2026-01-15",
         "period_b_end": "2026-01-28",
     },
+    "fitness_get_body_measurement_trend": {"metric": "waist_cm"},
     "fitness_get_body_weight_trend": {},
     "fitness_get_recomposition_status": {},
 }
@@ -358,11 +359,11 @@ async def test_every_tool_degradation_leaks_nothing(client: TestClient) -> None:
     standing in that path.
 
     Every registered tool is exercised, not just ``fitness_ping``. The guard is applied
-    per-function, so proving one ``except`` branch runs proves nothing about the other twelve; the
-    equality assertion below makes "all thirteen" structural, so a fourteenth tool registered
+    per-function, so proving one ``except`` branch runs proves nothing about the other thirteen;
+    the equality assertion below makes "all fourteen" structural, so a fifteenth tool registered
     without an entry in ``MINIMAL_TOOL_ARGUMENTS`` fails here rather than being silently skipped.
 
-    One swap for all thirteen, and failures are COLLECTED rather than asserted in the loop: a bare
+    One swap for all fourteen, and failures are COLLECTED rather than asserted in the loop: a bare
     ``assert`` on the first tool would hide every tool after it, and the interesting fact is which
     tools leak, not that one does.
 
@@ -947,6 +948,70 @@ async def test_body_weight_trend_returns_rolling_averages(
     assert any(
         trend[field] is not None for field in ("average_7d_kg", "average_14d_kg", "average_30d_kg")
     ), f"{REFERENCE_BODY_MEASUREMENT_DAYS} daily weigh-ins must produce at least one average"
+
+
+@pytest.mark.integration
+async def test_body_measurement_trend_compares_latest_against_earliest(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """BODY-05 end to end: a real two-point comparison arrives as structured content."""
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    await _seed_reference_history(committed_history, session)
+    today = utc_now().date()
+    await committed_history.body_measurement(
+        measured_on=today - dt.timedelta(days=60),
+        weight_kg=None,
+        waist_cm=Decimal("85.00"),
+    )
+    await committed_history.body_measurement(
+        measured_on=today, weight_kg=None, waist_cm=Decimal("81.50")
+    )
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool(
+            "fitness_get_body_measurement_trend", {"metric": "waist_cm"}
+        )
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["data_available"] is True
+    trend = payload["trend"]
+    assert trend["metric"] == "waist_cm"
+    assert trend["window_days"] == 90
+    assert trend["stale_after_days"] == 30
+    assert trend["coverage"]["insufficient_data"] is False
+    assert Decimal(str(trend["delta_value"])) == Decimal("-3.50")
+
+
+@pytest.mark.integration
+async def test_body_measurement_trend_rejects_an_unknown_metric(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """D-09: an unrecognized metric is refused by the tool's own inputSchema.
+
+    Not a 500, and emphatically not an empty result presented as an answer -- "we have no
+    readings for `elbow_cm`" would be a confident report about a metric that does not exist. The
+    `StrEnum` annotation is what makes the SDK's schema validation the thing that refuses it,
+    before any code in this repo runs.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool(
+            "fitness_get_body_measurement_trend", {"metric": "elbow_cm"}
+        )
+
+    assert result.is_error is True
+    rendered = f"{result.structured_content}{result.content}"
+    for leak in LEAK_MARKERS:
+        assert leak not in rendered, f"MCP-06: {leak!r} leaked out of a rejected call"
 
 
 @pytest.mark.integration

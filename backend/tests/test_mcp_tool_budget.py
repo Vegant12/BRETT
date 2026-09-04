@@ -68,6 +68,10 @@ from tests.conftest import WORST_CASE_TEMPLATES
 # set is what stops tool number fourteen from shipping unbounded.
 BUDGETS: dict[str, int] = {
     "fitness_ping": 2_048,
+    # One fixed-shape object with no list, so this does not grow with data -- the 90-day window
+    # is a module constant, not a caller parameter. Measured 1,351 bytes at metric="waist_cm"
+    # against the worst-case history on 2026-09-04.
+    "fitness_get_body_measurement_trend": 2_048,
     "fitness_get_body_weight_trend": 4_096,
     "fitness_get_personal_records": 8_192,
     "fitness_get_recomposition_status": 12_288,
@@ -99,6 +103,7 @@ BUDGETS: dict[str, int] = {
 # in `FIXTURE_DERIVED_TOOLS` instead and built at call time.
 WORST_CASE_ARGS: dict[str, dict[str, object]] = {
     "fitness_ping": {},
+    "fitness_get_body_measurement_trend": {"metric": "waist_cm"},
     "fitness_get_body_weight_trend": {},
     "fitness_get_recomposition_status": {},
     "fitness_get_muscle_group_volume": {"weeks": 52},

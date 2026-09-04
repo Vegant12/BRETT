@@ -570,7 +570,7 @@ def test_accepts_valid_bearer(client: TestClient) -> None:
     while one tool existed; plan 06-09 registered twelve more, and pinning the
     whole registry here would mean every new tool has to be added to an auth
     test that is not about the registry. The exact-registry claim lives in
-    `test_mcp_tool_schemas.test_tool_registry_is_exactly_the_thirteen`.
+    `test_mcp_tool_schemas.test_tool_registry_is_exactly_the_fourteen`.
     """
     response = client.post("/mcp", json=LIST_BODY, headers={**MCP_HDRS, **AUTH})
 

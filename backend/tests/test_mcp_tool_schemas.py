@@ -1,6 +1,6 @@
 """What Claude actually sees: the registry, the annotations, the schemas, the caps.
 
-This file asserts the TOOL SURFACE -- the thirteen names, their read-only annotations, their
+This file asserts the TOOL SURFACE -- the fourteen names, their read-only annotations, their
 published input and output schemas, and the `maximum` on every window argument. It does not
 assert what any tool returns; `test_mcp_tools.py` owns that, and `test_mcp_readonly.py` owns the
 runtime read-only enforcement that the annotations here only *claim*.
@@ -47,6 +47,7 @@ EXPECTED_TOOLS = frozenset(
         "fitness_get_personal_records",
         "fitness_get_plateaus",
         "fitness_compare_periods",
+        "fitness_get_body_measurement_trend",
         "fitness_get_body_weight_trend",
         "fitness_get_recomposition_status",
     }
@@ -100,7 +101,7 @@ def _mcp_state() -> Iterator[None]:
 # the payload Claude actually parses.
 
 
-async def test_tool_registry_is_exactly_the_thirteen(_mcp_state: None) -> None:
+async def test_tool_registry_is_exactly_the_fourteen(_mcp_state: None) -> None:
     """MCP-02: the whole tool surface, named.
 
     An exact set rather than a count. A count of 13 stays green through a rename, and a renamed

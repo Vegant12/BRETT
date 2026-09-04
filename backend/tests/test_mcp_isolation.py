@@ -243,11 +243,11 @@ def test_every_tool_module_guards_its_public_tools() -> None:
                 f"credentials and all -- straight to Claude. Found instead: {preceding!r}"
             )
 
-    # The literal 12 is the whole point of this assertion, so it is written as a literal rather
+    # The literal 13 is the whole point of this assertion, so it is written as a literal rather
     # than derived from anything: the loop above proves every tool it FINDS is decorated, which
     # says nothing if the walk found none of them.
-    assert len(found) == 12, (
-        f"expected 12 public tool coroutines under app/mcp/tools/, found {len(found)}: "
+    assert len(found) == 13, (
+        f"expected 13 public tool coroutines under app/mcp/tools/, found {len(found)}: "
         f"{sorted(found)}. If a tool was added, register it in `server.py`, add it to "
         f"`EXPECTED_TOOLS` in test_mcp_tool_schemas.py, and raise this count -- all three, so a "
         f"new tool cannot ship unguarded and unnoticed"
