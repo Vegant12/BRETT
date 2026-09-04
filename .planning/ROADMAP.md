@@ -30,7 +30,7 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 - [ ] **Phase 9: Historical Apple Health Backfill** - One-time streaming import of 4.5 years of history from the user's `export.xml`
 - [x] **Phase 10: Max-Weight Strength Signal** - Last max-weight-lifted surfaced as a labelled secondary display field on progression/plateau responses; estimated-1RM classification unchanged (completed 2026-09-03)
 - [x] **Phase 11: Body Measurement History** - Trend/comparison analytics across circumference and body-composition measurements — not weight-only — over data already synced from Hevy (completed 2026-09-04)
-- [ ] **Phase 12: Training Programs & Confirm-Gated Write Tool** - Programs as real data, program-aware thresholds, and BRETT's only MCP write path
+- [x] **Phase 12: Training Programs & Confirm-Gated Write Tool** - Programs as real data, program-aware thresholds, and BRETT's only MCP write path (completed 2026-09-04)
 - [ ] **Phase 13: Health Analytics, Reports & Coaching Style** - Activity/nutrition trends, weekly and monthly report tools, and a tightened coaching document
 
 ## Phase Details
@@ -159,7 +159,7 @@ Plans:
 - [x] 12-02-PLAN.md — `app/db/repositories/programs.py`: period resolution plus the atomic single-use token issue/consume/apply, with the TTL, replay, wrong-program and interleaving proofs (wave 2)
 - [x] 12-03-PLAN.md — `recomposition.py` per-program thresholds and three explicit label matrices (76 cells), plus `RecompositionResult`'s active-program and D-10 straddle fields (wave 3)
 - [x] 12-04-PLAN.md — `writable_session`, the two wire models, the read tool and the confirm-gated write tool, and the narrowed single-module write allowlist (wave 3)
-- [ ] 12-05-PLAN.md — registration outside the `_TOOLS` loop with explicit write annotations, the exact read-only/write partition, budgets, leak scans and the coaching-doc entry (wave 4)
+- [x] 12-05-PLAN.md — registration outside the `_TOOLS` loop with explicit write annotations, the exact read-only/write partition, budgets, leak scans and the coaching-doc entry (wave 4)
 
 Notes for planning:
 - **Defining criterion is #3.** `confirm: bool` is a naming convention, not a gate — the model can set it `true` on the first call. `ctx.elicit()` is unavailable under `stateless_http=True` and is not a guaranteed human gate anyway (PITFALLS #13).
@@ -206,7 +206,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 9. Historical Apple Health Backfill | v2.0 | 0/7 | Planned | - |
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
 | 11. Body Measurement History | v2.0 | 3/3 | Complete    | 2026-09-04 |
-| 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 4/5 | In Progress|  |
+| 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 5/5 | Complete   | 2026-09-04 |
 | 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/TBD | Not started | - |
 
 ## Requirement Coverage (v2.0)
