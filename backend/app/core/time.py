@@ -70,6 +70,23 @@ def local_week_start(ts: dt.datetime, tz: str) -> dt.date:
     return day - dt.timedelta(days=day.weekday())
 
 
+def local_month_start(ts: dt.datetime, tz: str) -> dt.date:
+    """First calendar day of the user's local month -- matches ``date_trunc('month', ...)``.
+
+    The month sibling of ``local_week_start``, and it lives here for the reason this module's
+    docstring gives: every day/week grouping in this project routes through here. RPT-02's
+    calendar-month report window is the first month-grained question the project has asked, and
+    an ad-hoc ``day.replace(day=1)`` inside ``analytics/reports.py`` would be the second place
+    the timezone rule is applied and the first place it could be applied wrongly.
+
+    At UTC+7, 18:00Z on the last day of a month is already 01:00 on the FIRST of the next one.
+    Deriving the month from the server's UTC date instead would report the previous month for
+    seven hours out of every twenty-four -- silently, as a report that is one month stale.
+    """
+    day = local_day(ts, tz)
+    return day.replace(day=1)
+
+
 def local_day_bounds(day: dt.date, tz: str) -> tuple[dt.datetime, dt.datetime]:
     """Half-open ``[start, end)`` UTC range covering one local day.
 

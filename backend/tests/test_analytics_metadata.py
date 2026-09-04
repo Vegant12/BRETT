@@ -32,6 +32,8 @@ from app.analytics.metadata import (
     FRESHNESS_RESOURCES_APPLE_HEALTH,
     FRESHNESS_RESOURCES_BODY,
     FRESHNESS_RESOURCES_MUSCLE,
+    FRESHNESS_RESOURCES_NUTRITION,
+    FRESHNESS_RESOURCES_REPORT,
     FRESHNESS_RESOURCES_WORKOUTS,
     INSUFFICIENT_DATA_SESSION_THRESHOLD,
     MEASURED_DAY_FLOORS,
@@ -324,6 +326,19 @@ def test_resource_names_are_unique_across_providers() -> None:
         f"switch, every MCP tool response shape changes too. Overlap: "
         f"{sorted(SYNC_RESOURCES & APPLE_HEALTH_RESOURCES)}"
     )
+
+
+def test_the_report_bundle_is_the_union_of_the_three_it_replaces() -> None:
+    """RPT-01/RPT-02: `FRESHNESS_RESOURCES_REPORT` must equal the union of the three existing
+    bundles it composes from, exactly -- not by concatenation, by NAMING all five pairs. This
+    test is the guard that keeps the two spellings from drifting apart.
+    """
+    assert set(FRESHNESS_RESOURCES_REPORT) == (
+        set(FRESHNESS_RESOURCES_ALL)
+        | set(FRESHNESS_RESOURCES_ACTIVITY)
+        | set(FRESHNESS_RESOURCES_NUTRITION)
+    )
+    assert len(FRESHNESS_RESOURCES_REPORT) == 5
 
 
 def test_build_freshness_has_no_provider_default() -> None:
