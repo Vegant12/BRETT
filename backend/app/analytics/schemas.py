@@ -225,6 +225,26 @@ class RecompositionStatus(StrEnum):
     INSUFFICIENT_DATA = "insufficient_data"
 
 
+class TrainingProgram(StrEnum):
+    """GOAL-01/GOAL-02: the user's active training program, as data rather than a constant.
+
+    Each member's VALUE is the EXACT string stored in ``user_program_history.program`` and
+    in ``program_switch_tokens.to_program``, so there is no second name->value mapping for a
+    future rename to leave behind -- the same discipline ``BodyMeasurementMetric`` applies to
+    column names.
+
+    A ``StrEnum`` and not a free string: the MCP SDK derives the write tool's ``inputSchema``
+    from this annotation, so "Lean Bulk", "cutting" or a hallucinated fourth program is
+    rejected at the schema layer before any code in this repo runs. Three members and no
+    fourth -- ``recomposition.py`` carries one fully explicit threshold table and one label
+    matrix PER member (D-04), so a fourth would be a missing table, not a missing branch.
+    """
+
+    LEAN_BULK = "lean_bulk"
+    CUT = "cut"
+    RECOMP = "recomp"
+
+
 class PersonalRecordType(StrEnum):
     """PROG-04's five record types. ``value`` units differ per type -- see ``PersonalRecord``.
 

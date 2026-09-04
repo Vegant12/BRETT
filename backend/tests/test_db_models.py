@@ -28,10 +28,14 @@ def test_metadata_contains_expected_tables() -> None:
 
     Kept as an equality assertion, not a subset check: the value of this test is that a
     stray model or a typo'd `__tablename__` fails the FAST suite on the commit that
-    introduces it. This is the complete Phase 3 schema plus Phase 8's single addition.
+    introduces it. This is the complete Phase 3 schema plus Phase 8's single addition,
+    plus Phase 12's two additions.
 
     `health_daily_metrics` is the ONLY table Phase 8 adds (D-02). A `health_workouts`
     appearing here would mean the Hevy-re-export exclusion had been reopened.
+    `user_program_history` and `program_switch_tokens` are the ONLY tables Phase 12
+    adds (GOAL-01); a mutable `users.active_program` column appearing instead of
+    `user_program_history` would mean PITFALLS #16 had been reopened.
     """
     assert set(Base.metadata.tables) == {
         "users",
@@ -44,6 +48,8 @@ def test_metadata_contains_expected_tables() -> None:
         "body_measurements",
         "sync_state",
         "health_daily_metrics",
+        "user_program_history",
+        "program_switch_tokens",
     }
 
 
