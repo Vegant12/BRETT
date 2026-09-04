@@ -468,6 +468,52 @@ class PersonalRecordsResult(_AnalyticsModel):
     freshness: FreshnessMetadata
 
 
+class RecentRecord(_AnalyticsModel):
+    """One personal record that was SET inside a window, with the exercise that set it.
+
+    Deliberately NOT ``PersonalRecordsResult`` narrowed. That model answers "what are this
+    exercise's best-ever numbers", is scoped to ONE exercise by a mandatory
+    ``exercise_template_external_id``, and its ``records`` are the best values found INSIDE the
+    window whether or not they beat anything. This model answers a different question -- "what
+    got beaten this week, across everything I trained" -- and a value that merely led its own
+    window is not a record. Reporting one as the other is the plausible-looking-but-quietly-wrong
+    failure this project treats as its primary risk.
+
+    ``previous_value`` is the incumbent this record beat, computed from all history strictly
+    BEFORE ``window_start``. ``None`` means there was no incumbent -- the first time this
+    exercise produced an eligible set of this type -- which is a real and different fact from
+    "beat a small number", and collapsing the two would let a first-ever log read as a
+    breakthrough.
+    """
+
+    exercise_template_external_id: str
+    title: str | None
+    record: PersonalRecord
+    previous_value: Decimal | None
+
+
+class RecentRecordsResult(_AnalyticsModel):
+    """PROG-04 asked cross-exercise, for D-02's report "PR highlights".
+
+    ``records`` is sorted ``achieved_on`` DESCENDING, then ``record.record_type.value``, then
+    ``exercise_template_external_id`` -- newest first, because the consumer TRUNCATES this list
+    to a small cap and the most recent record is the one a weekly report is about. The two
+    secondary keys exist so the truncation point is deterministic rather than planner-dependent,
+    which is the same reason ``get_recent_periods`` spells out its full ordering.
+
+    ``window_start``/``window_end`` are echoed as FIELDS for ``PlateauResult``'s reason: a
+    figure whose window the reader cannot see is a figure the reader has to trust blindly. They
+    matter more here than usual, because the report that embeds this carries a
+    ``get_recomposition_status`` verdict anchored on a DIFFERENT window (D-01).
+    """
+
+    window_start: dt.date
+    window_end: dt.date
+    records: list[RecentRecord]
+    coverage: CoverageMetadata
+    freshness: FreshnessMetadata
+
+
 class ComparisonRate(_AnalyticsModel):
     """CMP-01: a COUNT or a SUM, normalized per week. Never a maximum, a rate or an average.
 
