@@ -26,3 +26,12 @@ time. This is a latent bug in Phase 11's test fixture, not something this plan's
 plan's `files_modified`). Worth a follow-up fix: either move `_seed_reference_history`'s
 measurement window to start at `offset=1` (yesterday) so it never lands on "today", or have the
 failing test's own seed skip the day `_seed_reference_history` already claimed.
+
+## Plan 12-02
+
+Same pre-existing flake reproduced again during Task 3's full-suite verification (`uv run
+pytest backend -q`, wall-clock ~11:02 UTC): `test_body_measurement_trend_compares_latest_
+against_earliest` failed on the same `uq_body_measurements_user_source_measured_on` collision.
+Confirmed unrelated to this plan's changes (`backend/app/db/repositories/programs.py` and
+`backend/tests/test_db_program_history.py`, neither of which touches `body_measurements`). Not
+fixed here for the same reason as above -- still out of scope.
