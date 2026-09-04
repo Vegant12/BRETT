@@ -45,6 +45,8 @@ from app.mcp.tools.body import (
 )
 from app.mcp.tools.comparison import fitness_compare_periods
 from app.mcp.tools.ping import fitness_ping
+from app.mcp.tools.program_switch import fitness_switch_training_program
+from app.mcp.tools.programs import fitness_get_training_program
 from app.mcp.tools.progression import (
     fitness_get_exercise_progression,
     fitness_get_plateaus,
@@ -83,7 +85,9 @@ _INSTRUCTIONS = (
     "stalled lifts. Every response carries freshness.resources and coverage "
     "(sessions_in_window, insufficient_data, earliest_data_at): report stale or sparse "
     "data before answering, and give no verdict when insufficient_data is true. "
-    "data_available=false means the server could not answer, not that the user has no data."
+    "data_available=false means the server could not answer, not that the user has no data. "
+    "fitness_switch_training_program is the only tool that writes; it needs two calls and a "
+    "token from the first, and you must ask the user before the second."
 )
 
 mcp = MCPServer(
@@ -179,8 +183,7 @@ _TOOLS: tuple[tuple[Callable[..., Any], str], ...] = (
     ),
     (
         fitness_get_muscle_group_volume,
-        "Per-muscle-group direct and indirect set volume over the last N weeks, "
-        "all 19 groups.",
+        "Per-muscle-group direct and indirect set volume over the last N weeks, all 19 groups.",
     ),
     (
         fitness_get_training_frequency,
@@ -212,6 +215,11 @@ _TOOLS: tuple[tuple[Callable[..., Any], str], ...] = (
         "7/14/30-day rolling body-weight averages and the smoothed weekly rate of change.",
     ),
     (
+        fitness_get_training_program,
+        "The active training program (lean bulk, cut or recomp), when it started, and which "
+        "program it replaced.",
+    ),
+    (
         fitness_get_recomposition_status,
         "Recomposition verdict from the body-weight trend and training progression, "
         "with its disclaimer.",
@@ -220,6 +228,41 @@ _TOOLS: tuple[tuple[Callable[..., Any], str], ...] = (
 
 for _fn, _description in _TOOLS:
     mcp.add_tool(_fn, name=_fn.__name__, description=_description, annotations=READ_ONLY)
+
+# GOAL-03/GOAL-04, PITFALLS #14. The ONE write tool, registered OUTSIDE the loop above with
+# its OWN annotation object -- deliberately, not for lack of a tidier option. Adding it to
+# `_TOOLS` would hand it `READ_ONLY` and advertise a destructive tool as read-only, which is
+# the single most misleading thing this server could publish. Every one of the four flags is
+# set explicitly: the SPEC defaults for `destructiveHint` and `openWorldHint` are `true`, so
+# an omitted flag is a claim, not a silence.
+#
+# `destructive_hint=True` because the switch changes how every future recomposition verdict
+# is classified. `idempotent_hint=False` because the second call with the same token does NOT
+# repeat the first: the token is single-use, and the repeat is refused.
+# `open_world_hint=False` because this tool touches this project's own database and nothing
+# else.
+#
+# The annotation is a HINT -- the SDK's own docs say annotations "should not be relied upon
+# for security enforcement". The actual gate is the server-issued single-use token in
+# `app/mcp/tools/program_switch.py`, and the actual read-only enforcement everywhere else is
+# `_common.read_only_session`'s PostgreSQL READ ONLY transaction.
+WRITE_TOOL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+
+mcp.add_tool(
+    fitness_switch_training_program,
+    name="fitness_switch_training_program",
+    description=(
+        "Switch the active training program (lean bulk, cut or recomp). TWO CALLS: the "
+        "first returns a warning and a one-time token and changes nothing; only a second "
+        "call echoing that exact token performs the switch. Tokens expire in 5 minutes."
+    ),
+    annotations=WRITE_TOOL,
+)
 
 # MUST run at import time. See the module docstring.
 mcp_app = mcp.streamable_http_app(
