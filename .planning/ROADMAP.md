@@ -152,7 +152,14 @@ Notes for planning:
   3. A single tool call cannot change the active program — the first call writes nothing and returns a one-time token; only a second call echoing that exact token performs the switch.
   4. A token issued for one program cannot be replayed to switch to a different one, cannot be reused after consumption, and stops working after its short TTL expires.
   5. Every MCP tool except the one named program-switch tool is still machine-checked as read-only, and adding a second write module would fail the test suite.
-**Plans**: TBD
+**Plans**: 5 plans in 4 waves
+
+Plans:
+- [ ] 12-01-PLAN.md — `TrainingProgram` enum, `user_program_history` + `program_switch_tokens` models, migration 0006 with the live-data-derived D-08 seed, and the GoldenBuilder/purge fixtures (wave 1)
+- [ ] 12-02-PLAN.md — `app/db/repositories/programs.py`: period resolution plus the atomic single-use token issue/consume/apply, with the TTL, replay, wrong-program and interleaving proofs (wave 2)
+- [ ] 12-03-PLAN.md — `recomposition.py` per-program thresholds and three explicit label matrices (76 cells), plus `RecompositionResult`'s active-program and D-10 straddle fields (wave 3)
+- [ ] 12-04-PLAN.md — `writable_session`, the two wire models, the read tool and the confirm-gated write tool, and the narrowed single-module write allowlist (wave 3)
+- [ ] 12-05-PLAN.md — registration outside the `_TOOLS` loop with explicit write annotations, the exact read-only/write partition, budgets, leak scans and the coaching-doc entry (wave 4)
 
 Notes for planning:
 - **Defining criterion is #3.** `confirm: bool` is a naming convention, not a gate — the model can set it `true` on the first call. `ctx.elicit()` is unavailable under `stateless_http=True` and is not a guaranteed human gate anyway (PITFALLS #13).
@@ -199,7 +206,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 9. Historical Apple Health Backfill | v2.0 | 0/7 | Planned | - |
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
 | 11. Body Measurement History | v2.0 | 3/3 | Complete    | 2026-09-04 |
-| 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 0/TBD | Not started | - |
+| 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 0/5 | Planned | - |
 | 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/TBD | Not started | - |
 
 ## Requirement Coverage (v2.0)

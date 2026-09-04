@@ -75,6 +75,35 @@ created: 2026-09-04
 
 ---
 
+## Planner Reconciliation (2026-09-04)
+
+The plan set landed as five plans across four waves. The Per-Task Verification Map above was
+written before plan numbering existed; this section maps its rows onto the plans that own them, so
+every `-k` selector in the table resolves against a real test name.
+
+| Map row | Owning plan | Wave | Test file |
+|---------|-------------|------|-----------|
+| fixture / migration / seed / active_period (GOAL-01) | 12-01 (schema, migration, fixtures) and 12-02 (`active_period`, token atomicity) | 1, 2 | `backend/tests/test_db_program_history.py` |
+| threshold / straddle (GOAL-02) | 12-03 | 3 | `backend/tests/test_analytics_recomposition.py` |
+| warn_branch / wrong_program / replay / expired / confirm_atomic / degraded (GOAL-03) | 12-04 | 3 | `backend/tests/test_mcp_program_switch.py` |
+| program_status (GOAL-01 read tool) | 12-05 | 4 | `backend/tests/test_mcp_tools.py` |
+| annotations / exact_partition / write_allowlist (GOAL-04) | 12-04 (`write_allowlist`) and 12-05 (`annotations`, `exact_partition`) | 3, 4 | `test_mcp_isolation.py`, `test_mcp_tool_schemas.py` |
+
+**Wave 0 gaps:** both new test files are created inside the plan that first makes them meaningful
+rather than in a standalone wave-0 plan — `test_db_program_history.py` in 12-01 Task 3 (alongside
+the `conftest.py` `GoldenBuilder` extension), `test_mcp_program_switch.py` in 12-04 Task 3. Neither
+file can assert anything before the schema and the tool it covers exist, so a separate earlier
+plan would produce stubs and nothing else. Every task in the set carries an `<automated>` verify
+command with no `MISSING` reference.
+
+**Deviation from the map, recorded:** the write tool lives in `backend/app/mcp/tools/program_switch.py`
+and the program READ tool in `backend/app/mcp/tools/programs.py`, rather than both in one module.
+This keeps `test_mcp_isolation._WRITE_ALLOWLIST` at exactly one entry AND keeps the read tool under
+the full `_SESSION_WRITE` ban — a strictly narrower guard than allowlisting a module that holds
+both.
+
+---
+
 ## Validation Sign-Off
 
 - [ ] All tasks have `<automated>` verify or Wave 0 dependencies
