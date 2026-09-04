@@ -7,10 +7,16 @@ tolerance helpers -- the same convention ``test_analytics_bodyweight.py`` uses, 
 entire result is a two-point delta and a rounding shortcut here would be a silent bug.
 """
 
-from sqlalchemy import Numeric, inspect
+import datetime as dt
+from decimal import Decimal
+
+import pytest
+from sqlalchemy import Numeric, inspect, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics.schemas import BodyMeasurementMetric
 from app.db.models.body import BodyMeasurement
+from tests.conftest import DEFAULT_USER_ID, GoldenBuilder
 
 # BODY-01 owns weight; BODY-05 covers everything else on the table.
 _WEIGHT_COLUMN = "weight_kg"
@@ -56,3 +62,55 @@ def test_every_metric_resolves_to_a_real_orm_attribute() -> None:
     """The mechanism D-09 leans on: ``getattr(BodyMeasurement, metric.value)`` must not raise."""
     for metric in BodyMeasurementMetric:
         assert getattr(BodyMeasurement, metric.value) is not None
+
+
+_FIXTURE_DAY = dt.date(2026, 6, 1)
+
+
+@pytest.mark.integration
+async def test_fixture_seeds_non_weight_columns(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Wave 0: the fixture builder can write a circumference and a composition value.
+
+    Asserted against the DATABASE, not against the builder's arguments -- a kwarg accepted and
+    silently dropped before the INSERT would pass an argument-level check and fail every BODY-05
+    integration test afterwards with a confusing "no readings in the window".
+
+    The weight-only row is here to prove the defaults did not change: a pre-BODY-05 call site
+    must still write NULLs into the three new columns, not zeros.
+    """
+    await golden_workout.body_measurement(
+        measured_on=_FIXTURE_DAY,
+        weight_kg=Decimal("65.40"),
+        waist_cm=Decimal("81.50"),
+        neck_cm=Decimal("38.00"),
+        fat_percent=Decimal("18.20"),
+    )
+    await golden_workout.body_measurement(
+        measured_on=_FIXTURE_DAY - dt.timedelta(days=1), weight_kg=Decimal("65.60")
+    )
+
+    rows = (
+        await session.execute(
+            select(
+                BodyMeasurement.measured_on,
+                BodyMeasurement.waist_cm,
+                BodyMeasurement.neck_cm,
+                BodyMeasurement.fat_percent,
+            )
+            .where(BodyMeasurement.user_id == DEFAULT_USER_ID)
+            .order_by(BodyMeasurement.measured_on)
+        )
+    ).all()
+
+    assert len(rows) == 2
+    weight_only, full = rows
+    assert (weight_only.waist_cm, weight_only.neck_cm, weight_only.fat_percent) == (
+        None,
+        None,
+        None,
+    ), "the new kwargs default to None, so an existing call site still writes a weight-only row"
+    assert full.waist_cm == Decimal("81.50")
+    assert full.neck_cm == Decimal("38.00")
+    assert full.fat_percent == Decimal("18.20")

@@ -452,6 +452,9 @@ class GoldenBuilder:
         *,
         measured_on: dt.date,
         weight_kg: Decimal | None,
+        waist_cm: Decimal | None = None,
+        neck_cm: Decimal | None = None,
+        fat_percent: Decimal | None = None,
         source: str = "hevy",
         user_id: uuid.UUID = DEFAULT_USER_ID,
     ) -> None:
@@ -473,6 +476,21 @@ class GoldenBuilder:
         No external id: body-measurement rows are keyed on the natural key, so cross-test
         isolation comes from ``ANALYTICS_SECOND_USER_ID`` for the tenant cases and from the
         ``golden_workout`` fixture's ``finally: await session.rollback()`` for everything else.
+
+        ``waist_cm``, ``neck_cm`` and ``fat_percent`` default to ``None`` so every pre-BODY-05
+        call site keeps its exact previous meaning: a row with a weight and nothing else. Three
+        and not sixteen, and these three specifically -- BODY-05's analytics function is generic
+        over the column (``getattr(BodyMeasurement, metric.value)``), so seeding all sixteen would
+        prove the same code path sixteen times. ``waist_cm`` is the only non-weight metric with
+        real production history; ``neck_cm`` is a second ``Numeric(6, 2)`` circumference, which is
+        what lets a test show two metrics on the same table gating INDEPENDENTLY; and
+        ``fat_percent`` is ``Numeric(5, 2)``, a different precision, which is what stops the
+        generic path from being proven only against one column type. The enum-vs-ORM equality test
+        in ``test_analytics_body_measurements.py`` covers the other thirteen names.
+
+        ``Decimal``, never ``float``, for the same reason ``weight_kg`` is: an exact two-point
+        delta is the entire BODY-05 result, and binary floating point would make two
+        arithmetically identical deltas compare unequal.
         """
         await self._session.execute(
             insert(BodyMeasurement).values(
@@ -482,6 +500,9 @@ class GoldenBuilder:
                 external_id=None,
                 measured_on=measured_on,
                 weight_kg=weight_kg,
+                waist_cm=waist_cm,
+                neck_cm=neck_cm,
+                fat_percent=fat_percent,
             )
         )
         await self._session.flush()
