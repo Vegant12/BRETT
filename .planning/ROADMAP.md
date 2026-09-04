@@ -157,8 +157,8 @@ Notes for planning:
 Plans:
 - [x] 12-01-PLAN.md — `TrainingProgram` enum, `user_program_history` + `program_switch_tokens` models, migration 0006 with the live-data-derived D-08 seed, and the GoldenBuilder/purge fixtures (wave 1)
 - [x] 12-02-PLAN.md — `app/db/repositories/programs.py`: period resolution plus the atomic single-use token issue/consume/apply, with the TTL, replay, wrong-program and interleaving proofs (wave 2)
-- [ ] 12-03-PLAN.md — `recomposition.py` per-program thresholds and three explicit label matrices (76 cells), plus `RecompositionResult`'s active-program and D-10 straddle fields (wave 3)
-- [ ] 12-04-PLAN.md — `writable_session`, the two wire models, the read tool and the confirm-gated write tool, and the narrowed single-module write allowlist (wave 3)
+- [x] 12-03-PLAN.md — `recomposition.py` per-program thresholds and three explicit label matrices (76 cells), plus `RecompositionResult`'s active-program and D-10 straddle fields (wave 3)
+- [x] 12-04-PLAN.md — `writable_session`, the two wire models, the read tool and the confirm-gated write tool, and the narrowed single-module write allowlist (wave 3)
 - [ ] 12-05-PLAN.md — registration outside the `_TOOLS` loop with explicit write annotations, the exact read-only/write partition, budgets, leak scans and the coaching-doc entry (wave 4)
 
 Notes for planning:
@@ -206,7 +206,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 9. Historical Apple Health Backfill | v2.0 | 0/7 | Planned | - |
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
 | 11. Body Measurement History | v2.0 | 3/3 | Complete    | 2026-09-04 |
-| 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 2/5 | In Progress|  |
+| 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 4/5 | In Progress|  |
 | 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/TBD | Not started | - |
 
 ## Requirement Coverage (v2.0)
