@@ -29,7 +29,7 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 - [x] **Phase 8: Apple Health & Nutrition Ingest** - Authenticated, idempotent, Hevy-filtered webhook receiver landing activity and nutrition data in BRETT (complete 2026-09-03)
 - [ ] **Phase 9: Historical Apple Health Backfill** - One-time streaming import of 4.5 years of history from the user's `export.xml`
 - [x] **Phase 10: Max-Weight Strength Signal** - Last max-weight-lifted surfaced as a labelled secondary display field on progression/plateau responses; estimated-1RM classification unchanged (completed 2026-09-03)
-- [ ] **Phase 11: Body Measurement History** - Trend/comparison analytics across circumference and body-composition measurements — not weight-only — over data already synced from Hevy
+- [x] **Phase 11: Body Measurement History** - Trend/comparison analytics across circumference and body-composition measurements — not weight-only — over data already synced from Hevy (completed 2026-09-04)
 - [ ] **Phase 12: Training Programs & Confirm-Gated Write Tool** - Programs as real data, program-aware thresholds, and BRETT's only MCP write path
 - [ ] **Phase 13: Health Analytics, Reports & Coaching Style** - Activity/nutrition trends, weekly and monthly report tools, and a tightened coaching document
 
@@ -133,7 +133,7 @@ Notes for planning:
 Plans:
 - [x] 11-01-PLAN.md — `BodyMeasurementMetric` enum + `BodyMeasurementTrendResult`, the `{90: 2}` coverage floor, the column-scoped `earliest_metric_measurement_at`, and the `GoldenBuilder` fixture extension (wave 1)
 - [x] 11-02-PLAN.md — `analytics/body_measurements.py`: the one generic latest-vs-earliest 90-day function, with the floor/staleness four-quadrant proof (wave 2)
-- [ ] 11-03-PLAN.md — `fitness_get_body_measurement_trend` (the 14th tool), its registration, the six structural drift guards, and the coaching-doc entry (wave 3)
+- [x] 11-03-PLAN.md — `fitness_get_body_measurement_trend` (the 14th tool), its registration, the six structural drift guards, and the coaching-doc entry (wave 3)
 
 Notes for planning:
 - **Scope correction, 2026-09-03 discuss-phase session:** this phase was originally scoped (see PITFALLS #9, ROADMAP notes below the strikethrough) around a manual-entry write path (BODY-03) plus the source-merge fix that path would trigger (BODY-04). The user reversed this: Hevy's app already captures every measurement they log, and BRETT already syncs it automatically (`backend/app/integrations/hevy/body.py`) — there is no manual-entry need. BODY-03 and BODY-04 are **dropped from v2.0 entirely**, not deferred to a later phase. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md` for the full discussion.
@@ -198,7 +198,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 8. Apple Health & Nutrition Ingest | v2.0 | 8/8 | Complete | 2026-09-03 |
 | 9. Historical Apple Health Backfill | v2.0 | 0/7 | Planned | - |
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
-| 11. Body Measurement History | v2.0 | 2/3 | In Progress|  |
+| 11. Body Measurement History | v2.0 | 3/3 | Complete   | 2026-09-04 |
 | 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 0/TBD | Not started | - |
 | 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/TBD | Not started | - |
 
