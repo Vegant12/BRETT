@@ -45,6 +45,7 @@ holds zero weigh-ins after a real 52-day logging gap. It is a first-class tested
 import datetime as dt
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -59,13 +60,19 @@ from app.analytics.schemas import (
     ProgressionSignal,
     RecompositionResult,
     RecompositionStatus,
+    TrainingProgram,
     TrendVerdict,
 )
 from app.analytics.volume import get_weekly_volume
+from app.db.repositories.programs import get_active_period, get_periods_overlapping
 
-# The user's stated goal is a LEAN BULK. There is no `users.goal` column and none is being added;
-# the goal shapes these threshold VALUES and nothing structural. If the goal changes, these five
-# constants are the ones to revisit -- and nothing else in the module.
+# GOAL-01/GOAL-02: the active training program is DATA (`user_program_history`), not a constant --
+# there is no `users.goal` column, but there IS `TrainingProgram`-keyed history behind
+# `app.db.repositories.programs`. These five constants are the LEAN BULK row of `_THRESHOLDS`
+# below and nothing more; D-04 records the reason all three programs get their own fully explicit
+# threshold table and label matrix rather than one shared goal-relative abstraction: every
+# combination stays visible in one place, and a missing branch fails at import instead of falling
+# through to a plausible-looking default.
 
 # D-11. The stricter end of the published 0.25-0.5%/week lean-bulk band, chosen to keep gains lean
 # rather than tolerate a faster, fattier surplus. Evaluated against D-16's SMOOTHED rate.
@@ -151,34 +158,146 @@ def aggregate_progression(verdicts: Sequence[TrendVerdict]) -> AggregateProgress
 
 
 class _WeightBucket(StrEnum):
-    """Internal. The five weight-rate bands, plus the null case, that key the label matrix."""
+    """Internal. The nine weight-rate bands, plus the null case, that key the label matrices.
+
+    No program uses all nine: each program's ladder (`_weight_bucket`) returns a strict subset,
+    and each program's matrix covers exactly the subset its own ladder can produce. A bucket a
+    program's ladder cannot return has no row in that program's matrix, on purpose -- D-04 wants
+    a missing branch to fail at import, not to be a spare row nobody can reach.
+    """
 
     TOO_FAST_GAIN = "too_fast_gain"
     ON_TARGET_GAIN = "on_target_gain"
+    # Gain beyond the stable band, on a program where gaining is not the goal -- one coarse
+    # catch-all. Only CUT's and RECOMP's ladders return this; LEAN_BULK's fine-grained
+    # ON_TARGET_GAIN/TOO_FAST_GAIN pair covers the whole gain side instead (D-05).
+    GAINING = "gaining"
     STABLE = "stable"
     LOSING = "losing"
+    # Losing, but slower than the cut's on-target pace. Only CUT's ladder returns this.
+    SLOW_LOSS = "slow_loss"
+    # The cut's intended pace. Only CUT's ladder returns this.
+    ON_TARGET_LOSS = "on_target_loss"
     TOO_FAST_LOSS = "too_fast_loss"
     INSUFFICIENT = "insufficient"
 
 
-def _weight_bucket(rate_percent_per_week: Decimal | None) -> _WeightBucket:
-    """D-10 through D-12 plus the stable band, as one ordered ladder.
+@dataclass(frozen=True, slots=True)
+class _ProgramThresholds:
+    """One program's weight-rate boundaries, in percent of bodyweight per week.
 
-    Boundary conventions, stated once because both sides are tested: the too-fast thresholds are
-    STRICT (+0.25 is on target, +0.26 is too fast; -1.00 is losing, -1.01 is too fast), and the
-    stable band is INCLUSIVE at both edges (-0.10 and +0.10 both read as stable).
+    Boundary conventions are shared by all three programs and stated once here, because both
+    sides of each are tested: the too-fast thresholds are STRICT (a rate exactly ON the threshold
+    is not yet too fast), and every band is INCLUSIVE at its edges.
+    """
+
+    stable_band: Decimal
+    gain_too_fast: Decimal
+    loss_too_fast: Decimal
+    # Cut only. The on-target loss band's near and far edges, both inclusive. None on the
+    # programs whose ladder has no on-target loss row -- and a program whose ladder DOES produce
+    # ON_TARGET_LOSS with these set to None is a bug the ladder itself raises on (`_weight_bucket`
+    # asserts both are populated before using them).
+    on_target_loss_near: Decimal | None = None
+    on_target_loss_far: Decimal | None = None
+
+
+_THRESHOLDS: Mapping[TrainingProgram, _ProgramThresholds] = MappingProxyType(
+    {
+        # D-01: unchanged from the single-program version, by reference rather than by retyping
+        # the literals -- so the constants and this table cannot drift apart.
+        TrainingProgram.LEAN_BULK: _ProgramThresholds(
+            stable_band=WEIGHT_STABLE_BAND_PERCENT_PER_WEEK,
+            gain_too_fast=WEIGHT_GAIN_TOO_FAST_PERCENT_PER_WEEK,
+            loss_too_fast=WEIGHT_LOSS_TOO_FAST_PERCENT_PER_WEEK,
+        ),
+        # D-02. Same dead-band width as the bulk; the gain side keeps the bulk's too-fast line
+        # (+0.25) because gaining faster than that during a cut is a tracking or adherence
+        # problem worth naming, not a goal.
+        TrainingProgram.CUT: _ProgramThresholds(
+            stable_band=Decimal("0.10"),
+            gain_too_fast=Decimal("0.25"),
+            loss_too_fast=Decimal("-1.00"),
+            on_target_loss_near=Decimal("-0.50"),
+            on_target_loss_far=Decimal("-1.00"),
+        ),
+        # D-03. A WIDER dead band (+/-0.25) than either directional program: recomp has no
+        # directional goal, so more week-to-week noise is expected and must not be read as a
+        # trend. Both danger lines sit at +/-0.50 -- drifting into bulk or cut territory.
+        TrainingProgram.RECOMP: _ProgramThresholds(
+            stable_band=Decimal("0.25"),
+            gain_too_fast=Decimal("0.50"),
+            loss_too_fast=Decimal("-0.50"),
+        ),
+    }
+)
+
+
+def _weight_bucket(
+    *, program: TrainingProgram, rate_percent_per_week: Decimal | None
+) -> _WeightBucket:
+    """D-01 through D-05 plus each program's stable band, as three ordered ladders.
+
+    Boundary conventions, stated once because both sides are tested on every program: the
+    too-fast thresholds are STRICT, and every band is INCLUSIVE at its edges.
+
+    LEAN BULK (D-01, unchanged): +0.25 is on target, +0.26 is too fast; -1.00 is losing, -1.01 is
+    too fast; +/-0.10 is the stable band.
+
+    CUT (D-02): the mirror image, fine-grained on the LOSS side. -0.50 and -1.00 are BOTH
+    on-target loss, -0.49 is slow loss and -1.01 is too-fast loss; the gain side is one coarse
+    "gaining" bucket from just above the +/-0.10 stable band up to the same +0.25 too-fast line
+    the bulk uses (D-05).
+
+    RECOMP (D-03): symmetric, no privileged direction. +/-0.25 are both stable and +/-0.50 are
+    the last non-danger values on either side; +0.51/-0.51 are the danger lines.
+
+    Every ladder checks `rate_percent_per_week is None` first and returns INSUFFICIENT -- the
+    program never matters when there is no rate to classify.
     """
     if rate_percent_per_week is None:
         return _WeightBucket.INSUFFICIENT
-    if rate_percent_per_week > WEIGHT_GAIN_TOO_FAST_PERCENT_PER_WEEK:
-        return _WeightBucket.TOO_FAST_GAIN
-    if rate_percent_per_week > WEIGHT_STABLE_BAND_PERCENT_PER_WEEK:
-        return _WeightBucket.ON_TARGET_GAIN
-    if rate_percent_per_week >= -WEIGHT_STABLE_BAND_PERCENT_PER_WEEK:
-        return _WeightBucket.STABLE
-    if rate_percent_per_week >= WEIGHT_LOSS_TOO_FAST_PERCENT_PER_WEEK:
-        return _WeightBucket.LOSING
-    return _WeightBucket.TOO_FAST_LOSS
+    thresholds = _THRESHOLDS[program]
+    match program:
+        case TrainingProgram.LEAN_BULK:
+            if rate_percent_per_week > thresholds.gain_too_fast:
+                return _WeightBucket.TOO_FAST_GAIN
+            if rate_percent_per_week > thresholds.stable_band:
+                return _WeightBucket.ON_TARGET_GAIN
+            if rate_percent_per_week >= -thresholds.stable_band:
+                return _WeightBucket.STABLE
+            if rate_percent_per_week >= thresholds.loss_too_fast:
+                return _WeightBucket.LOSING
+            return _WeightBucket.TOO_FAST_LOSS
+        case TrainingProgram.CUT:
+            if thresholds.on_target_loss_near is None or thresholds.on_target_loss_far is None:
+                # A misconfigured _THRESHOLDS entry: CUT's ladder needs both edges to place
+                # SLOW_LOSS vs ON_TARGET_LOSS, and a KeyError-shaped failure here beats silently
+                # treating every loss rate as one bucket.
+                raise ValueError("_weight_bucket: CUT thresholds missing on-target-loss edges")
+            if rate_percent_per_week > thresholds.gain_too_fast:
+                return _WeightBucket.TOO_FAST_GAIN
+            if rate_percent_per_week > thresholds.stable_band:
+                return _WeightBucket.GAINING
+            if rate_percent_per_week >= -thresholds.stable_band:
+                return _WeightBucket.STABLE
+            if rate_percent_per_week > thresholds.on_target_loss_near:
+                return _WeightBucket.SLOW_LOSS
+            if rate_percent_per_week >= thresholds.on_target_loss_far:
+                return _WeightBucket.ON_TARGET_LOSS
+            return _WeightBucket.TOO_FAST_LOSS
+        case TrainingProgram.RECOMP:
+            if rate_percent_per_week > thresholds.gain_too_fast:
+                return _WeightBucket.TOO_FAST_GAIN
+            if rate_percent_per_week > thresholds.stable_band:
+                return _WeightBucket.GAINING
+            if rate_percent_per_week >= -thresholds.stable_band:
+                return _WeightBucket.STABLE
+            if rate_percent_per_week >= thresholds.loss_too_fast:
+                return _WeightBucket.LOSING
+            return _WeightBucket.TOO_FAST_LOSS
+        case _:  # pragma: no cover - TrainingProgram has exactly three members
+            raise ValueError(f"_weight_bucket: unknown program {program!r}")
 
 
 # The column order of `_MATRIX_ROWS` below. Named rather than implied, because `zip(...,
@@ -191,20 +310,28 @@ _SIGNAL_ORDER: tuple[ProgressionSignal, ...] = (
     ProgressionSignal.INSUFFICIENT,
 )
 
-# D-20's label matrix, as DATA rather than nested ifs so every one of the 24 combinations is
-# visible in one place and a missing branch is a KeyError rather than a silent fallthrough.
-# Values are blueprint 26's seven enum members -- there is no eighth, and adding one would change
-# the contract Phase 6 codes against.
+# D-04/D-20's three label matrices, as DATA rather than nested ifs so every combination is
+# visible in one place and a missing branch is a KeyError -- or, at import time, a short or long
+# row -- rather than a silent fallthrough. Values are blueprint 26's seven enum members -- there
+# is no eighth, and adding one would change the contract Phase 6 codes against (D-06).
 #
-# The four too-fast / on-target / insufficient rows repeat one status across all four signals, and
-# that repetition is deliberate rather than a candidate for compression: D-11 and D-12 are SAFETY
-# signals, and "you are gaining 0.6%/week" needs saying whether or not the bench is going up.
+# The too-fast rows repeat one status across all four signals in every table, and that
+# repetition is deliberate rather than a candidate for compression: the too-fast buckets are
+# SAFETY signals, and "you are gaining 0.6%/week" needs saying whether or not the bench is going
+# up.
 #
-# `likely_recomp_progressing` appears ONLY in the stable and losing rows and ONLY under a positive
-# signal. That is textbook recomposition -- weight flat or slightly down while strength rises --
-# and it matches the published convention that strength is the LEADING indicator while the scale
-# and the tape are lagging.
-_MATRIX_ROWS: tuple[tuple[_WeightBucket, tuple[RecompositionStatus, ...]], ...] = (
+# `likely_recomp_progressing` appears ONLY under a positive signal, in the rows D-06 preserves
+# across all three tables: stable-or-on-target weight beside improving lifts is textbook
+# recomposition. On the cut that includes BOTH loss rows (slow and on-target) under POSITIVE --
+# losing at (or slower than) the intended pace while strength rises is the same physiological
+# observation, not a goal-adherence judgement.
+#
+# `likely_muscle_gain` on the cut's GAINING row is not an endorsement. The label's own documented
+# claim is "gaining at a rate consistent with muscle gain" -- factually true regardless of the
+# program's goal -- and the required `progression_signal` field is what lets Claude say "you are
+# gaining on a cut, and your lifts are flat".
+
+_LEAN_BULK_MATRIX_ROWS: tuple[tuple[_WeightBucket, tuple[RecompositionStatus, ...]], ...] = (
     (
         _WeightBucket.TOO_FAST_GAIN,
         (
@@ -261,29 +388,190 @@ _MATRIX_ROWS: tuple[tuple[_WeightBucket, tuple[RecompositionStatus, ...]], ...] 
     ),
 )
 
+_CUT_MATRIX_ROWS: tuple[tuple[_WeightBucket, tuple[RecompositionStatus, ...]], ...] = (
+    (
+        _WeightBucket.TOO_FAST_GAIN,
+        (
+            RecompositionStatus.WEIGHT_GAIN_TOO_FAST,
+            RecompositionStatus.WEIGHT_GAIN_TOO_FAST,
+            RecompositionStatus.WEIGHT_GAIN_TOO_FAST,
+            RecompositionStatus.WEIGHT_GAIN_TOO_FAST,
+        ),
+    ),
+    (
+        _WeightBucket.GAINING,
+        (
+            RecompositionStatus.LIKELY_MUSCLE_GAIN,
+            RecompositionStatus.LIKELY_MUSCLE_GAIN,
+            RecompositionStatus.LIKELY_MUSCLE_GAIN,
+            RecompositionStatus.LIKELY_MUSCLE_GAIN,
+        ),
+    ),
+    (
+        _WeightBucket.STABLE,
+        (
+            RecompositionStatus.LIKELY_RECOMP_PROGRESSING,
+            RecompositionStatus.WEIGHT_STABLE,
+            RecompositionStatus.WEIGHT_STABLE,
+            RecompositionStatus.WEIGHT_STABLE,
+        ),
+    ),
+    (
+        _WeightBucket.SLOW_LOSS,
+        (
+            RecompositionStatus.LIKELY_RECOMP_PROGRESSING,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+        ),
+    ),
+    (
+        _WeightBucket.ON_TARGET_LOSS,
+        (
+            RecompositionStatus.LIKELY_RECOMP_PROGRESSING,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+        ),
+    ),
+    (
+        _WeightBucket.TOO_FAST_LOSS,
+        (
+            RecompositionStatus.WEIGHT_LOSS_TOO_FAST,
+            RecompositionStatus.WEIGHT_LOSS_TOO_FAST,
+            RecompositionStatus.WEIGHT_LOSS_TOO_FAST,
+            RecompositionStatus.WEIGHT_LOSS_TOO_FAST,
+        ),
+    ),
+    (
+        _WeightBucket.INSUFFICIENT,
+        (
+            RecompositionStatus.INSUFFICIENT_DATA,
+            RecompositionStatus.INSUFFICIENT_DATA,
+            RecompositionStatus.INSUFFICIENT_DATA,
+            RecompositionStatus.INSUFFICIENT_DATA,
+        ),
+    ),
+)
+
+_RECOMP_MATRIX_ROWS: tuple[tuple[_WeightBucket, tuple[RecompositionStatus, ...]], ...] = (
+    (
+        _WeightBucket.TOO_FAST_GAIN,
+        (
+            RecompositionStatus.WEIGHT_GAIN_TOO_FAST,
+            RecompositionStatus.WEIGHT_GAIN_TOO_FAST,
+            RecompositionStatus.WEIGHT_GAIN_TOO_FAST,
+            RecompositionStatus.WEIGHT_GAIN_TOO_FAST,
+        ),
+    ),
+    (
+        _WeightBucket.GAINING,
+        (
+            RecompositionStatus.LIKELY_MUSCLE_GAIN,
+            RecompositionStatus.LIKELY_MUSCLE_GAIN,
+            RecompositionStatus.LIKELY_MUSCLE_GAIN,
+            RecompositionStatus.LIKELY_MUSCLE_GAIN,
+        ),
+    ),
+    (
+        _WeightBucket.STABLE,
+        (
+            RecompositionStatus.LIKELY_RECOMP_PROGRESSING,
+            RecompositionStatus.WEIGHT_STABLE,
+            RecompositionStatus.WEIGHT_STABLE,
+            RecompositionStatus.WEIGHT_STABLE,
+        ),
+    ),
+    (
+        _WeightBucket.LOSING,
+        (
+            RecompositionStatus.LIKELY_RECOMP_PROGRESSING,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+            RecompositionStatus.LIKELY_FAT_LOSS,
+        ),
+    ),
+    (
+        _WeightBucket.TOO_FAST_LOSS,
+        (
+            RecompositionStatus.WEIGHT_LOSS_TOO_FAST,
+            RecompositionStatus.WEIGHT_LOSS_TOO_FAST,
+            RecompositionStatus.WEIGHT_LOSS_TOO_FAST,
+            RecompositionStatus.WEIGHT_LOSS_TOO_FAST,
+        ),
+    ),
+    (
+        _WeightBucket.INSUFFICIENT,
+        (
+            RecompositionStatus.INSUFFICIENT_DATA,
+            RecompositionStatus.INSUFFICIENT_DATA,
+            RecompositionStatus.INSUFFICIENT_DATA,
+            RecompositionStatus.INSUFFICIENT_DATA,
+        ),
+    ),
+)
+
 # MappingProxyType for the reason `exercise_map.py`'s tables use it: a caller must not be able to
-# retune a health verdict at runtime.
-_LABEL_MATRIX: Mapping[tuple[_WeightBucket, ProgressionSignal], RecompositionStatus] = (
+# retune a health verdict at runtime. Three SEPARATE tables, never one keyed `(program, bucket,
+# signal)` -- D-04 wants a missing branch to be a load-time failure PER PROGRAM.
+_LEAN_BULK_LABEL_MATRIX: Mapping[tuple[_WeightBucket, ProgressionSignal], RecompositionStatus] = (
     MappingProxyType(
         {
             (bucket, signal): status
-            for bucket, statuses in _MATRIX_ROWS
+            for bucket, statuses in _LEAN_BULK_MATRIX_ROWS
             for signal, status in zip(_SIGNAL_ORDER, statuses, strict=True)
         }
     )
 )
 
+_CUT_LABEL_MATRIX: Mapping[tuple[_WeightBucket, ProgressionSignal], RecompositionStatus] = (
+    MappingProxyType(
+        {
+            (bucket, signal): status
+            for bucket, statuses in _CUT_MATRIX_ROWS
+            for signal, status in zip(_SIGNAL_ORDER, statuses, strict=True)
+        }
+    )
+)
+
+_RECOMP_LABEL_MATRIX: Mapping[tuple[_WeightBucket, ProgressionSignal], RecompositionStatus] = (
+    MappingProxyType(
+        {
+            (bucket, signal): status
+            for bucket, statuses in _RECOMP_MATRIX_ROWS
+            for signal, status in zip(_SIGNAL_ORDER, statuses, strict=True)
+        }
+    )
+)
+
+_LABEL_MATRIX_BY_PROGRAM: Mapping[
+    TrainingProgram, Mapping[tuple[_WeightBucket, ProgressionSignal], RecompositionStatus]
+] = MappingProxyType(
+    {
+        TrainingProgram.LEAN_BULK: _LEAN_BULK_LABEL_MATRIX,
+        TrainingProgram.CUT: _CUT_LABEL_MATRIX,
+        TrainingProgram.RECOMP: _RECOMP_LABEL_MATRIX,
+    }
+)
+
 
 def classify_recomposition(
-    *, rate_percent_per_week: Decimal | None, signal: ProgressionSignal
+    *,
+    program: TrainingProgram,
+    rate_percent_per_week: Decimal | None,
+    signal: ProgressionSignal,
 ) -> RecompositionStatus:
-    """Cross the weight-rate ladder with the progression signal. Pure, total, and table-driven.
+    """Cross the weight-rate ladder with the progression signal, against ONE program's tables.
 
-    A ``KeyError`` here would mean the matrix lost a combination, which is exactly the failure a
-    nested-if implementation hides behind a final ``else``. Every one of the 24 pairs is asserted
-    by the tests.
+    ``program`` is REQUIRED with no default: a default would silently classify a cut against the
+    bulk's thresholds, which is precisely the wrong answer GOAL-02 exists to stop. A ``KeyError``
+    here now means one program's matrix lost a combination, which is exactly the failure a
+    nested-if implementation hides behind a final ``else``. All 76 pairs across the three
+    programs are asserted by the tests.
     """
-    return _LABEL_MATRIX[(_weight_bucket(rate_percent_per_week), signal)]
+    return _LABEL_MATRIX_BY_PROGRAM[program][
+        (_weight_bucket(program=program, rate_percent_per_week=rate_percent_per_week), signal)
+    ]
 
 
 async def get_recomposition_status(
@@ -303,6 +591,35 @@ async def get_recomposition_status(
     anchor = weight_trend.anchor_day
     window_start = anchor - dt.timedelta(days=7 * RECOMP_LOOKBACK_WEEKS - 1)
 
+    # GOAL-02: which thresholds this verdict is classified against is DATA, resolved once here.
+    # Read inside the same session (and therefore the same snapshot) as the weight trend and the
+    # progression signal -- a program switch landing between two reads would produce a verdict
+    # classified against one program and captioned with another.
+    periods = await get_periods_overlapping(
+        session, user_id=user_id, window_start=window_start, window_end=anchor
+    )
+    active = periods[-1] if periods else await get_active_period(session, user_id=user_id)
+
+    # `periods[-1]` and not a second `get_active_period` call in the common case: the overlapping
+    # read is ordered ascending and its window ends on the anchor, so its last row IS the
+    # currently open period. The `get_active_period` fallback above covers only the degenerate
+    # case where NO period overlaps the window at all -- a user whose program history begins
+    # after the anchor, which cannot happen today but would otherwise silently produce
+    # `active_program=lean_bulk` for a user who is on a cut.
+    active_program = (
+        TrainingProgram(active.program) if active is not None else TrainingProgram.LEAN_BULK
+    )
+    program_started_on = active.started_on if active is not None else None
+    # D-10: more than one period touching the window means the window STRADDLES a switch.
+    program_switch_in_window = len(periods) > 1
+    previous_program = TrainingProgram(periods[-2].program) if program_switch_in_window else None
+    # `program_switch_in_window` is only True when `periods` (and therefore `active`, its last
+    # element) is non-empty -- but the two are computed independently, so the type checker cannot
+    # see that on its own.
+    program_switched_on = (
+        active.started_on if program_switch_in_window and active is not None else None
+    )
+
     # Reused, never re-implemented: `get_exercise_trends` is the ONE definition of "improving",
     # and a second copy here is how the recomposition verdict and the progression tool would
     # eventually disagree about the same exercise over the same weeks.
@@ -321,10 +638,16 @@ async def get_recomposition_status(
 
     return RecompositionResult(
         status=classify_recomposition(
+            program=active_program,
             # D-16's SMOOTHED rate, never D-17's raw single-week delta.
             rate_percent_per_week=weight_trend.trend_rate_percent_per_week,
             signal=progression.signal,
         ),
+        active_program=active_program,
+        program_started_on=program_started_on,
+        program_switch_in_window=program_switch_in_window,
+        previous_program=previous_program,
+        program_switched_on=program_switched_on,
         # A required field, always populated -- including on the insufficient path, which is the
         # response most likely to be quoted without its context.
         disclaimer=INTERPRETATION_DISCLAIMER,

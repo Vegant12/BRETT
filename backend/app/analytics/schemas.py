@@ -707,9 +707,35 @@ class RecompositionResult(_AnalyticsModel):
 
     ``training_volume`` is reported for context only. BODY-02 classifies on the weight trend and
     the progression signal; volume is never an input to the label.
+
+    ``active_program`` is ALWAYS populated -- it names the thresholds this verdict was actually
+    classified against, which is the difference between "you are losing too fast" and "you are
+    losing exactly as planned". It falls back to ``LEAN_BULK`` on a database with no period row at
+    all (only possible before migration 0006 has run against that database), and
+    ``program_started_on`` is ``None`` exactly in that case.
+
+    ``program_switch_in_window`` is True exactly when more than one program period overlaps the
+    12-week lookback. ``previous_program`` and ``program_switched_on`` are populated exactly when
+    it is True, and are ``None`` exactly when it is False.
+
+    D-10, stated as the reason rather than left implicit: a straddled window is still CLASSIFIED,
+    against the CURRENT program's thresholds for the whole window. Refusing to classify would hide
+    a verdict the user asked for; classifying silently would misrepresent it. These three fields
+    are what let Claude say "this mixes 3 weeks of cut with 9 weeks of lean bulk" beside the
+    verdict.
+
+    ``program_switched_on`` is the ACTIVE period's ``started_on`` -- the day the current program
+    began. With three or more periods in one window, ``previous_program`` names the one
+    immediately before the active period; ``program_switch_in_window`` is the flag that tells
+    Claude the window is mixed at all.
     """
 
     status: RecompositionStatus
+    active_program: TrainingProgram
+    program_started_on: dt.date | None
+    program_switch_in_window: bool
+    previous_program: TrainingProgram | None
+    program_switched_on: dt.date | None
     disclaimer: str
     weight_trend: BodyWeightTrendResult
     progression_signal: AggregateProgression
