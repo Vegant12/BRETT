@@ -24,12 +24,12 @@ code in an MCP tool result to carry the bad news, so the tool must still report
 protocol-level error with an SDK-generated message -- which is exactly the
 uncontrolled string this project refuses to let near a driver exception.
 
-**From Phase 6 on, this module covers FOURTEEN tools, not one** (MCP-02, MCP-06).
+**From Phase 6 on, this module covers SIXTEEN tools, not one** (MCP-02, MCP-06).
 MCP-02's claim is behavioural -- "Claude can call tools covering eleven analytics
 areas" -- so a schema test cannot discharge it. Every registered tool therefore
 gets at least one case here that asserts a real structured answer against seeded
-data, and the dead-database leak test is parametrized over all fourteen rather
-than proving one tool's ``except`` branch and assuming the other thirteen.
+data, and the dead-database leak test is parametrized over all sixteen rather
+than proving one tool's ``except`` branch and assuming the other fifteen.
 
 **``committed_history`` is the fixture to use here, NEVER ``golden_workout``.**
 ``golden_workout`` flushes and rolls back, which is correct for the analytics
@@ -47,9 +47,12 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.time import utc_now
+from app.db.models.program import ProgramPeriod
+from app.db.repositories.programs import get_active_period
 from app.db.repositories.sync_state import PROVIDER_HEVY, SYNC_RESOURCES, complete_sync
 from app.normalization.muscles import CanonicalMuscleGroup, MuscleRole
 from tests.conftest import DEFAULT_USER_ID, GoldenBuilder, GoldenExercise, GoldenSet
@@ -85,7 +88,7 @@ LEAK_MARKERS = (
 # Fixed literals rather than clock-relative dates because nothing here depends on "now"; only the
 # ordering and the span do.
 #
-# Exported rather than private: `test_secret_redaction.py` drives the same fourteen calls against
+# Exported rather than private: `test_secret_redaction.py` drives the same sixteen calls against
 # a HEALTHY database, and two copies of "the minimal call for every tool" is one copy that stops
 # covering a tool the day a signature changes.
 MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
@@ -108,6 +111,12 @@ MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
     "fitness_get_body_measurement_trend": {"metric": "waist_cm"},
     "fitness_get_body_weight_trend": {},
     "fitness_get_recomposition_status": {},
+    "fitness_get_training_program": {},
+    # `lean_bulk` is the seeded active program, so the minimal call is a REFUSAL that writes
+    # nothing -- `test_secret_redaction.py` drives this same table against a HEALTHY
+    # container and requires every call to succeed, and a minimal call that minted a token
+    # would leave a row behind in a test whose subject is not this tool.
+    "fitness_switch_training_program": {"program": "lean_bulk"},
 }
 
 # --------------------------------------------------------------------------
@@ -359,11 +368,11 @@ async def test_every_tool_degradation_leaks_nothing(client: TestClient) -> None:
     standing in that path.
 
     Every registered tool is exercised, not just ``fitness_ping``. The guard is applied
-    per-function, so proving one ``except`` branch runs proves nothing about the other thirteen;
-    the equality assertion below makes "all fourteen" structural, so a fifteenth tool registered
+    per-function, so proving one ``except`` branch runs proves nothing about the other fifteen;
+    the equality assertion below makes "all sixteen" structural, so a seventeenth tool registered
     without an entry in ``MINIMAL_TOOL_ARGUMENTS`` fails here rather than being silently skipped.
 
-    One swap for all fourteen, and failures are COLLECTED rather than asserted in the loop: a bare
+    One swap for all sixteen, and failures are COLLECTED rather than asserted in the loop: a bare
     ``assert`` on the first tool would hide every tool after it, and the interesting fact is which
     tools leak, not that one does.
 
@@ -479,7 +488,7 @@ async def test_ping_output_schema_requires_both_fields(client: TestClient) -> No
     async with Client(mcp) as mcp_client:
         tools = (await mcp_client.list_tools()).tools
 
-    # Indexed BY NAME, never positionally. With thirteen tools registered, positional indexing
+    # Indexed BY NAME, never positionally. With sixteen tools registered, positional indexing
     # asserts against whichever tool the SDK happens to list first -- a green test about the
     # wrong tool, and nothing in the failure message would say so.
     ping = {tool.name: tool for tool in tools}["fitness_ping"]
@@ -1045,6 +1054,45 @@ async def test_recomposition_status_carries_its_disclaimer(
         "the verdict is decision support, and the field that says so travels with it or the "
         "framing is lost"
     )
+
+
+@pytest.mark.integration
+async def test_program_status_is_reported_with_its_start_date_and_what_it_replaced(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """ROADMAP success criterion #1, over the real transport.
+
+    Close the seeded lean_bulk period and open a `cut` period, commit, then call
+    `fitness_get_training_program`: `program == "cut"`, `started_on` is the switch day,
+    `previous_program == "lean_bulk"`, and `previous_period_ended_on` is that same day.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    active = await get_active_period(session, user_id=DEFAULT_USER_ID)
+    assert active is not None
+    switch_day = utc_now().date()
+    # The partial unique index permits only one open period per user, so the seeded period
+    # must be closed in the SAME transaction that opens the new one -- see
+    # `conftest.GoldenBuilder.program_period`'s own docstring for the invariant.
+    await session.execute(
+        update(ProgramPeriod).where(ProgramPeriod.id == active.id).values(ended_on=switch_day)
+    )
+    await committed_history.program_period(program="cut", started_on=switch_day, ended_on=None)
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_training_program", {})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["data_available"] is True
+    assert payload["program"] == "cut"
+    assert payload["started_on"] == switch_day.isoformat()
+    assert payload["previous_program"] == "lean_bulk"
+    assert payload["previous_period_ended_on"] == switch_day.isoformat()
 
 
 # ---------------------------------------------------------------------------

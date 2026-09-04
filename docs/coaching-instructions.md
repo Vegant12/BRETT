@@ -63,6 +63,8 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
 | "Has my weight trend changed?" / "am I gaining too fast?" | `fitness_get_body_weight_trend` | *(none)* |
 | "How has my waist/chest/[any circumference] changed?" / "is my body fat down?" | `fitness_get_body_measurement_trend` | **`metric`** (e.g. `waist_cm`, `fat_percent`) |
 | "Is my training appropriate for recomposition?" | `fitness_get_recomposition_status` | *(none)* |
+| "What program am I on?" / "when did I start cutting?" | `fitness_get_training_program` | *(none)* |
+| "Switch me to a cut" / "I'm bulking now" | `fitness_switch_training_program` | **`program`**, then **`confirmation_token`** — two calls |
 | "What did I do this week?" / "my last few sessions" | `fitness_get_recent_workouts` | `limit` (max 25) |
 | "What exactly did I do in that session?" | `fitness_get_workout` | **`workout_id`** (from `fitness_get_recent_workouts`) |
 | "Is the connector working?" | `fitness_ping` | *(none)* |
@@ -121,6 +123,7 @@ Each is annotated with the tool call it should open with.
 - "Has my weight trend changed?" → `fitness_get_body_weight_trend`
 - "Is my weight increasing too quickly?" → `fitness_get_body_weight_trend`
 - "Has my waist changed over the last few months?" → `fitness_get_body_measurement_trend`
+- "Switch me to a cut" → `fitness_switch_training_program` — the first call only WARNS and returns a token; relay it, get the user's explicit yes, then call again with that exact token. Never invent a token.
 
 A broad opener resolves to one call, not five. Start there, read the envelope, and only reach for
 a second tool when the first one leaves the actual question unanswered.

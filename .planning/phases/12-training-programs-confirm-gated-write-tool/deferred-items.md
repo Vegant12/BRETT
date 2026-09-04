@@ -61,3 +61,31 @@ changes (`backend/app/mcp/tools/programs.py`, `backend/app/mcp/tools/program_swi
 `body_measurements`). Not fixed here for the same reason as above. Fourth occurrence across all
 four Wave 1-3 plans now strongly reinforces the case for the follow-up fix recommended in Plan
 12-01.
+
+## Plan 12-05
+
+Fifth recurrence, during `uv run pytest -m integration` verification (wall-clock ~11:42 UTC,
+i.e. `>= 2 UTC`, same trigger condition as every prior occurrence):
+`test_body_measurement_trend_compares_latest_against_earliest` failed on the same
+`uq_body_measurements_user_source_measured_on` collision
+(`(user_id, source, measured_on)=(..., hevy, 2026-09-04)` already exists). Confirmed unrelated
+to this plan's changes: reproduced in isolation
+(`uv run pytest -m integration backend/tests/test_mcp_tools.py::test_body_measurement_trend_compares_latest_against_earliest`)
+and none of this plan's touched files (`backend/app/mcp/server.py`,
+`backend/tests/test_mcp_tool_schemas.py`, `backend/tests/test_mcp_tool_budget.py`,
+`backend/tests/test_mcp_auth.py`, `backend/tests/test_mcp_mount.py`, `docs/coaching-instructions.md`,
+and the new `test_program_status_is_reported_with_its_start_date_and_what_it_replaced` test which
+this plan added to `test_mcp_tools.py`) read or write `body_measurements`. Not fixed here for the
+same reason as above -- still out of scope. Fifth occurrence across all five Wave 1-4 plans; the
+follow-up fix recommended in Plan 12-01 should be prioritized now that it has recurred in every
+single plan this phase.
+
+### Also noted: pre-existing `ruff format` drift in 16 files outside this plan's scope
+
+`uv run ruff format --check backend/tests backend/app docs` (run broadly during Task 3
+verification, not the plan's own scoped verify command) reports 16 files that would be
+reformatted -- none of them touched by this plan. Confirmed the six files this plan actually
+modified (`backend/app/mcp/server.py`, `backend/tests/test_mcp_tool_budget.py`,
+`backend/tests/test_mcp_tools.py`, `backend/tests/test_mcp_tool_schemas.py`,
+`backend/tests/test_mcp_auth.py`, `backend/tests/test_mcp_mount.py`) are all correctly
+formatted in isolation. Not fixed here -- out of scope (pre-existing drift in unrelated files).

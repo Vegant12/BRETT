@@ -96,6 +96,12 @@ BUDGETS: dict[str, int] = {
     # without it the same call measures 29,169. The default is False, so the typical call is less
     # than half this; the budget covers what the model is ALLOWED to ask for.
     "fitness_compare_periods": 81_920,
+    # A fixed-shape object with no list, so this does not grow with data.
+    # Measured 554 bytes at the seeded lean_bulk-only history on 2026-09-04.
+    "fitness_get_training_program": 2_048,
+    # A fixed-shape object with no list, so this does not grow with data.
+    # Measured 880 bytes at the seeded "already active" no-op refusal on 2026-09-04.
+    "fitness_switch_training_program": 2_048,
 }
 
 # Every window parameter at its published maximum. Tools whose arguments cannot be written down
@@ -112,6 +118,11 @@ WORST_CASE_ARGS: dict[str, dict[str, object]] = {
     "fitness_get_plateaus": {"lookback_weeks": 52, "plateaued_only": False},
     "fitness_get_training_summary": {"weeks": 12},
     "fitness_get_recent_workouts": {"limit": 25},
+    "fitness_get_training_program": {},
+    # `lean_bulk` is the SEEDED active program, so this call takes the "already active"
+    # branch: it writes nothing and issues no token. A budget measurement must not leave
+    # rows behind in the shared container, and a token minted here would outlive the test.
+    "fitness_switch_training_program": {"program": "lean_bulk"},
     # exercise_name / workout_id are filled in at call time from the seeded fixture.
 }
 
