@@ -565,6 +565,89 @@ class BodyWeightTrendResult(_AnalyticsModel):
     freshness: FreshnessMetadata
 
 
+class BodyMeasurementMetric(StrEnum):
+    """BODY-05's closed metric selector: the 16 non-weight ``body_measurements`` columns.
+
+    Each member's VALUE is the EXACT column name on ``db/models/body.py::BodyMeasurement``, and
+    that is load-bearing rather than cosmetic: the analytics layer resolves the SQLAlchemy
+    attribute with ``getattr(BodyMeasurement, metric.value)``, so there is no second name->column
+    mapping for a future column rename to leave behind. ``test_analytics_body_measurements.py``
+    asserts the two sets are equal, which is what keeps that true.
+
+    ``weight_kg`` is deliberately ABSENT. BODY-01's ``fitness_get_body_weight_trend`` already
+    owns weight with a rolling-average shape this two-point comparison does not share; a member
+    here would give the same question two different answers depending on which tool was called.
+
+    A ``StrEnum`` and not a free string (D-09): the MCP SDK derives the tool's ``inputSchema``
+    from this annotation, so an unrecognized metric name is rejected at the schema layer before
+    any code in this repo runs. A hand-written ``if metric not in {...}`` branch would be a
+    second copy of the same list.
+    """
+
+    NECK_CM = "neck_cm"
+    SHOULDER_CM = "shoulder_cm"
+    CHEST_CM = "chest_cm"
+    LEFT_BICEP_CM = "left_bicep_cm"
+    RIGHT_BICEP_CM = "right_bicep_cm"
+    LEFT_FOREARM_CM = "left_forearm_cm"
+    RIGHT_FOREARM_CM = "right_forearm_cm"
+    ABDOMEN_CM = "abdomen_cm"
+    WAIST_CM = "waist_cm"
+    HIPS_CM = "hips_cm"
+    LEFT_THIGH_CM = "left_thigh_cm"
+    RIGHT_THIGH_CM = "right_thigh_cm"
+    LEFT_CALF_CM = "left_calf_cm"
+    RIGHT_CALF_CM = "right_calf_cm"
+    FAT_PERCENT = "fat_percent"
+    LEAN_MASS_KG = "lean_mass_kg"
+
+
+class BodyMeasurementTrendResult(_AnalyticsModel):
+    """BODY-05: the latest reading against the earliest reading inside a fixed 90-day window.
+
+    **Deliberately NOT ``BodyWeightTrendResult``'s shape (D-05).** A rolling average across the
+    7-day, 14-day and 30-day windows with 3, 5 and 10 measured-day floors is the right design for
+    a metric recorded daily; it is the wrong design for a tape measure. On live production data,
+    13 of these 16 columns have never been recorded once, and the best-covered one (``waist_cm``)
+    holds 2 readings in the trailing 90 days. A rolling average would answer ``insufficient_data``
+    to essentially every real call.
+
+    **``insufficient_data`` and ``is_stale`` are INDEPENDENT (D-08), never one flag.** Two
+    readings four months apart are sufficient for a comparison AND stale; one fresh reading is
+    stale=False AND insufficient. Collapsing them would make "we cannot compare" and "this is old
+    news" the same sentence, and only one of them is a reason to stop trusting the number.
+
+    Population rules, in order of how easily they are got wrong:
+
+    * ``latest_value``/``latest_measured_on`` are populated whenever AT LEAST ONE reading exists
+      in the window, ``coverage.insufficient_data`` notwithstanding. A single reading is a real
+      observation and worth surfacing; suppressing it would report "no data" for a metric the
+      user demonstrably measured.
+    * ``earliest_value``/``earliest_measured_on``/``delta_value`` are populated ONLY when
+      ``coverage.insufficient_data`` is False. With one reading, "earliest" IS "latest", and a
+      ``delta_value`` of 0 would read as "no change" rather than "one data point".
+    * ``days_since_latest_reading`` is ``None`` exactly when ``latest_measured_on`` is ``None``.
+
+    ``window_days`` and ``stale_after_days`` are echoed as FIELDS, not left in a comment, for the
+    same reason ``PlateauResult`` echoes ``threshold_percent`` and ``min_sessions``: a flag whose
+    threshold the reader cannot see is a flag the reader has to trust blindly.
+    """
+
+    metric: BodyMeasurementMetric
+    window_days: int
+    anchor_day: dt.date
+    coverage: MeasurementCoverage
+    latest_value: Decimal | None
+    latest_measured_on: dt.date | None
+    earliest_value: Decimal | None
+    earliest_measured_on: dt.date | None
+    delta_value: Decimal | None
+    is_stale: bool
+    days_since_latest_reading: int | None
+    stale_after_days: int
+    freshness: FreshnessMetadata
+
+
 class AggregateProgression(_AnalyticsModel):
     """BODY-02 / D-20: the net-progression score over exercises PROG-02 could classify.
 
