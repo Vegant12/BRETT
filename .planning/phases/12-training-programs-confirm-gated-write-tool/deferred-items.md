@@ -35,3 +35,16 @@ against_earliest` failed on the same `uq_body_measurements_user_source_measured_
 Confirmed unrelated to this plan's changes (`backend/app/db/repositories/programs.py` and
 `backend/tests/test_db_program_history.py`, neither of which touches `body_measurements`). Not
 fixed here for the same reason as above -- still out of scope.
+
+## Plan 12-03
+
+Same pre-existing flake reproduced a third time during the full-suite verification (`uv run
+pytest -q`, wall-clock ~11:24 UTC): `test_body_measurement_trend_compares_latest_against_
+earliest` failed on the same `uq_body_measurements_user_source_measured_on` collision (950
+passed, 1 failed, 11 skipped). Confirmed unrelated to this plan's changes
+(`backend/app/analytics/recomposition.py`, `backend/app/analytics/schemas.py`, and
+`backend/tests/test_analytics_recomposition.py`, none of which touch `body_measurements` or
+`test_mcp_tools.py`). Not fixed here for the same reason as above -- still out of scope. This
+is the third occurrence across three consecutive plans; the recommended fix (move
+`_seed_reference_history`'s window to start at `offset=1`, or have the failing test's seed skip
+the day already claimed) is worth prioritizing soon.
