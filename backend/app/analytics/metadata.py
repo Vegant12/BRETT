@@ -104,6 +104,21 @@ FRESHNESS_RESOURCES_APPLE_HEALTH: tuple[FreshnessPair, ...] = (
     (PROVIDER_APPLE_HEALTH, RESOURCE_NUTRITION),
 )
 
+# RPT-01/RPT-02. A report reads Hevy workouts, Hevy exercise_templates (the muscle map behind
+# every per-muscle number), Hevy body_measurements (the weight trend and the measurement
+# highlights) AND both Apple Health resources (the activity and nutrition sections) -- so its
+# answer is only as fresh as the STALEST of the five. Composed by NAMING all five pairs rather
+# than by concatenating the three existing bundles at runtime: a tuple built by `+` is a tuple
+# whose membership a reader has to compute, and `test_analytics_metadata.py` asserts the union
+# equality so the two spellings cannot drift.
+FRESHNESS_RESOURCES_REPORT: tuple[FreshnessPair, ...] = (
+    (PROVIDER_HEVY, RESOURCE_WORKOUTS),
+    (PROVIDER_HEVY, RESOURCE_EXERCISE_TEMPLATES),
+    (PROVIDER_HEVY, RESOURCE_BODY_MEASUREMENTS),
+    (PROVIDER_APPLE_HEALTH, RESOURCE_ACTIVITY),
+    (PROVIDER_APPLE_HEALTH, RESOURCE_NUTRITION),
+)
+
 # D-15. Keys are the window length in DAYS; values are the minimum number of distinct measured
 # days that window needs before its average is believable. Recalibrated from
 # `INSUFFICIENT_DATA_SESSION_THRESHOLD`'s per-SESSION cadence to a per-DAY one -- a weigh-in is

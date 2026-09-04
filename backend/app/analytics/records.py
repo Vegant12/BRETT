@@ -27,6 +27,16 @@ distinct weights per exercise (mean 5.0), so returning the whole list satisfies 
 unbounded result sets" by shape. Do not add a row cap -- a silent truncation is a wrong answer,
 and the absence of one is asserted statically rather than left to review.
 
+**``get_recent_records`` scans every exercise in ONE query, never a per-exercise loop.**
+``qualifying_set_rows`` returns every non-warm-up set in a window across every exercise in ONE
+query (measured 889 rows / 10.07 ms for a 12-week window; 7,719 rows / 17 ms all-time), while
+looping ``get_personal_records`` over a typical training week is 10-25+ round trips against a
+``MIN_INSTANCES=0`` service (13-RESEARCH.md Pitfall 1). It answers a different question from
+``get_personal_records`` too: "which PRs did I SET in this window", not "what are this exercise's
+best-ever numbers inside this window" -- a value that only led its own window is not a record,
+and reporting one as the other is exactly the plausible-looking-but-quietly-wrong failure this
+project treats as its primary risk.
+
 Read-only, like everything else under ``app/analytics/``: nothing here writes, and the CALLER
 owns the transaction. The session is positional and everything else keyword-only, matching
 ``app/db/repositories/``.
@@ -44,8 +54,10 @@ from app.analytics.metadata import (
     FRESHNESS_RESOURCES_MUSCLE,
     build_coverage,
     build_freshness,
+    earliest_workout_at,
 )
 from app.analytics.rollup import (
+    MAX_ANALYTICS_WINDOW_DAYS,
     QualifyingSetRow,
     qualifying_set_rows,
     resolve_window,
@@ -54,8 +66,11 @@ from app.analytics.schemas import (
     PersonalRecord,
     PersonalRecordsResult,
     PersonalRecordType,
+    RecentRecord,
+    RecentRecordsResult,
     RepsAtWeightRecord,
 )
+from app.core.time import local_day
 
 # Mirrors `workout_sets.weight_kg` Numeric(7, 3), and quantized at the boundary in ONE place for
 # `_E1RM_QUANTUM`'s reason: a session-volume sum inherits the widest scale of its operands, and a
@@ -276,6 +291,263 @@ async def get_personal_records(
         # BOTH resources: `exercise_type` is the D-03 gate for the estimated-1RM record and it
         # comes from the templates table, so a stale template sync silently changes which sets
         # are eligible for that record with no error anywhere in the stack.
+        freshness=await build_freshness(
+            session, user_id=user_id, resources=FRESHNESS_RESOURCES_MUSCLE
+        ),
+    )
+
+
+@dataclass(slots=True)
+class _TemplateAccumulator:
+    """One exercise's running-best state, folded from a single pass over qualifying sets.
+
+    A PARALLEL structure to the scalars ``get_personal_records`` uses inline, because
+    ``get_recent_records`` needs TWO of these per template -- one for history strictly before
+    the window (``prior``) and one for the window itself (``current``) -- so a record can be
+    compared against its own exercise's incumbent rather than against every exercise's.
+
+    ``sessions`` mirrors ``get_personal_records``' ``per_session`` dict, scoped per template
+    per bucket for the same reason: ``SESSION_VOLUME`` is per exercise-session, never per
+    window, and a session belongs to exactly one bucket because a workout cannot straddle the
+    window boundary that splits ``prior`` from ``current``.
+    """
+
+    best_weight: tuple[_RecordKey, QualifyingSetRow] | None = None
+    best_reps: tuple[_RecordKey, QualifyingSetRow] | None = None
+    best_e1rm: tuple[_RecordKey, QualifyingSetRow] | None = None
+    sessions: dict[uuid.UUID, _SessionVolume] = field(default_factory=dict)
+
+
+def _best_session_volume(
+    sessions: dict[uuid.UUID, _SessionVolume],
+) -> tuple[_RecordKey, _SessionVolume] | None:
+    """The single best exercise-session in one bucket, via the SAME fold ``get_personal_records``
+    uses -- reused rather than re-derived, so the two functions cannot disagree about which
+    session was best.
+    """
+    best: tuple[_RecordKey, _SessionVolume] | None = None
+    for session_volume in sessions.values():
+        candidate = _key(
+            session_volume.volume_kg.quantize(_VOLUME_QUANTUM), session_volume.local_day
+        )
+        if _better(candidate, best[0] if best is not None else None):
+            best = (candidate, session_volume)
+    return best
+
+
+async def get_recent_records(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    start_day: dt.date,
+    end_day: dt.date,
+) -> RecentRecordsResult:
+    """PROG-04 asked cross-exercise: which PRs were SET inside this window, across everything.
+
+    See the module docstring's fifth rule for why this is one query and a Python fold rather
+    than a loop over ``get_personal_records``. Session positional, everything else keyword-only,
+    ``user_id`` with no default (ASVS V4). The caller owns the transaction; nothing here writes.
+    The window is resolved WITHOUT week snapping, matching ``get_personal_records`` -- a record
+    is a point in time and has no bucket to be comparable with.
+    """
+    window = await resolve_window(
+        session, user_id=user_id, start_day=start_day, end_day=end_day, snap_to_weeks=False
+    )
+
+    # The running best must be SEEDED from history strictly before the window, or truncating the
+    # window manufactures a fake "new record" on the first in-window set. Mirrors
+    # `get_plateaus`' idiom exactly: one query covering [history_start, end_day], split in
+    # Python -- not two queries, and not a second aggregate with its own copy of the warm-up
+    # rule.
+    earliest = await earliest_workout_at(session, user_id=user_id)
+    history_start = start_day if earliest is None else local_day(earliest, window.tz)
+    # `build_window` refuses a span above MAX_ANALYTICS_WINDOW_DAYS. Clamping here rather than
+    # letting it raise means a user with more than five years of history gets a correctly seeded
+    # scan instead of an error -- the seed loses only history older than five years, which
+    # cannot be anyone's current ceiling.
+    clamp_floor = end_day - dt.timedelta(days=MAX_ANALYTICS_WINDOW_DAYS - 1)
+    history_start = max(min(history_start, start_day), clamp_floor)
+
+    history_window = await resolve_window(
+        session, user_id=user_id, start_day=history_start, end_day=end_day, snap_to_weeks=False
+    )
+    # ONE call, `template_external_ids=None` -- EVERY exercise, cross-exercise by construction.
+    # The tenant predicate inside `qualifying_set_rows` is unconditional and leads the WHERE
+    # clause, so widening the exercise scope here can never widen the tenant scope (T-13-09).
+    rows = await qualifying_set_rows(
+        session, user_id=user_id, window=history_window, template_external_ids=None
+    )
+
+    prior: dict[str, _TemplateAccumulator] = {}
+    current: dict[str, _TemplateAccumulator] = {}
+    titles: dict[str, str | None] = {}
+
+    # ONE pass, feeding every accumulator from the same row -- the same shape
+    # `get_personal_records` uses, split across two buckets by local day instead of one.
+    #
+    # (A comment here must never OPEN with the four characters `# type` followed by a colon:
+    # mypy reads that as a PEP 484 type comment and fails the file with a bare `Invalid syntax`
+    # pointing at the comment line, which is a genuinely baffling half hour.)
+    for row in rows:
+        bucket = current if row.local_day >= start_day else prior
+        acc = bucket.setdefault(row.template_external_id, _TemplateAccumulator())
+        titles.setdefault(row.template_external_id, row.title)
+
+        if row.weight_kg is not None:
+            weight_candidate = _key(row.weight_kg, row.local_day)
+            incumbent = acc.best_weight[0] if acc.best_weight is not None else None
+            if _better(weight_candidate, incumbent):
+                acc.best_weight = (weight_candidate, row)
+
+        if row.reps is not None:
+            # D-02's rep cap gates the ESTIMATE, never the observation -- the rep PR is
+            # precisely the record that lives above that range.
+            reps_candidate = _key(Decimal(row.reps), row.local_day)
+            if _better(reps_candidate, acc.best_reps[0] if acc.best_reps is not None else None):
+                acc.best_reps = (reps_candidate, row)
+
+        # A `None` here is an ineligible ESTIMATE, never an ineligible set.
+        estimated, _ = estimate_1rm(
+            weight_kg=row.weight_kg, reps=row.reps, exercise_type=row.exercise_type
+        )
+        if estimated is not None:
+            e1rm_candidate = _key(estimated, row.local_day)
+            if _better(e1rm_candidate, acc.best_e1rm[0] if acc.best_e1rm is not None else None):
+                acc.best_e1rm = (e1rm_candidate, row)
+
+        # Operand presence, never a modality allow-list, exactly as `get_personal_records`
+        # applies it: a set missing either operand contributes to no session-volume sum.
+        if row.weight_kg is None or row.reps is None:
+            continue
+        session_volume = acc.sessions.setdefault(row.workout_id, _SessionVolume(row.local_day))
+        session_volume.volume_kg += row.weight_kg * row.reps
+        session_volume.volume_sets += 1
+
+    records: list[RecentRecord] = []
+    for template_external_id, current_acc in current.items():
+        prior_acc = prior.get(template_external_id)
+        title = titles.get(template_external_id)
+
+        if current_acc.best_weight is not None:
+            current_key, current_row = current_acc.best_weight
+            prior_key = (
+                prior_acc.best_weight[0]
+                if prior_acc is not None and prior_acc.best_weight is not None
+                else None
+            )
+            if _better(current_key, prior_key):
+                records.append(
+                    RecentRecord(
+                        exercise_template_external_id=template_external_id,
+                        title=title,
+                        record=PersonalRecord(
+                            record_type=PersonalRecordType.MAX_WEIGHT,
+                            value=current_key[0],
+                            achieved_on=current_row.local_day,
+                            weight_kg=current_row.weight_kg,
+                            reps=current_row.reps,
+                            volume_sets=None,
+                        ),
+                        previous_value=prior_key[0] if prior_key is not None else None,
+                    )
+                )
+
+        if current_acc.best_reps is not None:
+            current_key, current_row = current_acc.best_reps
+            prior_key = (
+                prior_acc.best_reps[0]
+                if prior_acc is not None and prior_acc.best_reps is not None
+                else None
+            )
+            if _better(current_key, prior_key):
+                records.append(
+                    RecentRecord(
+                        exercise_template_external_id=template_external_id,
+                        title=title,
+                        record=PersonalRecord(
+                            record_type=PersonalRecordType.MAX_REPS,
+                            value=current_key[0],
+                            achieved_on=current_row.local_day,
+                            # May be None -- a `reps_only` set sets a rep PR and has no weight.
+                            weight_kg=current_row.weight_kg,
+                            reps=current_row.reps,
+                            volume_sets=None,
+                        ),
+                        previous_value=prior_key[0] if prior_key is not None else None,
+                    )
+                )
+
+        if current_acc.best_e1rm is not None:
+            current_key, current_row = current_acc.best_e1rm
+            prior_key = (
+                prior_acc.best_e1rm[0]
+                if prior_acc is not None and prior_acc.best_e1rm is not None
+                else None
+            )
+            if _better(current_key, prior_key):
+                records.append(
+                    RecentRecord(
+                        exercise_template_external_id=template_external_id,
+                        title=title,
+                        record=PersonalRecord(
+                            record_type=PersonalRecordType.ESTIMATED_1RM,
+                            value=current_key[0],
+                            achieved_on=current_row.local_day,
+                            weight_kg=current_row.weight_kg,
+                            reps=current_row.reps,
+                            volume_sets=None,
+                        ),
+                        previous_value=prior_key[0] if prior_key is not None else None,
+                    )
+                )
+
+        current_volume = _best_session_volume(current_acc.sessions)
+        if current_volume is not None:
+            current_key, current_session = current_volume
+            prior_volume = (
+                _best_session_volume(prior_acc.sessions) if prior_acc is not None else None
+            )
+            prior_key = prior_volume[0] if prior_volume is not None else None
+            if _better(current_key, prior_key):
+                records.append(
+                    RecentRecord(
+                        exercise_template_external_id=template_external_id,
+                        title=title,
+                        record=PersonalRecord(
+                            record_type=PersonalRecordType.SESSION_VOLUME,
+                            value=current_key[0],
+                            achieved_on=current_session.local_day,
+                            weight_kg=None,
+                            reps=None,
+                            volume_sets=current_session.volume_sets,
+                        ),
+                        previous_value=prior_key[0] if prior_key is not None else None,
+                    )
+                )
+
+    # Newest first (achieved_on descending), then record_type, then exercise -- the two
+    # secondary keys exist so the consumer's truncation point is deterministic rather than
+    # planner-dependent, matching this module's other stated-key sort.
+    records.sort(
+        key=lambda record: (
+            -record.record.achieved_on.toordinal(),
+            record.record.record_type.value,
+            record.exercise_template_external_id,
+        )
+    )
+
+    return RecentRecordsResult(
+        window_start=window.start_day,
+        window_end=window.end_day,
+        records=records,
+        # Over the REQUESTED window, not the seeded history window -- the coverage envelope
+        # describes the window the caller asked about.
+        coverage=await build_coverage(
+            session, user_id=user_id, utc_start=window.utc_start, utc_end=window.utc_end
+        ),
+        # The same bundle `get_personal_records` uses, and for its reason: `exercise_type` gates
+        # e1RM eligibility and comes from the templates, so a stale template sync silently
+        # changes which records exist.
         freshness=await build_freshness(
             session, user_id=user_id, resources=FRESHNESS_RESOURCES_MUSCLE
         ),

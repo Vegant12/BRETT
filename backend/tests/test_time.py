@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.time import (
     local_day,
     local_day_bounds,
+    local_month_start,
     local_range_bounds,
     local_week_spine,
     local_week_start,
@@ -354,3 +355,33 @@ def test_local_week_spine_snaps_its_first_entry_to_monday() -> None:
 def test_local_week_spine_rejects_an_inverted_range() -> None:
     with pytest.raises(ValueError, match="end_day precedes start_day"):
         local_week_spine(dt.date(2026, 8, 30), dt.date(2026, 8, 24))
+
+
+# --------------------------------------------------------------------------
+# RPT-02: calendar-month report window
+# --------------------------------------------------------------------------
+
+
+def test_local_month_start_uses_the_users_month() -> None:
+    """The load-bearing case is the UTC+7 boundary: only it can fail from a server-local bug."""
+    # 02:00Z on 2026-09-04 is 09:00 local in Jakarta -- squarely inside September, no boundary
+    # risk. A trivial "day.replace(day=1)" over the naive UTC date would already get this right.
+    assert local_month_start(
+        dt.datetime(2026, 9, 4, 2, 0, tzinfo=dt.UTC), "Asia/Jakarta"
+    ) == dt.date(2026, 9, 1)
+
+    # THE case: 18:00Z on the last day of August is 01:00 on September 1st at UTC+7. Deriving the
+    # month from the server's bare UTC date instead reports August for seven hours out of every
+    # twenty-four -- silently, as a report that is one month stale.
+    assert local_month_start(
+        dt.datetime(2026, 8, 31, 18, 0, tzinfo=dt.UTC), "Asia/Jakarta"
+    ) == dt.date(2026, 9, 1)
+
+    # The first instant of a month maps to that month, at a zero UTC offset where local and UTC
+    # dates always agree -- the sanity case with no timezone arithmetic to get wrong.
+    assert local_month_start(dt.datetime(2026, 9, 1, 0, 0, tzinfo=dt.UTC), "UTC") == dt.date(
+        2026, 9, 1
+    )
+
+    with pytest.raises(ValueError, match="naive"):
+        local_month_start(dt.datetime(2026, 9, 4, 2, 0), "Asia/Jakarta")  # noqa: DTZ001

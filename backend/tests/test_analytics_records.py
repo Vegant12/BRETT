@@ -21,11 +21,13 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analytics.records import get_personal_records
+from app.analytics.records import get_personal_records, get_recent_records
 from app.analytics.schemas import (
     PersonalRecord,
     PersonalRecordsResult,
     PersonalRecordType,
+    RecentRecord,
+    RecentRecordsResult,
 )
 from app.db.repositories.sync_state import (
     RESOURCE_EXERCISE_TEMPLATES,
@@ -461,3 +463,389 @@ async def test_records_and_freshness_shape(
     assert set(result.freshness.resources) == {RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES}
     assert result.coverage.sessions_in_window == 1
     assert result.coverage.insufficient_data is True
+
+
+# ---------------------------------------------------------------------------
+# get_recent_records: the cross-exercise scan (PROG-04, asked cross-exercise).
+#
+# THE load-bearing test here is `test_a_window_leader_that_does_not_beat_history_is_not_a_record`
+# -- it is the exact behaviour separating this function from `get_personal_records`, and a future
+# refactor that collapses the two is most likely to break it silently, since every value
+# assertion elsewhere would still pass.
+# ---------------------------------------------------------------------------
+
+_RR_BENCH = "RR-bench"
+_RR_SQUAT = "RR-squat"
+_RR_PULLUP = "RR-pullup"
+_RR_SHARED = "RR-shared"
+
+# A whole calendar month again, for the same reason `_START`/`_END` are: the window echoed back
+# unsnapped is itself an assertion.
+_RR_START = dt.date(2026, 8, 1)
+_RR_END = dt.date(2026, 8, 31)
+
+# Strictly BEFORE `_RR_START` -- the pre-window history a record must beat.
+_RR_PRIOR = dt.datetime(2026, 7, 15, 2, 0, tzinfo=dt.UTC)  # local 2026-07-15
+_RR_PRIOR_DAY = dt.date(2026, 7, 15)
+
+# Two in-window instants, so ordering (latest-first) is assertable.
+_RR_EARLY = dt.datetime(2026, 8, 3, 2, 0, tzinfo=dt.UTC)  # local 2026-08-03
+_RR_LATE = dt.datetime(2026, 8, 20, 2, 0, tzinfo=dt.UTC)  # local 2026-08-20
+_RR_EARLY_DAY = dt.date(2026, 8, 3)
+_RR_LATE_DAY = dt.date(2026, 8, 20)
+
+
+def _by_template_and_type(
+    result: RecentRecordsResult,
+) -> dict[tuple[str, PersonalRecordType], RecentRecord]:
+    """Index by (exercise, record type) -- the grain a cross-exercise scan reports at."""
+    return {
+        (record.exercise_template_external_id, record.record.record_type): record
+        for record in result.records
+    }
+
+
+async def _recent(
+    session: AsyncSession, start_day: dt.date = _RR_START, end_day: dt.date = _RR_END
+) -> RecentRecordsResult:
+    """The default user's cross-exercise recent-records scan over the fixture month."""
+    return await get_recent_records(
+        session, user_id=DEFAULT_USER_ID, start_day=start_day, end_day=end_day
+    )
+
+
+@pytest.mark.integration
+async def test_max_weight_record_beats_pre_window_history(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """The in-window heaviest set (100 kg) beats the pre-window heaviest (95 kg): one
+    `MAX_WEIGHT` record, with `previous_value` naming the incumbent it beat.
+    """
+    await golden_workout.template(external_id=_RR_BENCH)
+    await golden_workout.workout(
+        start_time=_RR_PRIOR,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("95.000"), reps=5),),
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=3),),
+            )
+        ],
+    )
+
+    record = _by_template_and_type(await _recent(session))[
+        (_RR_BENCH, PersonalRecordType.MAX_WEIGHT)
+    ]
+
+    assert record.record.value == Decimal("100.000")
+    assert record.record.achieved_on == _RR_EARLY_DAY
+    assert record.previous_value == Decimal("95.000")
+
+
+@pytest.mark.integration
+async def test_a_window_leader_that_does_not_beat_history_is_not_a_record(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """THE load-bearing test. 90 kg in-window against a 95 kg pre-window best yields NO
+    `MAX_WEIGHT` record here -- exactly the case where `get_personal_records(start_day=...,
+    end_day=...)` WOULD return 90 kg, because that function only ever looks inside its own
+    window. A future refactor that collapses this function into a loop over that one would pass
+    every OTHER assertion in this file and fail silently only here.
+    """
+    await golden_workout.template(external_id=_RR_BENCH)
+    await golden_workout.workout(
+        start_time=_RR_PRIOR,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("95.000"), reps=5),),
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("90.000"), reps=5),),
+            )
+        ],
+    )
+
+    by_template = _by_template_and_type(await _recent(session))
+
+    assert (_RR_BENCH, PersonalRecordType.MAX_WEIGHT) not in by_template, (
+        "a window leader that never beat history was reported as a record -- this is exactly "
+        "the behaviour that separates get_recent_records from get_personal_records"
+    )
+
+
+@pytest.mark.integration
+async def test_an_exercise_trained_first_time_in_window_has_no_previous_value(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """No pre-window history at all: the record still fires, with `previous_value is None` --
+    a real and different fact from "beat a small number", never collapsed to zero.
+    """
+    await golden_workout.template(external_id=_RR_SQUAT)
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_SQUAT,
+                sets=(GoldenSet(weight_kg=Decimal("60.000"), reps=5),),
+            )
+        ],
+    )
+
+    record = _by_template_and_type(await _recent(session))[
+        (_RR_SQUAT, PersonalRecordType.MAX_WEIGHT)
+    ]
+
+    assert record.record.value == Decimal("60.000")
+    assert record.previous_value is None
+
+
+@pytest.mark.integration
+async def test_rep_pr_above_twelve_reps_is_reported(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-02's rep cap gates the ESTIMATE, never the observation -- a 20-rep set sets a rep PR
+    here exactly as it does in `get_personal_records`.
+    """
+    await golden_workout.template(external_id=_RR_BENCH)
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("40.000"), reps=20),),
+            )
+        ],
+    )
+
+    record = _by_template_and_type(await _recent(session))[(_RR_BENCH, PersonalRecordType.MAX_REPS)]
+
+    assert record.record.value == Decimal(20)
+    assert record.previous_value is None
+
+
+@pytest.mark.integration
+async def test_session_volume_is_never_per_window(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """A 1,500 kg pre-window session beats two SEPARATE 1,000 kg in-window sessions -- even
+    though their WINDOW total (2,000 kg) exceeds it. Summing across the window instead of
+    scoping to one exercise-session would report a record that never actually happened in any
+    single session.
+    """
+    await golden_workout.template(external_id=_RR_BENCH)
+    await golden_workout.workout(
+        start_time=_RR_PRIOR,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=15),),
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=10),),
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=_RR_LATE,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=10),),
+            )
+        ],
+    )
+
+    by_template = _by_template_and_type(await _recent(session))
+
+    assert (_RR_BENCH, PersonalRecordType.SESSION_VOLUME) not in by_template, (
+        "session volume was compared against the WINDOW's total instead of per exercise-session"
+    )
+
+
+@pytest.mark.integration
+async def test_bodyweight_exercise_yields_no_weight_or_volume_record(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """A `reps_only` exercise has no `weight_kg` at all: no `MAX_WEIGHT`, no `SESSION_VOLUME`,
+    and no crash -- only the rep PR is a fact this exercise can report.
+    """
+    await golden_workout.template(external_id=_RR_PULLUP, exercise_type="reps_only")
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[GoldenExercise(template_external_id=_RR_PULLUP, sets=(GoldenSet(reps=15),))],
+    )
+
+    by_template = _by_template_and_type(await _recent(session))
+
+    assert (_RR_PULLUP, PersonalRecordType.MAX_WEIGHT) not in by_template
+    assert (_RR_PULLUP, PersonalRecordType.SESSION_VOLUME) not in by_template
+    assert by_template[(_RR_PULLUP, PersonalRecordType.MAX_REPS)].record.value == Decimal(15)
+
+
+@pytest.mark.integration
+async def test_a_tie_with_history_is_not_a_new_record(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-09: a value achieved LATER that merely EQUALS the incumbent is not a new record -- the
+    earlier date already owns the tie-break, so the later occurrence must lose.
+    """
+    await golden_workout.template(external_id=_RR_BENCH)
+    await golden_workout.workout(
+        start_time=_RR_PRIOR,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=5),),
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=5),),
+            )
+        ],
+    )
+
+    by_template = _by_template_and_type(await _recent(session))
+
+    assert (_RR_BENCH, PersonalRecordType.MAX_WEIGHT) not in by_template, (
+        "an in-window set that merely equalled (never beat) the pre-window incumbent was "
+        "reported as a new record"
+    )
+
+
+@pytest.mark.integration
+async def test_records_are_sorted_newest_first(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Three different exercises, three different first-ever days: the most recent leads."""
+    await golden_workout.template(external_id=_RR_BENCH)
+    await golden_workout.template(external_id=_RR_SQUAT)
+    await golden_workout.template(external_id=_RR_PULLUP, exercise_type="reps_only")
+
+    await golden_workout.workout(
+        start_time=dt.datetime(2026, 8, 5, 2, 0, tzinfo=dt.UTC),
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("60.000"), reps=5),),
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=dt.datetime(2026, 8, 15, 2, 0, tzinfo=dt.UTC),
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_SQUAT,
+                sets=(GoldenSet(weight_kg=Decimal("80.000"), reps=5),),
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=dt.datetime(2026, 8, 25, 2, 0, tzinfo=dt.UTC),
+        exercises=[GoldenExercise(template_external_id=_RR_PULLUP, sets=(GoldenSet(reps=10),))],
+    )
+
+    result = await _recent(session)
+
+    assert result.records[0].record.achieved_on == dt.date(2026, 8, 25)
+    assert result.records[0].exercise_template_external_id == _RR_PULLUP
+    achieved_on_values = [record.record.achieved_on for record in result.records]
+    assert achieved_on_values == sorted(achieved_on_values, reverse=True)
+
+
+@pytest.mark.integration
+async def test_second_users_sets_are_invisible_to_recent_records(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """ASVS V4: `template_external_ids=None` widens the EXERCISE scope, never the tenant scope,
+    because the tenant predicate inside `qualifying_set_rows` is unconditional and leads it.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.template(external_id=_RR_SHARED, title="Mine")
+    await golden_workout.template(
+        external_id=_RR_SHARED, title="Theirs", user_id=ANALYTICS_SECOND_USER_ID
+    )
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_SHARED,
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=5),),
+            )
+        ],
+    )
+    await golden_workout.workout(
+        start_time=_RR_LATE,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_SHARED,
+                sets=(GoldenSet(weight_kg=Decimal("300.000"), reps=5),),
+            )
+        ],
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+
+    result = await _recent(session)
+
+    # Guard against a vacuous pass: if the fixture wrote nothing, every assertion below holds
+    # while proving nothing at all.
+    assert result.records
+    assert all(record.record.value != Decimal("300.000") for record in result.records), (
+        "another user's set leaked into this user's cross-exercise scan (ASVS V4)"
+    )
+    record = _by_template_and_type(result)[(_RR_SHARED, PersonalRecordType.MAX_WEIGHT)]
+    assert record.title == "Mine"
+    assert record.record.value == Decimal("100.000")
+
+
+@pytest.mark.integration
+async def test_recent_records_envelope_shape(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """The window is echoed back unsnapped, and freshness names the same two resources
+    `get_personal_records` does, for the same reason: `exercise_type` gates e1RM eligibility and
+    comes from the templates table.
+    """
+    await golden_workout.template(external_id=_RR_BENCH)
+    await golden_workout.workout(
+        start_time=_RR_EARLY,
+        exercises=[
+            GoldenExercise(
+                template_external_id=_RR_BENCH,
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=5),),
+            )
+        ],
+    )
+
+    result = await _recent(session)
+
+    assert (result.window_start, result.window_end) == (_RR_START, _RR_END), (
+        "the window was snapped. A record is a point in time and has no bucket to be comparable "
+        "with, so this echoes the raw requested range back exactly as PROG-04 does"
+    )
+    assert set(result.freshness.resources) == {RESOURCE_WORKOUTS, RESOURCE_EXERCISE_TEMPLATES}
