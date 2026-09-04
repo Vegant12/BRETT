@@ -35,6 +35,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from app.analytics.schemas import (
+    ActivityTrendResult,
     BodyMeasurementTrendResult,
     BodyWeightTrendResult,
     ComparisonLevel,
@@ -45,6 +46,7 @@ from app.analytics.schemas import (
     FreshnessMetadata,
     MuscleGroupComparison,
     MuscleGroupFrequency,
+    NutritionTrendResult,
     PeriodSummary,
     PersonalRecordsResult,
     PlateauResult,
@@ -197,6 +199,31 @@ class BodyMeasurementTrendResponse(_McpModel):
 
     data_available: bool
     trend: BodyMeasurementTrendResult | None
+
+
+class ActivityTrendResponse(_McpModel):
+    """HEALTH-12 for MCP. ``trend`` is the analytics result embedded WHOLE, per-window coverage
+    and all -- a collapsed single coverage flag would hide that a 30-day average can be
+    trustworthy while the 7-day one is not, which is ``BodyWeightTrendResponse``'s own reason
+    for embedding rather than projecting.
+    """
+
+    data_available: bool
+    trend: ActivityTrendResult | None
+
+
+class NutritionTrendResponse(_McpModel):
+    """NUTR-06 for MCP. Per 13-RESEARCH.md Pitfall 2, ``trend`` carries INDEPENDENT per-metric
+    coverage, never one shared flag across the seven macros.
+
+    D-08, stated explicitly so a future reader does not "improve" it: this tool takes no metric
+    selector and always returns all seven, unlike ``fitness_get_body_measurement_trend``,
+    because nutrition values are asked about together while body measurements' 16 columns are
+    largely independent.
+    """
+
+    data_available: bool
+    trend: NutritionTrendResult | None
 
 
 class RecompositionResponse(_McpModel):
