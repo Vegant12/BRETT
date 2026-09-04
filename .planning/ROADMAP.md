@@ -131,7 +131,7 @@ Notes for planning:
 **Plans**: 3 plans in 3 waves
 
 Plans:
-- [ ] 11-01-PLAN.md — `BodyMeasurementMetric` enum + `BodyMeasurementTrendResult`, the `{90: 2}` coverage floor, the column-scoped `earliest_metric_measurement_at`, and the `GoldenBuilder` fixture extension (wave 1)
+- [x] 11-01-PLAN.md — `BodyMeasurementMetric` enum + `BodyMeasurementTrendResult`, the `{90: 2}` coverage floor, the column-scoped `earliest_metric_measurement_at`, and the `GoldenBuilder` fixture extension (wave 1)
 - [ ] 11-02-PLAN.md — `analytics/body_measurements.py`: the one generic latest-vs-earliest 90-day function, with the floor/staleness four-quadrant proof (wave 2)
 - [ ] 11-03-PLAN.md — `fitness_get_body_measurement_trend` (the 14th tool), its registration, the six structural drift guards, and the coaching-doc entry (wave 3)
 
@@ -198,7 +198,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 8. Apple Health & Nutrition Ingest | v2.0 | 8/8 | Complete | 2026-09-03 |
 | 9. Historical Apple Health Backfill | v2.0 | 0/7 | Planned | - |
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
-| 11. Body Measurement History | v2.0 | 0/3 | Planned | - |
+| 11. Body Measurement History | v2.0 | 1/3 | In Progress|  |
 | 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 0/TBD | Not started | - |
 | 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/TBD | Not started | - |
 
