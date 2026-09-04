@@ -28,8 +28,10 @@ it looks plausible.
 
 import datetime as dt
 import uuid
+from collections.abc import Mapping
 from decimal import Decimal
 from enum import StrEnum
+from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict
 
@@ -712,6 +714,200 @@ class BodyMeasurementTrendResult(_AnalyticsModel):
     days_since_latest_reading: int | None
     stale_after_days: int
     freshness: FreshnessMetadata
+
+
+class ActivityMetric(StrEnum):
+    """HEALTH-12's closed activity vocabulary. Each VALUE is the exact Health Auto Export wire
+    metric name stored in ``health_daily_metrics.metric``.
+
+    Declared here rather than imported from
+    ``app/integrations/health_auto_export/registry.py`` because ``test_analytics_isolation.py``
+    forbids ``app.analytics`` importing ``app.integrations`` (a provider field rename must not
+    become an analytics rename) -- the same relationship ``BodyMeasurementMetric`` has with the
+    ORM's own column names. The drift risk that separation creates is closed by a TEST asserting
+    this enum's value set equals the registry's ``kind == "activity"`` key set, not by trusting
+    the two lists to be copied correctly once.
+    """
+
+    STEP_COUNT = "step_count"
+    ACTIVE_ENERGY = "active_energy"
+    BASAL_ENERGY_BURNED = "basal_energy_burned"
+    WALKING_RUNNING_DISTANCE = "walking_running_distance"
+    FLIGHTS_CLIMBED = "flights_climbed"
+
+
+class NutritionMetric(StrEnum):
+    """NUTR-04's closed nutrition vocabulary. Each VALUE is the exact Health Auto Export wire
+    metric name stored in ``health_daily_metrics.metric``.
+
+    The registry's naming trap, reproduced here because guessing it wrong is SILENT (D-04 drops
+    an unlisted metric with a log line and no test failure): it is ``total_fat``, never
+    ``fat``; ``dietary_sugar``, never ``sugar``; ``protein``, never ``dietary_protein``. Only
+    ``dietary_energy`` and ``dietary_sugar`` carry the ``dietary_`` prefix.
+    """
+
+    DIETARY_ENERGY = "dietary_energy"
+    PROTEIN = "protein"
+    CARBOHYDRATES = "carbohydrates"
+    TOTAL_FAT = "total_fat"
+    FIBER = "fiber"
+    DIETARY_SUGAR = "dietary_sugar"
+    SODIUM = "sodium"
+
+
+# `MappingProxyType` for `registry.py`'s reason: a caller must not be able to retune these at
+# runtime.
+ACTIVITY_METRIC_UNITS: Mapping[ActivityMetric, str] = MappingProxyType(
+    {
+        ActivityMetric.STEP_COUNT: "count",
+        ActivityMetric.ACTIVE_ENERGY: "kcal",
+        ActivityMetric.BASAL_ENERGY_BURNED: "kcal",
+        ActivityMetric.WALKING_RUNNING_DISTANCE: "km",
+        ActivityMetric.FLIGHTS_CLIMBED: "count",
+    }
+)
+NUTRITION_METRIC_UNITS: Mapping[NutritionMetric, str] = MappingProxyType(
+    {
+        NutritionMetric.DIETARY_ENERGY: "kcal",
+        NutritionMetric.PROTEIN: "g",
+        NutritionMetric.CARBOHYDRATES: "g",
+        NutritionMetric.TOTAL_FAT: "g",
+        NutritionMetric.FIBER: "g",
+        NutritionMetric.DIETARY_SUGAR: "g",
+        NutritionMetric.SODIUM: "mg",
+    }
+)
+
+
+class MetricWindowAverage(_AnalyticsModel):
+    """One rolling window's average for one HEALTH-12/NUTR-04 metric.
+
+    ``average`` and ``total`` are BOTH ``None`` when ``coverage.insufficient_data`` is True --
+    the arithmetic exists either way, but a 30-day step average built from two logged days
+    presents a fiction as a trend, exactly ``BodyWeightTrendResult``'s rule. ``total`` sums the
+    MEASURED days only, never the window length: there is no interpolation and no carry-forward
+    (``bodyweight.py`` D-13's reason), so ``total`` answers "how much did you log across the
+    days you logged" and never "how much did you do this week" -- a distinction that matters
+    most for nutrition, where a missed logging day is not a fasted day.
+    """
+
+    window_days: int
+    average: Decimal | None
+    total: Decimal | None
+    coverage: MeasurementCoverage
+
+
+class MetricTrend(_AnalyticsModel):
+    """One metric's full HEALTH-12/NUTR-04 trend: three independent windows plus a rate.
+
+    ``windows`` holds exactly three entries in ascending ``window_days`` order (7, 14, 30) -- a
+    list rather than three named fields because every consumer iterates them and because the
+    per-window independence is the point (D-15: a 30-day average can be trustworthy while the
+    7-day one is not).
+
+    ``change_percent_7d_vs_30d`` is HEALTH-12's "rate of change" and is deliberately NOT
+    ``bodyweight.py``'s four-week smoothed anchor: that anchor exists to strip water and
+    glycogen noise from a slow signal whose raw weekly delta is nearly three times the threshold
+    it is compared against, whereas activity and intake are fast, high-variance, daily-measured
+    signals whose real question is "has my activity dropped off lately" -- this week against the
+    last month. It is ``None`` when EITHER window fails its own floor, because a ratio with one
+    trustworthy endpoint and one guess is not half-trustworthy, it is wrong.
+
+    ``latest_measured_on``/``latest_value`` are populated independently of every floor: one real
+    observation is worth surfacing, and suppressing it would report "no data" for a metric the
+    user demonstrably recorded.
+    """
+
+    metric: str
+    unit: str
+    windows: list[MetricWindowAverage]
+    change_percent_7d_vs_30d: Decimal | None
+    latest_measured_on: dt.date | None
+    latest_value: Decimal | None
+
+
+class ActivityTrendResult(_AnalyticsModel):
+    """HEALTH-12. ``metrics`` always holds all five, in ``ActivityMetric`` declaration order.
+
+    A metric with no rows is PRESENT with null averages and zero-measured-day coverage, never
+    omitted -- an omitted metric is indistinguishable from a metric that does not exist, and
+    "you have no flights-climbed data" is the answer to a question about flights climbed.
+
+    Activity data is recomposition CONTEXT, never a classifier input. Nothing in
+    ``recomposition.py`` reads this module, and nothing should.
+    """
+
+    anchor_day: dt.date
+    metrics: list[MetricTrend]
+    freshness: FreshnessMetadata
+
+
+class NutritionTrendResult(_AnalyticsModel):
+    """NUTR-04. ``metrics`` always holds all seven (D-08 -- no metric selector, ever).
+
+    Per 13-RESEARCH.md Pitfall 2, each entry carries its OWN coverage: real production data
+    shows the macros are not perfectly co-logged (2026-09-03, eleven of twelve registry metrics
+    present, ``sodium`` absent), and one shared ``measured_days`` anchored on ``dietary_energy``
+    would advertise a sodium average as trustworthy on the strength of days that recorded no
+    sodium at all.
+    """
+
+    anchor_day: dt.date
+    metrics: list[MetricTrend]
+    freshness: FreshnessMetadata
+
+
+class MetricPeriodSummary(_AnalyticsModel):
+    """One metric's HEALTH-12/NUTR-04 figure over an explicit report period, not a rolling window.
+
+    Separate from ``MetricWindowAverage`` because the coverage story differs.
+    ``MEASURED_DAY_FLOORS`` is defined for exactly four window lengths and
+    ``is_measurement_insufficient`` raises on any other, while a report period is 1-7 days
+    (Monday through today) or 1-31 days (the calendar month so far) -- so its floor is COMPUTED,
+    not looked up. ``floor_days`` is echoed as a field for ``PlateauResult.threshold_percent``'s
+    reason: a flag whose threshold the reader cannot see is a flag the reader has to trust
+    blindly. There is deliberately no ``freshness`` field -- this model is always embedded in a
+    report that already carries the five-resource ``FRESHNESS_RESOURCES_REPORT`` envelope, and a
+    per-metric copy would put twelve duplicate envelopes in one payload.
+    """
+
+    metric: str
+    unit: str
+    daily_average: Decimal | None
+    total: Decimal | None
+    measured_days: int
+    days_in_period: int
+    floor_days: int
+    insufficient_data: bool
+
+
+class ActivityPeriodSummary(_AnalyticsModel):
+    """RPT-01/RPT-02's activity section, over the REPORT's own closed period.
+
+    Sharing the report's window rather than carrying an independent rolling one is deliberate --
+    a report whose training figures cover Monday-to-today and whose activity figures cover the
+    trailing thirty days has two sections visibly disagreeing about what "this week" means.
+    ``fitness_get_activity_trend`` is where the rolling view lives.
+    """
+
+    window_start: dt.date
+    window_end: dt.date
+    days_in_period: int
+    metrics: list[MetricPeriodSummary]
+
+
+class NutritionPeriodSummary(_AnalyticsModel):
+    """RPT-01/RPT-02's nutrition section, over the REPORT's own closed period.
+
+    Same four fields, same period-sharing rule as ``ActivityPeriodSummary`` -- sharing the
+    report's window rather than an independent rolling one, so the report cannot visibly
+    disagree with itself about what "this week" means.
+    """
+
+    window_start: dt.date
+    window_end: dt.date
+    days_in_period: int
+    metrics: list[MetricPeriodSummary]
 
 
 class AggregateProgression(_AnalyticsModel):
