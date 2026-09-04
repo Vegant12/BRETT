@@ -54,10 +54,13 @@ from app.db.models.sync_state import SyncState
 from app.db.models.user import User
 from app.db.models.workout import Workout, WorkoutExercise, WorkoutSet
 from app.db.repositories.sync_state import (
+    APPLE_HEALTH_RESOURCES,
+    PROVIDER_APPLE_HEALTH,
     PROVIDER_HEVY,
     SYNC_RESOURCES,
     complete_sync,
 )
+from app.integrations.health_auto_export.registry import METRIC_REGISTRY
 from app.normalization.muscles import CanonicalMuscleGroup, MappingSource, MuscleRole
 from app.normalization.resolver import set_override
 
@@ -508,6 +511,55 @@ class GoldenBuilder:
         )
         await self._session.flush()
 
+    async def health_metric(
+        self,
+        *,
+        metric: str,
+        local_day: dt.date,
+        value: Decimal,
+        unit: str | None = None,
+        source_name: str = "iPhone",
+        sample_count: int = 1,
+        source: str = PROVIDER_APPLE_HEALTH,
+        user_id: uuid.UUID = DEFAULT_USER_ID,
+    ) -> None:
+        """One ``health_daily_metrics`` row. Same flush-and-rollback contract as every other method.
+
+        ``value`` is a ``Decimal``, never a ``float``: these average into rolling 7/14/30-day
+        figures, and binary floating point would make two arithmetically identical averages
+        compare unequal.
+
+        ``unit`` defaults to ``None`` and, when ``None``, is resolved as
+        ``METRIC_REGISTRY[metric].canonical_unit`` -- resolving from the registry rather than
+        hard-coding a unit here is what stops a fixture from seeding ``kJ`` where production
+        stores ``kcal``. An unknown ``metric`` therefore raises ``KeyError`` at seed time, which
+        is correct: a typo'd metric name would otherwise seed a row no analytics query can ever
+        find, and the test would pass by returning an honest empty result for the wrong reason.
+
+        ``source_name`` is a PARAMETER with an ``'iPhone'`` default, not a constant, for exactly
+        the reason ``body_measurement.source`` is one: the multi-source-per-day case is real
+        production data (``docs/health-auto-export-setup.md``, 2026-08-23: ``Foodvisor`` and
+        ``Built With Science`` both wrote ``DietaryEnergyConsumed``), and the analytics fold must
+        be provably summing across ``source_name`` rather than picking one row. Two calls with the
+        same ``(metric, local_day)`` but different ``source_name`` both succeed -- the natural key
+        ``(user_id, source, metric, source_name, local_day)`` permits it.
+        """
+        resolved_unit = unit if unit is not None else METRIC_REGISTRY[metric].canonical_unit
+        await self._session.execute(
+            insert(HealthDailyMetric).values(
+                id=uuid.uuid4(),
+                user_id=user_id,
+                source=source,
+                metric=metric,
+                source_name=source_name,
+                local_day=local_day,
+                value=value,
+                units=resolved_unit,
+                sample_count=sample_count,
+            )
+        )
+        await self._session.flush()
+
     async def program_period(
         self,
         *,
@@ -849,6 +901,17 @@ WORST_CASE_EXERCISES_PER_WORKOUT = 5
 WORST_CASE_SETS_PER_EXERCISE = 4
 WORST_CASE_BODY_MEASUREMENT_DAYS = 120
 
+# Apple Health rows for the report tools' byte budget (Pitfall 4). 45 days covers the widest
+# report window (a 31-day calendar month) with room for the 30-day rolling trend windows the
+# activity/nutrition tools use, without paying for a second 5,000-row seed. All 12 registry
+# metrics on every day, because a report's activity+nutrition sections carry a per-metric
+# entry each and a partial seed would understate the measured payload.
+WORST_CASE_HEALTH_DAYS = 45
+# Two distinct source_names on the nutrition metrics, mirroring the real 2026-08-23 production
+# day on which Foodvisor and Built With Science both wrote dietary_energy. This is what makes
+# "the fold SUMS across source_name" a tested property rather than an untested intention.
+WORST_CASE_NUTRITION_SOURCE_NAMES = ("Foodvisor", "Built With Science")
+
 # 02:00Z is 09:00 in Asia/Jakarta -- well inside the local day, so these fixtures
 # exercise the arithmetic and never the local-midnight boundary (which has its
 # own dedicated tests).
@@ -891,6 +954,15 @@ async def worst_case_history(committed_history: GoldenBuilder, session: AsyncSes
     statement per row makes the budget test unusably slow. The templates still go
     through the builder, because their muscle mappings are the part a hand-rolled
     insert would get subtly wrong.
+
+    Also seeds ``WORST_CASE_HEALTH_DAYS`` (45) days x 12 registry metrics of Apple Health
+    activity/nutrition data -- one batched ``insert()``, never a per-row loop through
+    ``GoldenBuilder.health_metric`` -- plus non-null ``last_synced_at`` freshness for both
+    ``apple_health`` resources (``activity``, ``nutrition``). Nutrition metrics are doubled
+    across ``WORST_CASE_NUTRITION_SOURCE_NAMES`` (Foodvisor, Built With Science), each carrying
+    half the day's plausible total, so a report's measured byte budget is taken against a real
+    envelope -- not the all-``None`` one an all-Hevy fixture would otherwise leave -- and so the
+    fold-sums-across-source_name property is exercised by construction.
 
     Teardown is inherited from ``committed_history`` -- this fixture adds rows to
     the same purge scope and adds no cleanup of its own.
@@ -1003,6 +1075,71 @@ async def worst_case_history(committed_history: GoldenBuilder, session: AsyncSes
         ],
     )
 
+    # Apple Health rows for the report tools' byte budget (Pitfall 4, Phase 13). ONE batched
+    # insert, never a per-row loop through `GoldenBuilder.health_metric` -- WORST_CASE_HEALTH_DAYS
+    # x 19 rows/day (5 activity + 7 nutrition x 2 source_names) is ~855 rows, and a statement per
+    # row would make the budget test unusably slow, the same reason the workout tree above is
+    # batched.
+    health_rows: list[dict[str, Any]] = []
+    for offset in range(WORST_CASE_HEALTH_DAYS):
+        health_day = anchor_day - dt.timedelta(days=offset)
+
+        # Five activity metrics, one row each, varying with `offset` so a rolling average is
+        # not a constant.
+        activity_values: dict[str, Decimal] = {
+            "step_count": Decimal(8000 + offset * 13),
+            "active_energy": Decimal(420) + Decimal(offset) / Decimal(10),
+            "basal_energy_burned": Decimal(1550) + Decimal(offset),
+            "walking_running_distance": Decimal("5.5") + Decimal(offset) / Decimal(100),
+            "flights_climbed": Decimal(6 + offset % 5),
+        }
+        for metric, activity_value in activity_values.items():
+            health_rows.append(
+                {
+                    "id": uuid.uuid4(),
+                    "user_id": DEFAULT_USER_ID,
+                    "source": PROVIDER_APPLE_HEALTH,
+                    "metric": metric,
+                    "source_name": "iPhone",
+                    "local_day": health_day,
+                    "value": activity_value,
+                    "units": METRIC_REGISTRY[metric].canonical_unit,
+                    "sample_count": 1,
+                }
+            )
+
+        # Seven nutrition metrics, TWO rows each (one per WORST_CASE_NUTRITION_SOURCE_NAMES
+        # entry), each carrying HALF the day's plausible total -- so the correct summed answer
+        # is the plausible total, and a fold that picked one row instead of summing would
+        # return half of it.
+        nutrition_totals: dict[str, Decimal] = {
+            "dietary_energy": Decimal(2200) + Decimal(offset),
+            "protein": Decimal(150) + Decimal(offset) / Decimal(10),
+            "carbohydrates": Decimal(220) + Decimal(offset) / Decimal(10),
+            "total_fat": Decimal(70) + Decimal(offset) / Decimal(20),
+            "fiber": Decimal(30) + Decimal(offset) / Decimal(20),
+            "dietary_sugar": Decimal(50) + Decimal(offset) / Decimal(10),
+            "sodium": Decimal(2300) + Decimal(offset),
+        }
+        for metric, total_value in nutrition_totals.items():
+            half_value = total_value / Decimal(2)
+            for source_name in WORST_CASE_NUTRITION_SOURCE_NAMES:
+                health_rows.append(
+                    {
+                        "id": uuid.uuid4(),
+                        "user_id": DEFAULT_USER_ID,
+                        "source": PROVIDER_APPLE_HEALTH,
+                        "metric": metric,
+                        "source_name": source_name,
+                        "local_day": health_day,
+                        "value": half_value,
+                        "units": METRIC_REGISTRY[metric].canonical_unit,
+                        "sample_count": 1,
+                    }
+                )
+
+    await session.execute(insert(HealthDailyMetric), health_rows)
+
     # So `build_freshness` returns three real timestamps rather than three `None`s
     # -- an all-None envelope is a materially smaller payload than the real one,
     # and D-13's budget must be measured against the real one. Written through the
@@ -1013,6 +1150,18 @@ async def worst_case_history(committed_history: GoldenBuilder, session: AsyncSes
             session,
             user_id=DEFAULT_USER_ID,
             provider=PROVIDER_HEVY,
+            resource=resource,
+            last_synced_at=anchor,
+        )
+
+    # A SEPARATE loop, never a widened Hevy resource set -- `sync_state.py`'s own comment states
+    # that widening it would seed Apple Health resources under provider='hevy', producing
+    # bookkeeping rows for a provider that never wrote them.
+    for resource in sorted(APPLE_HEALTH_RESOURCES):
+        await complete_sync(
+            session,
+            user_id=DEFAULT_USER_ID,
+            provider=PROVIDER_APPLE_HEALTH,
             resource=resource,
             last_synced_at=anchor,
         )
