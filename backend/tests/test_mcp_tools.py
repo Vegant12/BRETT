@@ -968,15 +968,25 @@ async def test_body_measurement_trend_compares_latest_against_earliest(
 
     from app.mcp.server import mcp
 
-    await _seed_reference_history(committed_history, session)
-    today = utc_now().date()
+    anchor = await _seed_reference_history(committed_history, session)
+    # `_seed_reference_history` reserves one `body_measurements` row per day for
+    # `anchor.date() - REFERENCE_BODY_MEASUREMENT_DAYS + 1 .. anchor.date()` (weight_kg-only,
+    # waist_cm NULL). One row per (user, source, day) exists, so a naive `today`/`today - 60`
+    # pair collides with that reservation on whichever real calendar day this test happens to
+    # run on `anchor.date() == utc_now().date()` (`_reference_anchor` only steps back to
+    # yesterday before 02:00Z) -- a real-wall-clock time bomb, not a fixture design bug. Anchor
+    # both points on the SEED's own anchor, just past its reserved window, so they land inside
+    # the tool's 90-day query window (`WINDOW_DAYS` in `app/analytics/body_measurements.py`)
+    # without ever re-using a reserved day regardless of what day this runs.
+    latest_day = anchor.date() - dt.timedelta(days=REFERENCE_BODY_MEASUREMENT_DAYS)
+    earliest_day = latest_day - dt.timedelta(days=40)
     await committed_history.body_measurement(
-        measured_on=today - dt.timedelta(days=60),
+        measured_on=earliest_day,
         weight_kg=None,
         waist_cm=Decimal("85.00"),
     )
     await committed_history.body_measurement(
-        measured_on=today, weight_kg=None, waist_cm=Decimal("81.50")
+        measured_on=latest_day, weight_kg=None, waist_cm=Decimal("81.50")
     )
     await session.commit()
 

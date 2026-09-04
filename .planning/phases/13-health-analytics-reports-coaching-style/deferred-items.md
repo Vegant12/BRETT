@@ -58,3 +58,13 @@ reference date away from a live calendar boundary.
 full-suite verification. Both write-ups are kept above since they corroborate each other from
 different angles (13-02 confirms the rest of the suite is unaffected; 13-03 has the deeper
 root-cause trace). One fix will resolve both entries.
+
+## RESOLVED (orchestrator, after Wave 1 merge)
+
+Fixed during Wave 1's post-merge test gate: both test points now anchor on
+`_seed_reference_history`'s own returned `anchor` (its exact reserved 30-day range,
+`REFERENCE_BODY_MEASUREMENT_DAYS`), placed just past that range, instead of on independent
+`utc_now().date()` arithmetic that could collide with it depending on the real wall-clock day.
+This removes the date-dependence entirely — no more relying on which calendar day the suite
+happens to run on. `uv run pytest -q` — 999 passed, 0 failed. See commit
+`fix(13): remove date-dependent collision in body-measurement-trend test`.
