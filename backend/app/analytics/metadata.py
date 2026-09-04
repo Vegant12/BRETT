@@ -33,10 +33,12 @@ keyword-only, matching `app/db/repositories/`.
 import datetime as dt
 import uuid
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from types import MappingProxyType
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from app.analytics.schemas import CoverageMetadata, FreshnessMetadata, MeasurementCoverage
 from app.db.models.body import BodyMeasurement
@@ -112,7 +114,17 @@ FRESHNESS_RESOURCES_APPLE_HEALTH: tuple[FreshnessPair, ...] = (
 # always rests on a plurality of the days it claims to cover. Independent by design -- a 30-day
 # average can be trustworthy while the 7-day one is not, which is exactly the case a single
 # response-level flag cannot express.
-MEASURED_DAY_FLOORS: Mapping[int, int] = MappingProxyType({7: 3, 14: 5, 30: 10})
+#
+# The 90-day entry is BODY-05's and follows a DIFFERENT rule from the other three (D-07). The
+# first three are "a little under half the window" because they gate an AVERAGE, and an
+# average over 2 of 30 days is a fiction. 90 gates a two-point latest-vs-earliest COMPARISON,
+# where 2 is the mathematical minimum for the comparison to exist at all -- with one reading,
+# "earliest" is "latest" and the delta is a guaranteed zero. It is also what live production
+# data supports: queried 2026-09-03, `waist_cm` (the best-covered of the 16 non-weight
+# columns) holds exactly 2 readings in the trailing 90 days, and 13 of the 16 columns have
+# never been recorded once. A floor of 3 would answer `insufficient_data` to the single best
+# call this tool will ever receive. A floor of 0 or 1 is forbidden by D-07 and by arithmetic.
+MEASURED_DAY_FLOORS: Mapping[int, int] = MappingProxyType({7: 3, 14: 5, 30: 10, 90: 2})
 
 
 def is_insufficient(sessions: int) -> bool:
@@ -269,5 +281,36 @@ async def earliest_measurement_at(session: AsyncSession, *, user_id: uuid.UUID) 
     """
     result: dt.date | None = await session.scalar(
         select(func.min(BodyMeasurement.measured_on)).where(BodyMeasurement.user_id == user_id)
+    )
+    return result
+
+
+async def earliest_metric_measurement_at(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    column: InstrumentedAttribute[Decimal | None],
+) -> dt.date | None:
+    """The user's oldest synced reading of ONE specific metric, across ALL time.
+
+    A SIBLING of ``earliest_measurement_at``, never a replacement, and the difference is the
+    whole point. That function has NO column predicate: it returns the earliest ``measured_on``
+    of any row belonging to the user. That reads correctly for BODY-01 only because Hevy writes
+    ``weight_kg`` on essentially every synced row, so "the earliest row" and "the earliest
+    weigh-in" coincide -- an accident of this account's data, never an invariant of the table.
+
+    BODY-05 covers 16 columns that are each recorded far more sparsely than weight, so the
+    accident does not hold: reusing the weight-shaped function for ``waist_cm`` would report a
+    2022 date for a metric first measured in 2026, and the coverage envelope would then claim
+    the synced history reaches back further than the metric's own history does.
+
+    ``user_id`` is keyword-only with no default (ASVS V4): the schema is multi-user-ready, so an
+    unscoped read is a cross-tenant disclosure a single-user suite cannot see. The tenant
+    predicate leads the ``WHERE`` clause, matching every other query in this package.
+    """
+    result: dt.date | None = await session.scalar(
+        select(func.min(BodyMeasurement.measured_on)).where(
+            BodyMeasurement.user_id == user_id, column.is_not(None)
+        )
     )
     return result

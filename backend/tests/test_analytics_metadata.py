@@ -39,11 +39,13 @@ from app.analytics.metadata import (
     build_freshness,
     build_measurement_coverage,
     earliest_measurement_at,
+    earliest_metric_measurement_at,
     is_insufficient,
     is_measurement_insufficient,
 )
 from app.analytics.schemas import FreshnessMetadata, RecompositionStatus, _AnalyticsModel
 from app.core.time import local_range_bounds
+from app.db.models.body import BodyMeasurement
 from app.db.repositories.sync_state import (
     APPLE_HEALTH_RESOURCES,
     PROVIDER_APPLE_HEALTH,
@@ -596,7 +598,7 @@ def _analytics_return_models() -> dict[str, type[_AnalyticsModel]]:
 
 
 def test_measured_day_floors_both_sides_of_every_boundary() -> None:
-    """D-15: three windows, three INDEPENDENT floors, both sides of each pinned.
+    """D-15: four windows, four INDEPENDENT floors, both sides of each pinned.
 
     Pinning only the True side would leave `<` and `<=` indistinguishable, so an off-by-one would
     ship green and flag a perfectly well-measured week as untrustworthy -- or, worse, the reverse.
@@ -604,8 +606,12 @@ def test_measured_day_floors_both_sides_of_every_boundary() -> None:
     The floors are per window because a 30-day average can be trustworthy while the 7-day one is
     not. A single shared threshold would make `insufficient_data` mean "the sparsest window was
     sparse", which is not a fact about the average it is attached to.
+
+    The 90-day entry (D-07, BODY-05) follows a DIFFERENT rule from the other three: it gates a
+    two-point latest-vs-earliest COMPARISON, not an average, so its floor is the mathematical
+    minimum for two distinct points to exist (2), not "a little under half the window".
     """
-    assert dict(MEASURED_DAY_FLOORS) == {7: 3, 14: 5, 30: 10}
+    assert dict(MEASURED_DAY_FLOORS) == {7: 3, 14: 5, 30: 10, 90: 2}
 
     assert is_measurement_insufficient(window_days=7, measured_days=2) is True, "7-day floor is 3"
     assert is_measurement_insufficient(window_days=7, measured_days=3) is False, "7-day floor is 3"
@@ -618,6 +624,12 @@ def test_measured_day_floors_both_sides_of_every_boundary() -> None:
     )
     assert is_measurement_insufficient(window_days=30, measured_days=10) is False, (
         "30-day floor is 10"
+    )
+    assert is_measurement_insufficient(window_days=90, measured_days=1) is True, (
+        "90-day floor is 2: one reading has no earliest distinct from its latest"
+    )
+    assert is_measurement_insufficient(window_days=90, measured_days=2) is False, (
+        "90-day floor is 2"
     )
 
     with pytest.raises(TypeError):
@@ -815,6 +827,51 @@ async def test_earliest_measurement_at_is_all_time_and_tenant_scoped(
     assert mine == _FIRST_WEIGH_IN, (
         "another user's weigh-in leaked into this user's earliest date (ASVS V4)"
     )
+
+
+@pytest.mark.integration
+async def test_earliest_metric_measurement_at_is_column_scoped_and_tenant_scoped(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """RESEARCH Pitfall 4: the per-metric answer must NOT be the per-row answer.
+
+    The older row carries a weight and no waist; the newer one carries both. An implementation
+    that reused `earliest_measurement_at` would return the OLDER date for `waist_cm` -- a
+    metric that did not exist on that row -- and the coverage envelope would then claim more
+    history for the metric than the metric has. The second user is seeded EARLIER still, so a
+    missing `user_id` predicate cannot pass by accident either.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await golden_workout.body_measurement(measured_on=_FIRST_WEIGH_IN, weight_kg=Decimal("66.10"))
+    await golden_workout.body_measurement(
+        measured_on=_LATER_WEIGH_IN, weight_kg=Decimal("65.40"), waist_cm=Decimal("81.00")
+    )
+    await golden_workout.body_measurement(
+        measured_on=_OTHER_TENANT_WEIGH_IN,
+        weight_kg=Decimal("70.00"),
+        waist_cm=Decimal("95.00"),
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+
+    mine = await earliest_metric_measurement_at(
+        session, user_id=DEFAULT_USER_ID, column=BodyMeasurement.waist_cm
+    )
+    theirs = await earliest_metric_measurement_at(
+        session, user_id=ANALYTICS_SECOND_USER_ID, column=BodyMeasurement.waist_cm
+    )
+    never_recorded = await earliest_metric_measurement_at(
+        session, user_id=DEFAULT_USER_ID, column=BodyMeasurement.fat_percent
+    )
+
+    assert theirs == _OTHER_TENANT_WEIGH_IN
+    assert mine == _LATER_WEIGH_IN, (
+        "the weight-only row leaked into waist_cm's earliest date -- this function is column-"
+        "scoped, unlike earliest_measurement_at"
+    )
+    assert await earliest_measurement_at(session, user_id=DEFAULT_USER_ID) == _FIRST_WEIGH_IN, (
+        "BODY-01's function must be unchanged: it still answers per-ROW, not per-metric"
+    )
+    assert never_recorded is None, "a metric with no readings has no earliest date, not a zero"
 
     assert isinstance(mine, dt.date)
     assert not isinstance(mine, dt.datetime), (
