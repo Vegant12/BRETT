@@ -293,14 +293,16 @@ def test_every_tool_module_guards_its_public_tools() -> None:
                 f"credentials and all -- straight to Claude. Found instead: {preceding!r}"
             )
 
-    # The literal 15 is the whole point of this assertion, so it is written as a literal rather
+    # The literal 17 is the whole point of this assertion, so it is written as a literal rather
     # than derived from anything: the loop above proves every tool it FINDS is decorated, which
     # says nothing if the walk found none of them. Raised from 13 to 15 in Plan 12-04, which adds
     # `fitness_get_training_program` (`programs.py`) and `fitness_switch_training_program`
     # (`program_switch.py`) -- neither is registered in `server.py` yet, deliberately: that is
-    # Plan 05's job, alongside the registry/budget/coaching-doc guards it trips.
-    assert len(found) == 15, (
-        f"expected 15 public tool coroutines under app/mcp/tools/, found {len(found)}: "
+    # Plan 05's job, alongside the registry/budget/coaching-doc guards it trips. Raised from 15
+    # to 17 in Plan 13-06, which adds `fitness_get_activity_trend` and
+    # `fitness_get_nutrition_trend` (`health.py`).
+    assert len(found) == 17, (
+        f"expected 17 public tool coroutines under app/mcp/tools/, found {len(found)}: "
         f"{sorted(found)}. If a tool was added, register it in `server.py`, add it to "
         f"`EXPECTED_TOOLS` in test_mcp_tool_schemas.py, and raise this count -- all three, so a "
         f"new tool cannot ship unguarded and unnoticed"
