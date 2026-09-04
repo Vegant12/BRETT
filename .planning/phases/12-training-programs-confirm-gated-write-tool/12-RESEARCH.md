@@ -669,10 +669,10 @@ design (the docstring explicitly allows an agent client to auto-generate a respo
 | A2 | `TrainingProgram` StrEnum belongs in `app/analytics/schemas.py` (precedent: `BodyMeasurementMetric` lives there despite mapping to DB columns) rather than `app/db/models/` | Pattern 3, Recommended Project Structure | Low — a naming/location choice CONTEXT.md explicitly leaves to planning; easy to relocate before implementation, costly only if implemented then moved |
 | A3 | A fresh/fixtureless database (zero synced workouts) at migration time would leave `user_program_history` with zero seed rows, and this is acceptable because production already has real Hevy history | Code Examples note | Medium if wrong for a future dev/test environment that runs migrations before seeding Hevy data — `get_active_period` would need to handle `None` gracefully, which it should anyway, but this hasn't been exercised against an empty-workouts database |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Should the migration's seed `INSERT...SELECT` fail loudly or silently produce zero rows for a
-   user with no synced Hevy history yet?**
+1. **RESOLVED — Should the migration's seed `INSERT...SELECT` fail loudly or silently produce
+   zero rows for a user with no synced Hevy history yet?**
    - What we know: production already has extensive real Hevy history, so this will not surface
      there. Test/dev databases that run migrations before any Hevy sync would seed nothing.
    - What's unclear: whether `test_migrations_round_trip` (mentioned in `0005`'s downgrade
@@ -682,9 +682,12 @@ design (the docstring explicitly allows an agent client to auto-generate a respo
      (e.g., skip the INSERT if no workouts exist, leaving `get_active_period` to return `None`
      until the first Hevy sync happens — which the recomposition path must already tolerate) or
      assert the test seeds at least one workout first.
+   - **Resolution:** `12-01-PLAN.md` Task 2 seeds via `LEFT JOIN` + `COALESCE` fallback to
+     `users.created_at` when no workouts exist, so the seed row is never silently dropped. Verified
+     by `12-01-PLAN.md` Task 3's test docstring, which cites this question directly.
 
-2. **Does the confirm call need to repeat the `program` argument, or can the tool infer it purely
-   from the token?**
+2. **RESOLVED — Does the confirm call need to repeat the `program` argument, or can the tool infer
+   it purely from the token?**
    - What we know: PITFALLS #13's literal recipe says the switch call "takes
      `confirmation_token: str`" and separately says the token must be "bound to the target" with a
      mismatch check on a second call that "asks for" a different program — implying `program` IS
@@ -694,6 +697,8 @@ design (the docstring explicitly allows an agent client to auto-generate a respo
    - Recommendation: keep `program` required on every call (this document's design) — it is the
      simpler schema (one required parameter, always present) and gives the model a natural,
      self-documenting call shape on both turns.
+   - **Resolution:** `12-04-PLAN.md` Task 2 implements exactly this — `program` is required on
+     both the warn and confirm calls, per the recommendation above.
 
 ## Environment Availability
 
