@@ -70,6 +70,15 @@ _PUBLIC_TOOL = re.compile(r"^async def (fitness_\w+)\(", re.MULTILINE)
 # the response models.
 _NOT_TOOL_MODULES = frozenset({"ping.py", "_common.py", "schemas.py"})
 
+# GOAL-04 / PITFALLS #14: the write guard is NARROWED to one named module, never relaxed.
+# `program_switch.py` holds the only tool in the system that commits, and it commits
+# exactly twice -- once for the token it issues, once for the switch it applies. Every
+# other module under `app/mcp/`, INCLUDING the program READ tool in `programs.py`, stays
+# under the full ban. The length assertion below is the actual control: a second write
+# module cannot be admitted by adding a second entry here without failing the suite.
+_WRITE_ALLOWLIST = frozenset({"program_switch.py"})
+
+
 def _mcp_modules() -> list[Path]:
     """Every committed module under `app/mcp/`.
 
@@ -133,18 +142,59 @@ def test_mcp_never_writes() -> None:
     guarantee -- the server refuses the write, whatever the code asks for. This test is the other
     half: that a future tool does not quietly construct its own session from the sessionmaker and
     bypass the helper entirely, which is the one way around the runtime control.
+
+    GOAL-04 (Plan 12-04): the guard is NARROWED, never relaxed, for `_WRITE_ALLOWLIST`'s one
+    named module. Only the `_SESSION_WRITE` assertion is skipped for it -- `_WRITE_IMPORT`
+    keeps applying to EVERY module, allowlisted or not, which is Pitfall A's whole point: no
+    module under `app/mcp/` may construct its own insert/update/delete, including the one
+    module that is allowed to call `session.commit()` on writes built entirely inside
+    `app/db/repositories/programs.py`.
     """
     for path in _mcp_modules():
         source = _module_code(path)
-        assert not _SESSION_WRITE.search(source), (
-            f"MCP-05 violated: {path.relative_to(REPO_ROOT)} mutates the session. Every MCP tool "
-            f"reads through `_common.read_only_session`, whose transaction PostgreSQL itself "
-            f"refuses to let write"
-        )
+        if path.name not in _WRITE_ALLOWLIST:
+            assert not _SESSION_WRITE.search(source), (
+                f"MCP-05 violated: {path.relative_to(REPO_ROOT)} mutates the session. Every MCP "
+                f"tool reads through `_common.read_only_session`, whose transaction PostgreSQL "
+                f"itself refuses to let write"
+            )
         assert not _WRITE_IMPORT.search(source), (
             f"MCP-05 violated: {path.relative_to(REPO_ROOT)} imports a write construct from "
             f"sqlalchemy. A read-only tool layer has no use for insert/update/delete"
         )
+
+    assert len(_WRITE_ALLOWLIST) == 1, (
+        "GOAL-04: exactly ONE module under app/mcp/ may write. A second entry here is a "
+        "second write tool arriving without the token gate, the ToolAnnotations, the budget "
+        "and the coaching-doc entry that the first one shipped with -- which is the review "
+        "this assertion exists to force."
+    )
+
+
+def test_the_write_allowlist_holds_exactly_one_module() -> None:
+    """GOAL-04 / SC#5 / T-12-09: exactly one module under `app/mcp/` may commit.
+
+    This is the assertion that makes "adding a second write module would fail the test
+    suite" literally true. A second write tool either fails `test_mcp_never_writes` (not
+    allowlisted) or fails HERE (allowlisted, making the set two) -- there is no third
+    path, and both roads lead to the review this phase's token gate, annotations, budget
+    and coaching-doc entry all went through.
+    """
+    assert _WRITE_ALLOWLIST == frozenset({"program_switch.py"})
+    assert len(_WRITE_ALLOWLIST) == 1
+
+
+def test_only_one_module_opens_a_writable_session() -> None:
+    """The runtime half of the same claim. `_WRITE_ALLOWLIST` names who may COMMIT; this
+    names who may open a session that CAN. A module calling `writable_session` without a
+    commit today is a module one line away from writing, and `read_only_session` is the
+    control every other tool relies on."""
+    opens_writable = {
+        path.name
+        for path in _mcp_modules()
+        if path.name != "_common.py" and "writable_session(" in _module_code(path)
+    }
+    assert opens_writable == {"program_switch.py"}
 
 
 def test_mcp_uses_no_raw_sql_text() -> None:
@@ -243,11 +293,14 @@ def test_every_tool_module_guards_its_public_tools() -> None:
                 f"credentials and all -- straight to Claude. Found instead: {preceding!r}"
             )
 
-    # The literal 13 is the whole point of this assertion, so it is written as a literal rather
+    # The literal 15 is the whole point of this assertion, so it is written as a literal rather
     # than derived from anything: the loop above proves every tool it FINDS is decorated, which
-    # says nothing if the walk found none of them.
-    assert len(found) == 13, (
-        f"expected 13 public tool coroutines under app/mcp/tools/, found {len(found)}: "
+    # says nothing if the walk found none of them. Raised from 13 to 15 in Plan 12-04, which adds
+    # `fitness_get_training_program` (`programs.py`) and `fitness_switch_training_program`
+    # (`program_switch.py`) -- neither is registered in `server.py` yet, deliberately: that is
+    # Plan 05's job, alongside the registry/budget/coaching-doc guards it trips.
+    assert len(found) == 15, (
+        f"expected 15 public tool coroutines under app/mcp/tools/, found {len(found)}: "
         f"{sorted(found)}. If a tool was added, register it in `server.py`, add it to "
         f"`EXPECTED_TOOLS` in test_mcp_tool_schemas.py, and raise this count -- all three, so a "
         f"new tool cannot ship unguarded and unnoticed"

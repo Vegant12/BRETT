@@ -56,7 +56,7 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 - [x] **GOAL-01**: User's active training program (Lean Bulk, Cut, or Recomp) is stored as data, not a hardcoded constant
 - [ ] **GOAL-02**: Recomposition status thresholds and recommendations adapt to the active program (e.g., healthy weight-trend bands differ between a cut and a bulk)
 - [x] **GOAL-03**: A confirm-gated MCP write tool allows switching the active program by name — a first call without a valid confirmation token returns a warning plus a one-time token; only a second call echoing that exact token performs the switch (a bare `confirm: bool` is rejected as insufficient, since the model could set it `true` on the first call)
-- [ ] **GOAL-04**: All MCP tools other than the program-switch tool remain read-only; the existing read-only guard test suite is extended to allow exactly this one exception, not relaxed generally
+- [x] **GOAL-04**: All MCP tools other than the program-switch tool remain read-only; the existing read-only guard test suite is extended to allow exactly this one exception, not relaxed generally
 
 ### Coaching Response Style
 
@@ -122,7 +122,7 @@ Which phases cover which requirements. Populated during roadmap creation.
 | GOAL-01 | Phase 12 | Complete |
 | GOAL-02 | Phase 12 | Pending |
 | GOAL-03 | Phase 12 | Complete |
-| GOAL-04 | Phase 12 | Pending |
+| GOAL-04 | Phase 12 | Complete |
 | COACH-02 | Phase 13 | Pending |
 | COACH-03 | Phase 13 | Pending |
 

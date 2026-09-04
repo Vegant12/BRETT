@@ -23,7 +23,7 @@ import pytest
 from pydantic import BaseModel
 
 from app.mcp.tools import schemas
-from app.mcp.tools.schemas import MuscleGroupRollup, _McpModel
+from app.mcp.tools.schemas import MuscleGroupRollup, ProgramSwitchStatus, _McpModel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS_SOURCE = REPO_ROOT / "backend" / "app" / "mcp" / "tools" / "schemas.py"
@@ -40,10 +40,18 @@ SCHEMAS_SOURCE = REPO_ROOT / "backend" / "app" / "mcp" / "tools" / "schemas.py"
 # test that needs `pytest.approx`.
 _FLOAT_USE = re.compile(r"(?<![\w.])float\s*\(|:\s*float\b|->\s*float\b|\[\s*float\s*[],]")
 
-# The two fields whose degraded value is NOT the type's zero. `plateaued_only` echoes the tool's
+# The fields whose degraded value is NOT the type's zero. `plateaued_only` echoes the tool's
 # default filter back, and the default is True -- a degraded payload claiming the caller asked for
-# every exercise would misreport the request it is degrading.
-_DEGRADED_OVERRIDES: dict[str, object] = {"plateaued_only": True}
+# every exercise would misreport the request it is degrading. `switch_status` cannot be degraded
+# by `_degraded_kwargs`'s generic rules at all -- it is a bare enum annotation, not `X | None`,
+# `list`, `bool`, `int` or `str`, so the builder's final branch would raise on it -- and
+# `ProgramSwitchStatus.UNKNOWN` is the only correct degraded value for a write outcome anyway:
+# `NOT_APPLIED` would be a claim the server cannot make from inside an exception handler
+# (PITFALLS #15).
+_DEGRADED_OVERRIDES: dict[str, object] = {
+    "plateaued_only": True,
+    "switch_status": ProgramSwitchStatus.UNKNOWN,
+}
 
 
 def _response_models() -> list[type[_McpModel]]:

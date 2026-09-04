@@ -30,6 +30,7 @@ weekly totals compare unequal.
 
 import datetime as dt
 from decimal import Decimal
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
@@ -50,6 +51,7 @@ from app.analytics.schemas import (
     ProgressionSignal,
     RecompositionResult,
     RecompositionStatus,
+    TrainingProgram,
     TrendVerdict,
     WeeklyVolumeResult,
 )
@@ -203,6 +205,71 @@ class RecompositionResponse(_McpModel):
 
     data_available: bool
     recomposition: RecompositionResult | None
+
+
+class ProgramSwitchStatus(StrEnum):
+    """GOAL-03's three-state outcome (PITFALLS #15).
+
+    `NOT_APPLIED` and `UNKNOWN` are NOT the same claim and must never be collapsed.
+    `NOT_APPLIED` means the server knows nothing changed -- no token, wrong token, expired
+    token, or the period moved. `UNKNOWN` means an exception reached `safe_tool` and the
+    server cannot say whether the commit landed. A model told `not_applied` may safely
+    retry; a model told `unknown` must READ the current program back first, because a retry
+    after a successful-but-unreported commit is a second switch.
+    """
+
+    APPLIED = "applied"
+    NOT_APPLIED = "not_applied"
+    UNKNOWN = "unknown"
+
+
+class ProgramSwitchResponse(_McpModel):
+    """GOAL-03's two-call confirmation, in one non-union shape for both calls.
+
+    `confirmation_token` and `expires_at` are populated ONLY on the warn branch -- the first
+    call, which writes no program change and returns the one-time value the second call must
+    echo. `previous_program`, `previous_period_started_on` and `switched_on` are populated
+    ONLY when `switch_status` is `APPLIED`.
+
+    The field is `confirmation_token`, never a plain boolean flag. A boolean is a naming
+    convention rather than a gate: nothing stops a model setting it `true` on the first call,
+    which is the entire failure PITFALLS #13 documents. The value here is minted by the
+    server, stored, bound to this exact target program, single-use and short-lived, so the
+    model cannot manufacture one.
+
+    `data_available=False` on the `UNKNOWN` path means the server could not confirm the
+    outcome -- it does NOT mean the switch failed. `reason` carries the instruction.
+    """
+
+    data_available: bool
+    # `switch_status`, not `status`: `test_mcp_schemas._degraded_kwargs` resolves degraded
+    # values BY FIELD NAME, and `status` is generic enough that a future override for one
+    # model would silently apply to another.
+    switch_status: ProgramSwitchStatus
+    reason: str | None
+    requested_program: TrainingProgram | None
+    active_program: TrainingProgram | None
+    previous_program: TrainingProgram | None
+    previous_period_started_on: dt.date | None
+    switched_on: dt.date | None
+    confirmation_token: str | None
+    expires_at: dt.datetime | None
+
+
+class TrainingProgramResponse(_McpModel):
+    """GOAL-01's read side: which program, since when, and what it replaced.
+
+    `previous_program`/`previous_period_started_on`/`previous_period_ended_on` are populated
+    exactly when a prior period exists -- on a user who has never switched they are all
+    `None`, which is a different fact from "we could not look".
+    """
+
+    data_available: bool
+    program: TrainingProgram | None
+    started_on: dt.date | None
+    previous_program: TrainingProgram | None
+    previous_period_started_on: dt.date | None
+    previous_period_ended_on: dt.date | None
 
 
 class WorkoutSummary(_McpModel):

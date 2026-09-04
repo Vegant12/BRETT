@@ -48,3 +48,16 @@ passed, 1 failed, 11 skipped). Confirmed unrelated to this plan's changes
 is the third occurrence across three consecutive plans; the recommended fix (move
 `_seed_reference_history`'s window to start at `offset=1`, or have the failing test's seed skip
 the day already claimed) is worth prioritizing soon.
+
+## Plan 12-04
+
+Fourth recurrence (parallel Wave 3, independently discovered), during the full-suite
+verification after Task 3 (`uv run pytest backend -q`, wall-clock ~11:18 UTC, i.e. `>= 2 UTC`):
+`test_body_measurement_trend_compares_latest_against_earliest` failed on the same
+`uq_body_measurements_user_source_measured_on` collision. Confirmed unrelated to this plan's
+changes (`backend/app/mcp/tools/programs.py`, `backend/app/mcp/tools/program_switch.py`,
+`backend/app/mcp/tools/_common.py`, `backend/app/mcp/tools/schemas.py`, and the three
+`backend/tests/test_mcp_*.py` files this plan touches -- none reads or writes
+`body_measurements`). Not fixed here for the same reason as above. Fourth occurrence across all
+four Wave 1-3 plans now strongly reinforces the case for the follow-up fix recommended in Plan
+12-01.
