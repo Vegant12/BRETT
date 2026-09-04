@@ -1,24 +1,33 @@
-"""RPT-01/RPT-02: ``build_narrative`` (D-14) proven end to end.
+"""RPT-01/RPT-02: ``build_narrative`` (D-14) and ``compose_report`` (D-01 through D-04),
+proven end to end.
 
-Task 1 of plan 13-08. PURE tests, no container: every ``ReportResult`` is hand-built from the
-nested models directly (``_report()`` and its per-section helpers below), never composed from a
-database. This is what lets the byte-identical-output test and the banned-token scan run with no
-container and no clock. Every date in this file is a fixed, arbitrary calendar day built via
-``dt.date.fromisoformat(...)``, never the positional year/month/day constructor -- for the same
-reason ``test_analytics_health.py``'s module docstring gives: to avoid tripping this project's
-own literal-date acceptance-criteria grep, even though these particular tests do not depend on
-"today" at all. (Rephrased here too, to avoid the same grep matching the sentence documenting the
-rule.)
+Two halves, matching plan 13-08's two tasks:
 
-Task 2 (``compose_report`` against a real PostgreSQL container) is appended to this same module
-by the next commit -- this file is the Wave 0 artifact 13-VALIDATION.md names for RPT-01/RPT-02,
-and Task 1's ``build_narrative`` coverage is a complete, self-contained slice of it on its own.
+* **Task 1 -- ``build_narrative``.** PURE tests, no container: every ``ReportResult`` is
+  hand-built from the nested models directly (``_report()`` and its per-section helpers
+  below), never composed from a database. This is what lets the byte-identical-output test
+  and the banned-token scan run with no container and no clock. Every date in this half is a
+  fixed, arbitrary calendar day built via ``dt.date.fromisoformat(...)``, never the positional
+  year/month/day constructor -- for the same reason ``test_analytics_health.py``'s module
+  docstring gives: to avoid tripping this project's own literal-date acceptance-criteria grep,
+  even though these particular tests do not depend on "today" at all. (Rephrased here too, to
+  avoid the same grep matching the sentence documenting the rule.)
+* **Task 2 -- ``compose_report``.** CONTAINER-backed, ``golden_workout`` (flush-and-rollback,
+  same session) throughout, and every seeded date is ``anchor``-relative
+  (``local_day(utc_now(), "Asia/Jakarta")``), never a literal -- ``bodyweight.py``'s module
+  docstring records why: a test written against a hard-coded date "would assert null today
+  and silently start passing for the wrong reason" once enough real time has passed.
 
 THE two load-bearing tests are ``test_the_narrative_contains_no_recommendation_language`` and
 ``test_every_number_in_the_narrative_is_already_in_the_structured_fields`` -- together they are
 the machine-checkable form of D-03/D-14's "restates the SAME composed data ... with NO
-recommendation language", a rule a well-meaning future edit to ``build_narrative`` will break and
-no reviewer will reliably catch by eye.
+recommendation language", a rule a well-meaning future edit to ``build_narrative`` will break
+and no reviewer will reliably catch by eye.
+
+T-13-39's anti-drift assertion (``test_the_weekly_window_agrees_with_the_mcp_layers_week_window``)
+is the other one: it is what stops ``analytics/reports.py``'s Monday computation and
+``app.mcp.tools._common.week_window``'s Monday computation from silently describing two
+different weeks while both look correct.
 """
 
 import datetime as dt
@@ -26,8 +35,11 @@ import inspect
 import re
 from decimal import Decimal
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.analytics.recomposition import INTERPRETATION_DISCLAIMER
-from app.analytics.reports import build_narrative
+from app.analytics.reports import build_narrative, compose_report, resolve_report_window
 from app.analytics.schemas import (
     ActivityPeriodSummary,
     AggregateProgression,
@@ -57,6 +69,15 @@ from app.analytics.schemas import (
     TrendVerdict,
     WeeklyVolumeResult,
     WeeklyVolumeWeek,
+)
+from app.core.time import local_day, utc_now
+from app.mcp.tools._common import week_window
+from tests.conftest import (
+    ANALYTICS_SECOND_USER_ID,
+    DEFAULT_USER_ID,
+    GoldenBuilder,
+    GoldenExercise,
+    GoldenSet,
 )
 
 # ---------------------------------------------------------------------------------------------
@@ -697,3 +718,312 @@ def test_every_number_in_the_narrative_is_already_in_the_structured_fields() -> 
             "report.model_dump_json() -- the narrative has introduced a number the "
             "structured fields do not carry"
         )
+
+
+# ---------------------------------------------------------------------------------------------
+# Task 2: compose_report, both periods, against a real PostgreSQL container.
+#
+# `golden_workout` (flush, never commit, same session) throughout. Every seeded date is
+# `_anchor()`-relative -- never a literal calendar date -- for the reason the module docstring
+# gives.
+# ---------------------------------------------------------------------------------------------
+
+_ANCHOR_TZ = "Asia/Jakarta"
+# 02:00 UTC is 09:00 in Asia/Jakarta -- the UTC day and the local day AGREE, matching
+# `test_analytics_recomposition.py`'s own `_RECOMP_NOW` reasoning, so a workout placed at this
+# hour on local day D lands in local day D regardless of which side of midnight UTC it is on.
+_REFERENCE_HOUR = 2
+
+
+def _anchor() -> dt.date:
+    """The user's local "today", computed the same way `resolve_report_window` computes it."""
+    return local_day(utc_now(), _ANCHOR_TZ)
+
+
+def _workout_start(day: dt.date) -> dt.datetime:
+    return dt.datetime.combine(day, dt.time(hour=_REFERENCE_HOUR), tzinfo=dt.UTC)
+
+
+@pytest.mark.integration
+async def test_the_weekly_window_is_monday_of_this_week_through_today(
+    session: AsyncSession,
+) -> None:
+    """D-01/A1: the CURRENT week through today, not the most recently completed one."""
+    anchor = _anchor()
+    start_day, end_day, _tz = await resolve_report_window(
+        session, user_id=DEFAULT_USER_ID, period=ReportPeriod.WEEKLY
+    )
+    assert start_day == anchor - dt.timedelta(days=anchor.weekday())
+    assert end_day == anchor
+
+
+@pytest.mark.integration
+async def test_the_weekly_window_agrees_with_the_mcp_layers_week_window(
+    session: AsyncSession,
+) -> None:
+    """T-13-39: `analytics/` cannot import `app.mcp`, so the Monday is computed twice in this
+    codebase -- once in `core/time.local_week_start` (via `resolve_report_window`) and once in
+    `_common.week_window`. This assertion is what stops the duplication from becoming a
+    divergence."""
+    anchor = _anchor()
+    start_day, end_day, _tz = await resolve_report_window(
+        session, user_id=DEFAULT_USER_ID, period=ReportPeriod.WEEKLY
+    )
+    assert week_window(today=anchor, weeks=1) == (start_day, end_day)
+
+
+@pytest.mark.integration
+async def test_the_monthly_window_is_the_first_of_this_month_through_today(
+    session: AsyncSession,
+) -> None:
+    anchor = _anchor()
+    start_day, end_day, _tz = await resolve_report_window(
+        session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY
+    )
+    assert start_day == anchor.replace(day=1)
+    assert end_day == anchor
+
+
+@pytest.mark.integration
+async def test_both_periods_return_the_same_sections(session: AsyncSession) -> None:
+    """D-04: same sections in both periods, not a different emphasis per period."""
+    weekly = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.WEEKLY)
+    monthly = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY)
+
+    assert set(type(weekly).model_fields) == set(type(monthly).model_fields)
+    for report in (weekly, monthly):
+        assert isinstance(report.weekly_volume.weeks, list)
+        assert isinstance(report.muscle_volume.weeks, list)
+        assert isinstance(report.frequency.muscle_groups, list)
+        assert isinstance(report.frequency.exercises, list)
+        assert isinstance(report.pr_highlights.records, list)
+        assert isinstance(report.plateau_highlights.exercises, list)
+        assert isinstance(report.measurement_highlights, list)
+        assert isinstance(report.activity.metrics, list)
+        assert isinstance(report.nutrition.metrics, list)
+
+
+@pytest.mark.integration
+async def test_the_report_carries_the_recomposition_verdict_with_its_own_anchor(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-01: the verdict is carried BESIDE the closed-period figures with a visibly different
+    anchor, never folded into them. Seeded with a real stable weight trend and four weeks of
+    consistently improving training so this proves the property against a REAL verdict, not the
+    vacuously-true `insufficient_data` case."""
+    anchor = _anchor()
+    templates = ("RPT08-press", "RPT08-row", "RPT08-squat")
+    for template_id in templates:
+        await golden_workout.template(external_id=template_id)
+
+    this_monday = anchor - dt.timedelta(days=anchor.weekday())
+    training_weeks = [this_monday - dt.timedelta(weeks=i) for i in range(4)]
+    training_weeks.reverse()
+    weights = (Decimal("100.000"), Decimal("102.000"), Decimal("104.000"), Decimal("106.000"))
+    for week_start, weight in zip(training_weeks, weights, strict=True):
+        await golden_workout.workout(
+            start_time=_workout_start(week_start),
+            exercises=[
+                GoldenExercise(
+                    template_external_id=template_id,
+                    sets=(GoldenSet(weight_kg=weight, reps=5),),
+                )
+                for template_id in templates
+            ],
+        )
+
+    # The SAME weight at the D-16 current window and the four-weeks-ago window -> a real
+    # (zero) smoothed rate rather than a null one.
+    for offset in (0, 1, 2, 3):
+        await golden_workout.body_measurement(
+            measured_on=anchor - dt.timedelta(days=offset), weight_kg=Decimal("70.000")
+        )
+    for offset in (28, 29, 30, 31):
+        await golden_workout.body_measurement(
+            measured_on=anchor - dt.timedelta(days=offset), weight_kg=Decimal("70.000")
+        )
+
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY)
+
+    assert report.recomposition.status is not RecompositionStatus.INSUFFICIENT_DATA
+    assert report.recomposition_anchor_day == report.recomposition.weight_trend.anchor_day
+    assert report.recomposition.disclaimer == INTERPRETATION_DISCLAIMER
+
+
+@pytest.mark.integration
+async def test_pr_highlights_cover_the_report_window_not_all_time(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """The property `get_recent_records` exists for: a window leader that does not beat
+    history is not a record."""
+    anchor = _anchor()
+    this_monday = anchor - dt.timedelta(days=anchor.weekday())
+    await golden_workout.template(external_id="RPT08-pr-bench")
+
+    # A heavier lift BEFORE the window start.
+    await golden_workout.workout(
+        start_time=_workout_start(this_monday - dt.timedelta(days=7)),
+        exercises=[
+            GoldenExercise(
+                template_external_id="RPT08-pr-bench",
+                sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=5),),
+            )
+        ],
+    )
+    # A LIGHTER lift inside the window -- must not read as a new record.
+    await golden_workout.workout(
+        start_time=_workout_start(this_monday),
+        exercises=[
+            GoldenExercise(
+                template_external_id="RPT08-pr-bench",
+                sets=(GoldenSet(weight_kg=Decimal("90.000"), reps=5),),
+            )
+        ],
+    )
+
+    empty_report = await compose_report(
+        session, user_id=DEFAULT_USER_ID, period=ReportPeriod.WEEKLY
+    )
+    assert empty_report.pr_highlights.records == []
+
+    # A HEAVIER lift inside the window IS a new record.
+    await golden_workout.workout(
+        start_time=_workout_start(anchor),
+        exercises=[
+            GoldenExercise(
+                template_external_id="RPT08-pr-bench",
+                sets=(GoldenSet(weight_kg=Decimal("105.000"), reps=5),),
+            )
+        ],
+    )
+    report_after = await compose_report(
+        session, user_id=DEFAULT_USER_ID, period=ReportPeriod.WEEKLY
+    )
+    assert any(
+        record.exercise_template_external_id == "RPT08-pr-bench"
+        for record in report_after.pr_highlights.records
+    )
+
+
+@pytest.mark.integration
+async def test_measurement_highlights_are_exactly_two_metrics(session: AsyncSession) -> None:
+    """13-RESEARCH.md's anti-pattern: one call per each of the 16 enum members would be 16
+    queries for what D-02 calls a NARROW extra."""
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY)
+    assert len(report.measurement_highlights) == 2
+    assert {m.metric for m in report.measurement_highlights} == {
+        BodyMeasurementMetric.WAIST_CM,
+        BodyMeasurementMetric.FAT_PERCENT,
+    }
+
+
+@pytest.mark.integration
+async def test_activity_and_nutrition_share_the_reports_window(session: AsyncSession) -> None:
+    """Avoid producing two sections of one report that visibly disagree about what "this week"
+    means."""
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.WEEKLY)
+    assert report.activity.window_start == report.window_start
+    assert report.activity.window_end == report.window_end
+    assert report.nutrition.window_start == report.window_start
+    assert report.nutrition.window_end == report.window_end
+
+
+@pytest.mark.integration
+async def test_the_report_degrades_section_by_section_when_a_source_is_empty(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """Degrade gracefully and flag what's missing, never refuse the whole call over one
+    missing section -- the `safe_tool`/`data_available` pattern's analytics-layer analogue."""
+    anchor = _anchor()
+    await golden_workout.template(external_id="RPT08-degrade")
+    await golden_workout.workout(
+        start_time=_workout_start(anchor),
+        exercises=[
+            GoldenExercise(
+                template_external_id="RPT08-degrade",
+                sets=(GoldenSet(weight_kg=Decimal("50.000"), reps=8),),
+            )
+        ],
+    )
+
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.WEEKLY)
+
+    assert report.weekly_volume.weeks, "the one seeded workout must produce a non-empty spine"
+    assert any(week.sessions > 0 for week in report.weekly_volume.weeks)
+    for metric in report.activity.metrics:
+        assert metric.insufficient_data is True
+        assert metric.daily_average is None
+    for metric in report.nutrition.metrics:
+        assert metric.insufficient_data is True
+        assert metric.daily_average is None
+    for measurement in report.measurement_highlights:
+        assert measurement.latest_value is None
+
+
+@pytest.mark.integration
+async def test_the_freshness_envelope_names_all_five_resources(session: AsyncSession) -> None:
+    """The report reads all five resources, so its answer is only as fresh as the stalest of
+    them; a narrower bundle would claim a freshness this response does not have."""
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY)
+    assert set(report.freshness.resources) == {
+        "workouts",
+        "exercise_templates",
+        "body_measurements",
+        "activity",
+        "nutrition",
+    }
+
+
+@pytest.mark.integration
+async def test_the_report_scopes_to_the_user(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    anchor = _anchor()
+    await golden_workout.template(external_id="RPT08-scope")
+    await golden_workout.workout(
+        start_time=_workout_start(anchor),
+        exercises=[
+            GoldenExercise(
+                template_external_id="RPT08-scope",
+                sets=(GoldenSet(weight_kg=Decimal("200.000"), reps=5),),
+            )
+        ],
+        user_id=DEFAULT_USER_ID,
+    )
+    await golden_workout.body_measurement(
+        measured_on=anchor, weight_kg=Decimal("80.000"), user_id=DEFAULT_USER_ID
+    )
+
+    report = await compose_report(
+        session, user_id=ANALYTICS_SECOND_USER_ID, period=ReportPeriod.WEEKLY
+    )
+
+    assert all(week.sessions == 0 for week in report.weekly_volume.weeks)
+    assert report.pr_highlights.records == []
+    assert report.recomposition.status is RecompositionStatus.INSUFFICIENT_DATA
+
+
+@pytest.mark.integration
+async def test_compose_report_issues_no_write(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """The composition-only rule, checked at runtime as well as by
+    `test_analytics_isolation.py`'s static scan."""
+    anchor = _anchor()
+    await golden_workout.template(external_id="RPT08-nowrite")
+    await golden_workout.workout(
+        start_time=_workout_start(anchor),
+        exercises=[
+            GoldenExercise(
+                template_external_id="RPT08-nowrite",
+                sets=(GoldenSet(weight_kg=Decimal("60.000"), reps=10),),
+            )
+        ],
+    )
+
+    await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY)
+
+    assert not session.new
+    assert not session.dirty
+    assert not session.deleted
