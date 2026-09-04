@@ -4,14 +4,14 @@ milestone: v2.0
 milestone_name: Apple Health, Strength Tracking & Coaching Programs
 status: executing
 stopped_at: Phase 11 context gathered
-last_updated: "2026-09-03T16:03:17.398Z"
-last_activity: 2026-09-03 -- Phase 10 execution started
+last_updated: "2026-09-04T00:56:31.883Z"
+last_activity: 2026-09-04 -- Phase 11 execution started
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 16
+  total_plans: 19
   completed_plans: 16
-  percent: 100
+  percent: 84
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-02)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 10 — max-weight-strength-signal
+**Current focus:** Phase 11 — body-measurement-history
 
 ## Current Position
 
-Phase: 10 (max-weight-strength-signal) — EXECUTING
-Plan: 1 of 1
-Status: Executing Phase 10
-Last activity: 2026-09-03 -- Phase 10 execution started
+Phase: 11 (body-measurement-history) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 11
+Last activity: 2026-09-04 -- Phase 11 execution started
 
 Progress: [██████████] 100% (v2.0) — 8 of 8 plans complete
 
