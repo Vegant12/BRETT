@@ -116,7 +116,7 @@ async def test_ping_is_registered(mcp_server: ModuleType) -> None:
 
     This asserted ``== ["fitness_ping"]`` until plan 06-09 registered the twelve
     Phase 6 tools beside it. The exact-registry claim did not disappear -- it
-    MOVED, to ``test_mcp_tool_schemas.test_tool_registry_is_exactly_the_fourteen``,
+    MOVED, to ``test_mcp_tool_schemas.test_tool_registry_is_exactly_the_sixteen``,
     which owns the whole tool surface. What belongs in this file is only the part
     that is about mounting: the ping tool the mount was proven against is still
     there.
@@ -140,7 +140,7 @@ async def test_ping_tool_hides_ctx_from_the_model(mcp_server: ModuleType) -> Non
     (``by_alias``) form because that is the payload the model actually receives.
 
     Looked up BY NAME rather than by ``tools[0]``: positional indexing was
-    correct only while one tool existed, and with fourteen registered it would
+    correct only while one tool existed, and with sixteen registered it would
     silently start asserting against whichever tool the registry happens to
     order first.
     """

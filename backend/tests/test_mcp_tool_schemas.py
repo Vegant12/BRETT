@@ -1,6 +1,6 @@
 """What Claude actually sees: the registry, the annotations, the schemas, the caps.
 
-This file asserts the TOOL SURFACE -- the fourteen names, their read-only annotations, their
+This file asserts the TOOL SURFACE -- the sixteen names, their read-only annotations, their
 published input and output schemas, and the `maximum` on every window argument. It does not
 assert what any tool returns; `test_mcp_tools.py` owns that, and `test_mcp_readonly.py` owns the
 runtime read-only enforcement that the annotations here only *claim*.
@@ -50,6 +50,8 @@ EXPECTED_TOOLS = frozenset(
         "fitness_get_body_measurement_trend",
         "fitness_get_body_weight_trend",
         "fitness_get_recomposition_status",
+        "fitness_get_training_program",
+        "fitness_switch_training_program",
     }
 )
 
@@ -101,7 +103,7 @@ def _mcp_state() -> Iterator[None]:
 # the payload Claude actually parses.
 
 
-async def test_tool_registry_is_exactly_the_fourteen(_mcp_state: None) -> None:
+async def test_tool_registry_is_exactly_the_sixteen(_mcp_state: None) -> None:
     """MCP-02: the whole tool surface, named.
 
     An exact set rather than a count. A count of 13 stays green through a rename, and a renamed
@@ -123,17 +125,90 @@ async def test_tool_registry_is_exactly_the_fourteen(_mcp_state: None) -> None:
     )
 
 
-async def test_every_tool_is_annotated_read_only(_mcp_state: None) -> None:
-    """MCP-05 / T-06-03: no tool advertises itself as destructive or open-world.
+# The one deliberate exception, named. Everything not in here must be read-only, and
+# this set is asserted to hold exactly one entry -- PITFALLS #14's requirement that the
+# guard be NARROWED rather than relaxed.
+WRITE_TOOLS = frozenset({"fitness_switch_training_program"})
 
-    The spec DEFAULTS for `destructiveHint` and `openWorldHint` are `true`, so a tool registered
-    without annotations advertises the opposite of what this project guarantees. `server.py`
-    applies one shared `READ_ONLY` object in a loop, which makes this true today; this test is
-    what keeps it true after someone adds a fourteenth tool with a hand-written `add_tool` call.
+# The four flags every tool's published `annotations` carries, excluding `title` (which is
+# unrelated to the read-only/write claim and is `None` for every tool in this registry).
+_WRITE_ANNOTATION_KEYS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
 
-    These are HINTS. The SDK's docs say annotations "should not be relied upon for security
-    enforcement" -- `test_mcp_readonly.py` drives an actual write through a tool session, and that
-    is the enforcement. This test only asserts that the claim is being made.
+
+async def test_annotations_are_an_exact_partition(_mcp_state: None) -> None:
+    """MCP-05 / GOAL-04 / T-12-08: fifteen read-only tools and exactly one write tool.
+
+    Written as a PARTITION rather than as "every tool except the known exception".
+    Skipping an exception makes the assertion silently weaker with each new exception;
+    partitioning it makes a second write tool fail here, which is where the review
+    belongs. The spec DEFAULTS for `destructiveHint` and `openWorldHint` are `true`, so
+    a tool registered without annotations advertises the opposite of what this project
+    guarantees -- that is what `annotations is not None` below is really checking.
+
+    These are HINTS. `test_mcp_readonly.py` drives an actual write through a tool
+    session, and that is the enforcement; the token gate in `program_switch.py` is what
+    constrains the write tool. This test only asserts the claims are being made
+    correctly.
+    """
+    assert len(WRITE_TOOLS) == 1, (
+        "GOAL-04: exactly one write tool exists. A second entry here is a second tool "
+        "that must earn its own token gate, annotations, budget and doc entry."
+    )
+
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    async with Client(mcp) as mcp_client:
+        tools = (await mcp_client.list_tools()).tools
+
+    by_dump = {tool.name: tool.model_dump(by_alias=True)["annotations"] for tool in tools}
+    for name, tool in {tool.name: tool for tool in tools}.items():
+        assert tool.annotations is not None, (
+            f"MCP-05 violated: {name} carries no annotations at all, so it advertises the "
+            "SPEC DEFAULTS -- destructive and open-world. Register it with "
+            "`annotations=READ_ONLY` (or `WRITE_TOOL` if it genuinely writes)."
+        )
+
+    read_only_true = {name for name, ann in by_dump.items() if ann["readOnlyHint"] is True}
+    read_only_false = {name for name, ann in by_dump.items() if ann["readOnlyHint"] is False}
+
+    assert read_only_true == EXPECTED_TOOLS - WRITE_TOOLS, (
+        "MCP-05 violated: the read-only-hint=True set does not match EXPECTED_TOOLS minus "
+        f"WRITE_TOOLS. Got: {sorted(read_only_true)}"
+    )
+    assert read_only_false == WRITE_TOOLS, (
+        "MCP-05 violated: the read-only-hint=False set is not exactly WRITE_TOOLS. "
+        f"Got: {sorted(read_only_false)}"
+    )
+    for name in read_only_true:
+        assert by_dump[name]["destructiveHint"] is False, (
+            f"MCP-05 violated: read-only tool {name} advertises destructiveHint. The spec "
+            f"default is true, so this is what an omitted flag looks like. "
+            f"Got: {by_dump[name]}"
+        )
+    for name in read_only_false:
+        assert by_dump[name]["destructiveHint"] is True, (
+            f"T-12-07 violated: write tool {name} does not advertise destructiveHint=True. "
+            f"Got: {by_dump[name]}"
+        )
+        assert by_dump[name]["idempotentHint"] is False, (
+            f"T-12-07 violated: write tool {name} does not advertise idempotentHint=False. "
+            f"Got: {by_dump[name]}"
+        )
+    for name, annotations in by_dump.items():
+        assert annotations["openWorldHint"] is False, (
+            f"MCP-05 violated: {name} advertises openWorldHint. Every tool here reads this "
+            f"project's own database and nothing else. Got: {annotations}"
+        )
+
+
+async def test_the_write_tool_publishes_explicit_write_annotations(_mcp_state: None) -> None:
+    """T-12-07: the write tool was registered OUTSIDE the shared `_TOOLS` loop.
+
+    If it had been added to `_TOOLS` it would carry `READ_ONLY` and advertise
+    `readOnlyHint=True` for a tool that commits -- the single most misleading thing this
+    server could publish, and invisible from every other test in this file.
     """
     from mcp import Client
 
@@ -142,24 +217,19 @@ async def test_every_tool_is_annotated_read_only(_mcp_state: None) -> None:
     async with Client(mcp) as mcp_client:
         tools = (await mcp_client.list_tools()).tools
 
-    for tool in tools:
-        assert tool.annotations is not None, (
-            f"MCP-05 violated: {tool.name} carries no annotations at all, so it advertises the "
-            "SPEC DEFAULTS -- destructive and open-world. Register it with "
-            "`annotations=READ_ONLY`."
-        )
-        annotations = tool.model_dump(by_alias=True)["annotations"]
-        assert annotations["readOnlyHint"] is True, (
-            f"MCP-05 violated: {tool.name} does not advertise readOnlyHint. Got: {annotations}"
-        )
-        assert annotations["destructiveHint"] is False, (
-            f"MCP-05 violated: {tool.name} advertises destructiveHint. The spec default is true, "
-            f"so this is what an omitted flag looks like. Got: {annotations}"
-        )
-        assert annotations["openWorldHint"] is False, (
-            f"MCP-05 violated: {tool.name} advertises openWorldHint. Every tool here reads this "
-            f"project's own database and nothing else. Got: {annotations}"
-        )
+    write_tool = next(tool for tool in tools if tool.name == "fitness_switch_training_program")
+    annotations = write_tool.model_dump(by_alias=True)["annotations"]
+    four_flags = {key: annotations[key] for key in _WRITE_ANNOTATION_KEYS}
+
+    assert four_flags == {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }, (
+        "T-12-07 violated: fitness_switch_training_program's published annotations are wrong. "
+        f"Got: {annotations}"
+    )
 
 
 async def test_decorated_tools_still_publish_schemas(_mcp_state: None) -> None:
@@ -378,7 +448,7 @@ async def test_a_missing_required_argument_is_rejected_before_the_body_runs(
 async def test_every_tool_has_a_description(_mcp_state: None) -> None:
     """The description is the tool's entire pitch to the model.
 
-    Claude chooses between thirteen tools on their names and descriptions alone. An empty or
+    Claude chooses between sixteen tools on their names and descriptions alone. An empty or
     one-word description is not a cosmetic problem: it is a tool that gets called for the wrong
     question, or never called at all, and the symptom is "Claude ignored my data" rather than
     anything that looks like a bug.
