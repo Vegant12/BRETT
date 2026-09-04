@@ -24,7 +24,7 @@ from app.analytics.body_measurements import (
 )
 from app.analytics.schemas import BodyMeasurementMetric
 from app.db.models.body import BodyMeasurement
-from tests.conftest import DEFAULT_USER_ID, GoldenBuilder
+from tests.conftest import ANALYTICS_SECOND_USER_ID, DEFAULT_USER_ID, GoldenBuilder
 
 # BODY-01 owns weight; BODY-05 covers everything else on the table.
 _WEIGHT_COLUMN = "weight_kg"
@@ -298,3 +298,168 @@ async def test_two_metrics_on_the_same_rows_are_independent(
 
     assert waist_result.coverage.insufficient_data is False
     assert neck_result.coverage.insufficient_data is True
+
+
+@pytest.mark.integration
+@time_machine.travel(_AGREE_INSTANT, tick=False)
+@pytest.mark.parametrize(
+    ("measured_days", "expect_insufficient"),
+    [(0, True), (1, True), (2, False), (3, False)],
+)
+async def test_the_ninety_day_floor_gates_at_two_measured_days(
+    session: AsyncSession,
+    golden_workout: GoldenBuilder,
+    measured_days: int,
+    expect_insufficient: bool,
+) -> None:
+    """D-07: two readings is the floor, and it is the MATHEMATICAL minimum, not a taste call.
+
+    With one reading, "earliest" is "latest" and the delta is a guaranteed zero -- which reads as
+    "your waist has not changed" rather than "you measured it once". The 0-reading case is here
+    because D-07 forbids ever treating zero as sufficient, and it is the answer 13 of the 16
+    in-scope metrics get on real production data today. That is the correct answer, not a design
+    failure.
+    """
+    offsets = list(range(0, measured_days * 10, 10)) if measured_days else []
+    await _seed(
+        golden_workout,
+        column="waist_cm",
+        offsets=[(offset, "85.00") for offset in offsets],
+    )
+
+    result = await get_body_measurement_trend(
+        session, user_id=DEFAULT_USER_ID, metric=BodyMeasurementMetric.WAIST_CM
+    )
+
+    assert result.coverage.insufficient_data is expect_insufficient
+    assert result.coverage.measured_days_in_window == measured_days
+    assert (result.delta_value is None) is expect_insufficient
+    assert (result.earliest_measured_on is None) is expect_insufficient
+
+
+@pytest.mark.integration
+@time_machine.travel(_AGREE_INSTANT, tick=False)
+async def test_one_reading_reports_its_value_but_no_delta_and_fails_the_floor(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """A single reading is a real observation and must not be suppressed; a delta of zero derived
+    from it would be the most misleading number this tool could return.
+    """
+    await _seed(golden_workout, column="waist_cm", offsets=[(5, "81.50")])
+
+    result = await get_body_measurement_trend(
+        session, user_id=DEFAULT_USER_ID, metric=BodyMeasurementMetric.WAIST_CM
+    )
+
+    assert result.latest_value == Decimal("81.50")
+    assert result.latest_measured_on == _ANCHOR - dt.timedelta(days=5)
+    assert result.earliest_value is None
+    assert result.earliest_measured_on is None
+    assert result.delta_value is None
+    assert result.coverage.insufficient_data is True
+    assert result.days_since_latest_reading == 5
+    assert result.is_stale is False
+
+
+@pytest.mark.integration
+@time_machine.travel(_AGREE_INSTANT, tick=False)
+@pytest.mark.parametrize(
+    ("offsets", "expect_insufficient", "expect_stale", "expect_days_since"),
+    [
+        # 2+ readings, newest 60 days old: comparable AND stale. The quadrant a single collapsed
+        # flag cannot express, and what real abandoned tracking looks like.
+        ((85, 60), False, True, 60),
+        # 2+ readings, newest today: comparable and fresh.
+        ((85, 0), False, False, 0),
+        # 1 reading, 60 days old: NOT comparable, and stale. Two independent reasons to doubt it,
+        # and the response must give both rather than collapsing them into one.
+        ((60,), True, True, 60),
+        # 1 reading, today: not comparable, but fresh. `is_stale=True` here would be a lie.
+        ((0,), True, False, 0),
+        # No readings: not comparable, and NOT stale -- there is no "latest" to be old.
+        # `is_stale=True` would make "never measured" indistinguishable from "abandoned".
+        ((), True, False, None),
+    ],
+)
+async def test_staleness_and_insufficient_data_are_independent(
+    session: AsyncSession,
+    golden_workout: GoldenBuilder,
+    offsets: tuple[int, ...],
+    expect_insufficient: bool,
+    expect_stale: bool,
+    expect_days_since: int | None,
+) -> None:
+    """THIS FILE'S LOAD-BEARING TEST: the four (insufficient, stale) quadrants, pinned exactly.
+
+    Mirrors ``test_analytics_bodyweight.py::test_windows_gate_independently`` in role: the
+    specific wrong behaviour it catches is a single collapsed flag that cannot express "we cannot
+    compare AND it's old" as distinct from "we cannot compare, but it's fresh".
+    """
+    await _seed(
+        golden_workout, column="waist_cm", offsets=[(offset, "85.00") for offset in offsets]
+    )
+
+    result = await get_body_measurement_trend(
+        session, user_id=DEFAULT_USER_ID, metric=BodyMeasurementMetric.WAIST_CM
+    )
+
+    assert result.coverage.insufficient_data is expect_insufficient
+    assert result.is_stale is expect_stale
+    assert result.days_since_latest_reading == expect_days_since
+    assert result.stale_after_days == 30
+
+
+@pytest.mark.integration
+@time_machine.travel(_AGREE_INSTANT, tick=False)
+@pytest.mark.parametrize(("offset", "expect_stale"), [(30, False), (31, True)])
+async def test_the_stale_threshold_is_strictly_greater_than_thirty_days(
+    session: AsyncSession,
+    golden_workout: GoldenBuilder,
+    offset: int,
+    expect_stale: bool,
+) -> None:
+    """Exactly 30 days is not yet stale, and the constant is echoed on the response as
+    ``stale_after_days`` precisely so this boundary is checkable by a reader instead of inferable
+    only from source.
+    """
+    await _seed(
+        golden_workout,
+        column="waist_cm",
+        offsets=[(85, "85.00"), (offset, "81.50")],
+    )
+
+    result = await get_body_measurement_trend(
+        session, user_id=DEFAULT_USER_ID, metric=BodyMeasurementMetric.WAIST_CM
+    )
+
+    assert result.is_stale is expect_stale
+    assert result.coverage.insufficient_data is False
+
+
+@pytest.mark.integration
+@time_machine.travel(_AGREE_INSTANT, tick=False)
+async def test_another_tenants_readings_never_enter_the_window(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """ASVS V4 / T-11-02. A second tenant is seeded WITH data, the first with none.
+
+    The second assertion guards against a vacuous pass where the fixture wrote nothing at all.
+    """
+    await golden_workout.user(user_id=ANALYTICS_SECOND_USER_ID)
+    await _seed(
+        golden_workout,
+        column="waist_cm",
+        offsets=[(80, "90.00"), (40, "88.00"), (0, "86.00")],
+        user_id=ANALYTICS_SECOND_USER_ID,
+    )
+
+    default_result = await get_body_measurement_trend(
+        session, user_id=DEFAULT_USER_ID, metric=BodyMeasurementMetric.WAIST_CM
+    )
+    second_result = await get_body_measurement_trend(
+        session, user_id=ANALYTICS_SECOND_USER_ID, metric=BodyMeasurementMetric.WAIST_CM
+    )
+
+    assert default_result.coverage.measured_days_in_window == 0
+    assert default_result.latest_value is None
+    assert second_result.coverage.measured_days_in_window == 3
