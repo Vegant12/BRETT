@@ -21,6 +21,9 @@ no uniqueness constraint at all.
 **The exception guard** (D-10, MCP-06). ``safe_tool`` exists because ``mcp 2.0.0`` returns
 ``str(exception)`` to the model verbatim, and an asyncpg connection error carries the DSN.
 
+**The one writable session** (GOAL-03, PITFALLS #14). ``writable_session`` is
+``read_only_session``'s sibling, not its replacement; exactly one tool module opens it.
+
 Plus the per-tool response caps, in one block, so a budget can be re-tuned in one place.
 """
 
@@ -152,6 +155,29 @@ async def read_only_session(ctx: Context[AppContext]) -> AsyncIterator[AsyncSess
             yield session
         finally:
             await session.rollback()
+
+
+@asynccontextmanager
+async def writable_session(ctx: Context[AppContext]) -> AsyncIterator[AsyncSession]:
+    """The ONE session in `app/mcp/` PostgreSQL will let write (GOAL-03, PITFALLS #14).
+
+    Three deliberate differences from `read_only_session`, each of which is the point:
+
+    * no read-only execution option set on the connection -- the server would otherwise refuse
+      the INSERT and UPDATE the confirm branch exists to perform;
+    * no unconditional `rollback()` in `finally` -- the caller commits explicitly, and every
+      path that does NOT commit relies on the session closing to roll back, which is the
+      correct outcome for a refused token;
+    * the commit is the caller's LAST statement (PITFALLS #15). Nothing may run after it,
+      because an exception after a successful commit is reported by `safe_tool` as `unknown`
+      -- and `unknown` on an applied switch invites a retry that double-applies.
+
+    Used by exactly one module. `test_mcp_isolation._WRITE_ALLOWLIST` asserts that, with
+    exactly one entry, so a second write tool cannot arrive quietly.
+    """
+    sessionmaker = ctx.request_context.lifespan_context.sessionmaker
+    async with sessionmaker() as session:
+        yield session
 
 
 def week_window(*, today: dt.date, weeks: int) -> tuple[dt.date, dt.date]:
