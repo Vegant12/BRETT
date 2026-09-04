@@ -179,7 +179,19 @@ Notes for planning:
   3. One tool call returns a complete weekly report — volume, strength progression, weight and measurement changes, nutrition summary, trends, recommendations — and another does the same for a month, both inside the measured latency and response-size budgets.
   4. A real Claude scheduled task has been run against the report tools, and the outcome — working, or broken with a documented workaround — is written into `docs/coaching-instructions.md` rather than assumed.
   5. Claude's coaching answers are short and cite real figures, and the coaching document describes the v2.0 tool surface without drifting from the live tool registry.
-**Plans**: TBD
+**Plans**: 10 plans in 7 waves
+
+Plans:
+- [ ] 13-01-PLAN.md — the RPT-03 scheduled-task capability spike, run FIRST with `fitness_ping` before anything is built (wave 1)
+- [ ] 13-02-PLAN.md — `GoldenBuilder.health_metric`, Apple Health rows in `worst_case_history`, and the D-06 production nutrition-coverage measurement (wave 1)
+- [ ] 13-03-PLAN.md — `local_month_start`, `FRESHNESS_RESOURCES_REPORT`, and `get_recent_records`: the cross-exercise PR scan in ONE query (wave 1)
+- [ ] 13-04-PLAN.md — `analytics/health.py`: activity + nutrition rolling averages, per-metric independent floors, and the period-summary generalization (wave 2)
+- [ ] 13-05-PLAN.md — container-backed proof of all four `analytics/health.py` entry points (wave 3)
+- [ ] 13-06-PLAN.md — `fitness_get_activity_trend` and `fitness_get_nutrition_trend`, registration, five guards, measured budgets (wave 3)
+- [ ] 13-07-PLAN.md — `analytics/reports.py`: `ReportResult` and the one composer, two windows (wave 4)
+- [ ] 13-08-PLAN.md — D-14's deterministic markdown narrative, plus the composer's full test suite (wave 5)
+- [ ] 13-09-PLAN.md — `fitness_get_weekly_report` / `fitness_get_monthly_report`, `MAX_REPORT_*`, registration and measured budgets (wave 6)
+- [ ] 13-10-PLAN.md — the from-scratch coaching-doc rewrite against the 20-tool registry, and the RPT-03 spike against the real report tools (wave 7)
 
 Notes for planning:
 - **Run the scheduled-task spike first, before the report tools are built.** Two GitHub issues (closed "not planned") report scheduled sessions completing the MCP handshake but never injecting tool schemas. A negative result should reshape scope, not sink the phase at its end (PITFALLS #17).
@@ -187,6 +199,10 @@ Notes for planning:
 - Closed-period anchoring: recommend reporting closed-period volume/frequency/PRs while carrying the anchored-on-today recomposition verdict beside them, clearly labelled. Decide explicitly in the phase context.
 - Budget is measured, not estimated: `fitness_get_training_summary` is ~9.5 KB against a 16 KB cap and is already the most expensive call in the system. New `MAX_REPORT_*` caps belong in `_common.py`'s existing budget block.
 - Activity data is recomposition **context**, never a classifier input. Recovery/sleep analytics are cut, not deferred — zero records exist.
+
+Resolved at plan time (2026-09-04), both flagged as open by 13-RESEARCH.md:
+- **Closed period = the CURRENT period through today** — Monday-of-this-week to today, first-of-this-month to today. D-04's literal wording, every other anchored tool ending on today, and a Wednesday request being about the week the user is in. The recomposition verdict is carried beside it with its own `recomposition_anchor_day` field.
+- **"PR highlights" is a real cross-exercise scan**, not an approximation from `get_plateaus`. `get_personal_records` is single-exercise only, but `rollup.qualifying_set_rows(template_external_ids=None)` already returns every non-warm-up set in one query, so `analytics/records.py::get_recent_records` costs one query and keeps all four `PersonalRecordType` semantics. Option 2 would have silently dropped `MAX_REPS` and `SESSION_VOLUME`.
 
 ## Progress
 
@@ -207,7 +223,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
 | 11. Body Measurement History | v2.0 | 3/3 | Complete    | 2026-09-04 |
 | 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 5/5 | Complete   | 2026-09-04 |
-| 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/TBD | Not started | - |
+| 13. Health Analytics, Reports & Coaching Style | v2.0 | 0/10 | Planned | - |
 
 ## Requirement Coverage (v2.0)
 
