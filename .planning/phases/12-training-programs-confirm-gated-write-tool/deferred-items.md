@@ -35,3 +35,15 @@ against_earliest` failed on the same `uq_body_measurements_user_source_measured_
 Confirmed unrelated to this plan's changes (`backend/app/db/repositories/programs.py` and
 `backend/tests/test_db_program_history.py`, neither of which touches `body_measurements`). Not
 fixed here for the same reason as above -- still out of scope.
+
+## Plan 12-04
+
+Third recurrence, during the full-suite verification after Task 3 (`uv run pytest backend -q`,
+wall-clock ~11:18 UTC, i.e. `>= 2 UTC`): `test_body_measurement_trend_compares_latest_against_
+earliest` failed on the same `uq_body_measurements_user_source_measured_on` collision. Confirmed
+unrelated to this plan's changes (`backend/app/mcp/tools/programs.py`,
+`backend/app/mcp/tools/program_switch.py`, `backend/app/mcp/tools/_common.py`,
+`backend/app/mcp/tools/schemas.py`, and the three `backend/tests/test_mcp_*.py` files this plan
+touches -- none reads or writes `body_measurements`). Not fixed here for the same reason as
+above. Third occurrence across three consecutive plans now strengthens the case for the
+follow-up fix recommended in Plan 12-01.

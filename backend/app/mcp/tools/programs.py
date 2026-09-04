@@ -45,16 +45,23 @@ async def fitness_get_training_program(ctx: Context[AppContext]) -> TrainingProg
     user_id = resolve_user_id(ctx)
     async with read_only_session(ctx) as session:
         periods = await get_recent_periods(session, user_id=user_id, limit=2)
-    # `get_recent_periods` is newest-first, so [0] is the open period and [1] -- when it
-    # exists -- is the one it replaced. Slicing rather than indexing so a user with no
-    # history at all returns the honest all-None answer instead of raising.
-    current = periods[0] if periods else None
-    previous = periods[1] if len(periods) > 1 else None
-    return TrainingProgramResponse(
-        data_available=True,
-        program=TrainingProgram(current.program) if current is not None else None,
-        started_on=current.started_on if current is not None else None,
-        previous_program=(TrainingProgram(previous.program) if previous is not None else None),
-        previous_period_started_on=previous.started_on if previous is not None else None,
-        previous_period_ended_on=previous.ended_on if previous is not None else None,
-    )
+        # `get_recent_periods` is newest-first, so [0] is the open period and [1] -- when it
+        # exists -- is the one it replaced. Slicing rather than indexing so a user with no
+        # history at all returns the honest all-None answer instead of raising.
+        #
+        # Built INSIDE the session block, not after it: `read_only_session`'s unconditional
+        # `rollback()` on exit expires every ORM instance the session loaded, so reading an
+        # attribute off `current`/`previous` after the `async with` closes raises
+        # `DetachedInstanceError` rather than returning stale data -- the response is
+        # constructed here, while the attributes are still live.
+        current = periods[0] if periods else None
+        previous = periods[1] if len(periods) > 1 else None
+        response = TrainingProgramResponse(
+            data_available=True,
+            program=TrainingProgram(current.program) if current is not None else None,
+            started_on=current.started_on if current is not None else None,
+            previous_program=(TrainingProgram(previous.program) if previous is not None else None),
+            previous_period_started_on=previous.started_on if previous is not None else None,
+            previous_period_ended_on=previous.ended_on if previous is not None else None,
+        )
+    return response
