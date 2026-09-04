@@ -983,3 +983,73 @@ class RecompositionResult(_AnalyticsModel):
     progression_signal: AggregateProgression
     training_volume: WeeklyVolumeResult
     freshness: FreshnessMetadata
+
+
+class ReportPeriod(StrEnum):
+    """D-04's period selector. Two members and no third.
+
+    ``WEEKLY`` is Monday of the current local week through today; ``MONTHLY`` is the first
+    of the current local calendar month through today. Both are CLOSED-PERIOD anchored --
+    the start is a calendar boundary, not "seven days ago" -- which is the distinction D-01
+    draws. Both end on TODAY, matching D-04's literal "the current week" / "the current
+    calendar month" and every other anchored tool in this codebase.
+    """
+
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
+class ReportResult(_AnalyticsModel):
+    """RPT-01/RPT-02: the composed report, before any presentation cap is applied.
+
+    **Composed, never computed.** Every field below is another analytics function's return
+    value, carried through. ``analytics/reports.py`` owns the WINDOW and the ASSEMBLY and
+    nothing else -- ARCHITECTURE.md's Anti-Pattern #9 ("report tools as a fourth copy of the
+    analytics arithmetic") and D-02/D-03.
+
+    **Two anchors, both named.** ``window_start``/``window_end`` govern
+    ``weekly_volume``, ``muscle_volume``, ``frequency``, ``pr_highlights``, ``activity`` and
+    ``nutrition``. They do NOT govern ``recomposition`` (its own fixed 12-week lookback
+    ending today -- ``get_recomposition_status`` takes no window and D-01 forbids adding
+    one), ``plateau_highlights`` (``plateau_lookback_weeks`` back from today, because "you
+    have not PR'd in 40 days" is only meaningful relative to now), or
+    ``measurement_highlights`` (a fixed 90-day comparison window that is a module constant in
+    ``body_measurements.py``). Each of those three carries its own window in its own fields,
+    which is why they are embedded whole rather than projected: a reader must be able to see
+    that the verdict beside this week's volume is not a verdict about this week.
+
+    **No recommendations field, deliberately (D-03).** This is composed DATA. Claude
+    synthesizes the recommendation from it and ``docs/coaching-instructions.md``'s decision
+    framework. A backend-computed "you should deload" is arithmetic-adjacent judgment in a
+    payload that has no way to express its own uncertainty.
+
+    **Lists are UNCAPPED here.** ``pr_highlights`` and ``plateau_highlights`` are full
+    lists; the MCP layer applies ``MAX_REPORT_*`` with ``_common.truncate()`` and carries
+    ``was_truncated``/``total`` beside them. A silent truncation inside the analytics layer
+    would be a wrong answer, which is the rule ``records.py`` already states about
+    ``reps_at_weight``.
+
+    ``active_program`` context is NOT a field here: it is read off ``recomposition``
+    (``active_program``, ``program_started_on``, ``program_switch_in_window``,
+    ``previous_program``, ``program_switched_on``), which Phase 12 already resolved inside
+    that call. Re-querying ``db/repositories/programs.py`` would be a second answer to a
+    question already answered in this same transaction.
+    """
+
+    period: ReportPeriod
+    window_start: dt.date
+    window_end: dt.date
+    days_in_period: int
+    weekly_volume: WeeklyVolumeResult
+    muscle_volume: MuscleGroupVolumeResult
+    frequency: TrainingFrequencyResult
+    recomposition: RecompositionResult
+    recomposition_anchor_day: dt.date
+    pr_highlights: RecentRecordsResult
+    plateau_highlights: PlateauReport
+    plateau_lookback_weeks: int
+    measurement_highlights: list[BodyMeasurementTrendResult]
+    activity: ActivityPeriodSummary
+    nutrition: NutritionPeriodSummary
+    coverage: CoverageMetadata
+    freshness: FreshnessMetadata
