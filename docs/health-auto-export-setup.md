@@ -749,3 +749,106 @@ No day existed to exercise the §7 `sample_count` divergence (raw sample count f
 always-1 from the webhook) live, since no day is shared. It remains an open, documented, accepted
 divergence — not something this run closed — and will surface the first time a backfilled day and
 a webhook day for the same metric genuinely coincide.
+
+## 11. Nutrition and activity coverage measurement (Phase 13, D-06) — UNMEASURED, follow-up required
+
+**Attempted:** 2026-09-04, plan 13-02, Task 2. This was to be a **READ-ONLY** measurement against
+production — no write, no migration, no DDL was ever going to be issued, and none was.
+
+**What failed.** The one sanctioned way to resolve the production connection string is:
+
+```bash
+gcloud secrets versions access latest --secret="brett-database-url"
+```
+
+This command — and, for completeness, a bare `gcloud auth list` run to confirm the ambient
+credential state — were both **blocked by the execution environment's own command-permission
+classifier**, with the identical message returned for both invocations:
+
+```
+Permission for this action was denied by the Claude Code auto mode classifier.
+Reason: Blocked by classifier.
+```
+
+This is the same class of block `13-RESEARCH.md`'s Pitfall 3 already hit during research
+(`psql`, `asyncpg`, and a bare `gcloud secrets versions access` were all blocked there too, for
+the same reason — network-egress-shaped actions are refused by the sandbox's classifier
+independent of credentials or tool choice). No workaround was attempted: per this plan's own
+Task 2 instructions and the standing STRIDE mitigation for T-13-06, the DSN is resolved exactly
+one sanctioned way or not at all — never by falling back to an ambient shell variable, `.env`,
+or a different retrieval path, all of which `.planning/STATE.md` already documents as the
+specific mistake behind three prior incidents this milestone.
+
+**Consequence: neither query in this task's Action section (the 7-metric nutrition query, nor
+the 5-metric activity query) was ever executed against production.** No numeric counts exist to
+report for `days_last_7` / `days_last_14` / `days_last_30` for any of the seven nutrition
+metrics (`dietary_energy`, `protein`, `carbohydrates`, `total_fat`, `fiber`, `dietary_sugar`,
+`sodium`) or the five activity metrics (`step_count`, `active_energy`, `basal_energy_burned`,
+`walking_running_distance`, `flights_climbed`).
+
+**The decision, per this task's documented fallback branch:** REUSE `MEASURED_DAY_FLOORS`
+(`app/analytics/metadata.py`) unchanged — the existing 3-of-7, 5-of-14, 10-of-30 floors — for
+nutrition, exactly as they already apply to body weight. This is not a guess dressed as a
+decision: `13-RESEARCH.md` Pitfall 3 already argues this keeps ONE set of floor semantics in the
+codebase rather than inventing unjustified new numbers, and an `insufficient_data` answer on a
+shortfall window is the expected, correct response — not a bug — on today's live data, exactly as
+`bodyweight.py`'s own module docstring already states of `get_body_weight_trend`
+("`insufficient_data` is the expected answer on today's live data, and that is correct"). Plan
+13-04 pastes this decision sentence verbatim into `app/analytics/health.py`'s nutrition floor
+constant comment: *nutrition trend analytics reuse `MEASURED_DAY_FLOORS` (3/7, 5/14, 10/30)
+unchanged, per Phase 13's D-06 research gap, which this measurement attempt could not close
+live — treat any resulting `insufficient_data` response as correct, not broken, until a future
+re-measurement replaces this comment.*
+
+**The known-sparse baseline this decision falls back to** (already committed above, §9's
+"2026-09-03 — historical backfill, production run" entry, re-stated here for D-06's benefit):
+across the historical `export.xml` backfill (2022-03-10 .. 2026-08-26, ≈1,644 calendar days),
+nutrition metrics show ≈53-54 distinct logged days each (`dietary_energy` 54, `protein` 54,
+`total_fat` 54, `dietary_sugar` 54, `carbohydrates` 53, `fiber` 53, `sodium` 53) — roughly 3.3% of
+calendar days. The two known live-webhook days (2026-09-02: all 12 registry metrics;
+2026-09-03: 11 of 12, `sodium` absent that day) are encouraging but, at n=2, mathematically
+insufficient to project a stable 7/14/30-day rate from. Per-metric spread is real, not
+hypothetical: `sodium` was the one metric missing on the partial live day, consistent with
+`13-RESEARCH.md`'s Pitfall 2 warning that macros are not perfectly co-logged and must be
+gated independently rather than behind one shared coverage flag.
+
+**Precedent this follows:** BODY-05 (Phase 11) faced the equivalent gap for circumference/
+composition coverage and, rather than inventing new floor numbers against thin real data, chose
+a completely different comparison shape (latest-vs-90-days-ago) precisely because a
+`bodyweight.py`-style rolling-average floor would return `insufficient_data` almost universally
+for sparsely-measured columns. D-05/D-06 already lock nutrition into the *same* rolling-average
+shape as activity (not a BODY-05-style redesign), so the equivalent move here is not a shape
+change — it is accepting `MEASURED_DAY_FLOORS` unchanged and letting `insufficient_data` be the
+honest, precedented answer until a re-measurement closes this gap for real.
+
+**Follow-up required:** re-run the two SQL queries below against the CONFIRMED production
+`DATABASE_URL` (retrieved via `gcloud secrets versions access latest --secret="brett-database-url"`,
+run by a human operator or a future session with different tool permissions — never a
+pre-exported shell variable or `.env`), and replace this section's "UNMEASURED" heading and the
+decision-sentence comment in `app/analytics/health.py` once real counts exist.
+
+```sql
+-- Nutrition
+SELECT
+  metric,
+  count(DISTINCT local_day) FILTER (WHERE local_day >= current_date - interval '6 days')  AS days_last_7,
+  count(DISTINCT local_day) FILTER (WHERE local_day >= current_date - interval '13 days') AS days_last_14,
+  count(DISTINCT local_day) FILTER (WHERE local_day >= current_date - interval '29 days') AS days_last_30
+FROM health_daily_metrics
+WHERE source = 'apple_health'
+  AND metric IN ('dietary_energy','protein','carbohydrates','total_fat','fiber','dietary_sugar','sodium')
+GROUP BY metric
+ORDER BY metric;
+
+-- Activity (HEALTH-12 needs the same evidence; free alongside the query above)
+SELECT
+  metric,
+  count(DISTINCT local_day) FILTER (WHERE local_day >= current_date - interval '6 days')  AS days_last_7,
+  count(DISTINCT local_day) FILTER (WHERE local_day >= current_date - interval '13 days') AS days_last_14,
+  count(DISTINCT local_day) FILTER (WHERE local_day >= current_date - interval '29 days') AS days_last_30
+FROM health_daily_metrics
+WHERE source = 'apple_health'
+  AND metric IN ('step_count','active_energy','basal_energy_burned','walking_running_distance','flights_climbed')
+GROUP BY metric
+ORDER BY metric;
+```
