@@ -90,7 +90,8 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
   adds no recommendations.** Quote from it; never treat it as the answer itself.
 - **`fitness_get_training_summary` vs. the report tools:** the summary answers "am I progressing"
   over a caller-chosen `weeks`; the reports answer "how did this week/month go" over a calendar
-  period and add records, plateaus, measurements, nutrition and program context.
+  period and add records, plateaus, measurements, nutrition and program context. Scheduled tasks
+  reach these report tools (verified 2026-09-05).
 
 ## How to read the metadata envelope
 
