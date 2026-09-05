@@ -31,7 +31,7 @@ Full v1.0 phase detail archived at `.planning/milestones/v1.0-ROADMAP.md`.
 - [x] **Phase 10: Max-Weight Strength Signal** - Last max-weight-lifted surfaced as a labelled secondary display field on progression/plateau responses; estimated-1RM classification unchanged (completed 2026-09-03)
 - [x] **Phase 11: Body Measurement History** - Trend/comparison analytics across circumference and body-composition measurements — not weight-only — over data already synced from Hevy (completed 2026-09-04)
 - [x] **Phase 12: Training Programs & Confirm-Gated Write Tool** - Programs as real data, program-aware thresholds, and BRETT's only MCP write path (completed 2026-09-04)
-- [ ] **Phase 13: Health Analytics, Reports & Coaching Style** - Activity/nutrition trends, weekly and monthly report tools, and a tightened coaching document
+- [x] **Phase 13: Health Analytics, Reports & Coaching Style** - Activity/nutrition trends, weekly and monthly report tools, and a tightened coaching document (completed 2026-09-05)
 
 ## Phase Details
 
@@ -191,7 +191,7 @@ Plans:
 - [x] 13-07-PLAN.md — `analytics/reports.py`: `ReportResult` and the one composer, two windows (wave 4)
 - [x] 13-08-PLAN.md — D-14's deterministic markdown narrative, plus the composer's full test suite (wave 5)
 - [x] 13-09-PLAN.md — `fitness_get_weekly_report` / `fitness_get_monthly_report`, `MAX_REPORT_*`, registration and measured budgets (wave 6)
-- [ ] 13-10-PLAN.md — the from-scratch coaching-doc rewrite against the 20-tool registry, and the RPT-03 spike against the real report tools (wave 7)
+- [x] 13-10-PLAN.md — the from-scratch coaching-doc rewrite against the 20-tool registry, and the RPT-03 spike against the real report tools (wave 7)
 
 Notes for planning:
 - **Run the scheduled-task spike first, before the report tools are built.** Two GitHub issues (closed "not planned") report scheduled sessions completing the MCP handshake but never injecting tool schemas. A negative result should reshape scope, not sink the phase at its end (PITFALLS #17).
@@ -223,7 +223,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
 | 11. Body Measurement History | v2.0 | 3/3 | Complete    | 2026-09-04 |
 | 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 5/5 | Complete   | 2026-09-04 |
-| 13. Health Analytics, Reports & Coaching Style | v2.0 | 9/10 | In Progress|  |
+| 13. Health Analytics, Reports & Coaching Style | v2.0 | 10/10 | Complete   | 2026-09-05 |
 
 ## Requirement Coverage (v2.0)
 
