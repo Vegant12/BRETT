@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
 status: planning
-stopped_at: defining requirements
-last_updated: "2026-09-05T12:30:00.000Z"
+stopped_at: roadmap created, ready to plan phase 14
+last_updated: "2026-09-05T13:00:00.000Z"
 last_activity: 2026-09-05
 progress:
-  total_phases: 0
+  total_phases: 6
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -26,15 +26,18 @@ See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 ## Current Position
 
 Milestone: v2.1 Longitudinal Physique Analysis
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-09-05 — Milestone v2.1 started
+Phase: 14 of 19 total (Deploy Pipeline Migration Safety) — first phase of 6 in this milestone
+Plan: — (not yet planned)
+Status: Roadmap created, ready to plan
+Last activity: 2026-09-05 — ROADMAP.md written, 18/18 v2.1 requirements mapped across 6 phases (14-19)
 
-Progress: [──────────] 0% — roadmap not yet created
+Progress: [──────────] 0% — 0/6 v2.1 phases complete
 
 Two milestones shipped to date: v1.0 (7 phases, 65 plans) and v2.0 (6 phases, 34 plans).
-Phase numbering continues from v2.0's last phase (13), so v2.1 begins at Phase 14.
+Phase numbering continues from v2.0's last phase (13); v2.1 runs Phase 14 through Phase 19:
+14 Deploy Pipeline Migration Safety, 15 Physique Rating Calibration Spike, 16 Physique Data
+Model & Repository, 17 Physique Analytics & MCP Read/Write Tools, 18 Monthly Report Physique
+Integration, 19 Production Deploy of Migration 0007.
 
 ## Performance Metrics
 
@@ -119,10 +122,9 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 ## Session Continuity
 
 Last session: 2026-09-05
-Stopped at: v2.1 milestone opened — goals gathered, PROJECT.md and STATE.md updated; requirements
-and roadmap not yet written
-Resume: continue `/gsd-new-milestone` (research → requirements → roadmap), then
-`/gsd-discuss-phase 14`
+Stopped at: ROADMAP.md written (Phases 14-19), REQUIREMENTS.md traceability filled in
+(18/18 mapped, all "Planned"), STATE.md updated. No plans exist yet for any v2.1 phase.
+Resume: `/gsd-discuss-phase 14`
 
 ### v2.1 milestone-gate decisions (made before research, carry into requirements)
 

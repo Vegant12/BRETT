@@ -94,21 +94,21 @@ Which phases cover which requirements. Populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PHYS-01 | — | Pending |
-| PHYS-02 | — | Pending |
-| PHYS-03 | — | Pending |
-| PHYS-04 | — | Pending |
-| PHYS-05 | — | Pending |
-| PHYS-06 | — | Pending |
-| PHYS-07 | — | Pending |
-| PHYS-08 | — | Pending |
-| PHYS-09 | — | Pending |
-| PHYS-10 | — | Pending |
-| PHYS-11 | — | Pending |
-| PHYS-12 | — | Pending |
-| RPT-04 | — | Pending |
-| RPT-05 | — | Pending |
-| MCP-07 | — | Pending |
-| MCP-08 | — | Pending |
-| DEPLOY-04 | — | Pending |
-| DEPLOY-05 | — | Pending |
+| PHYS-01 | Phase 16 | Planned |
+| PHYS-02 | Phase 16 | Planned |
+| PHYS-03 | Phase 16 | Planned |
+| PHYS-04 | Phase 16 | Planned |
+| PHYS-05 | Phase 16 | Planned |
+| PHYS-06 | Phase 17 | Planned |
+| PHYS-07 | Phase 17 | Planned |
+| PHYS-08 | Phase 17 | Planned |
+| PHYS-09 | Phase 17 | Planned |
+| PHYS-10 | Phase 17 | Planned |
+| PHYS-11 | Phase 17 | Planned |
+| PHYS-12 | Phase 15 | Planned |
+| RPT-04 | Phase 18 | Planned |
+| RPT-05 | Phase 18 | Planned |
+| MCP-07 | Phase 17 | Planned |
+| MCP-08 | Phase 17 | Planned |
+| DEPLOY-04 | Phase 14 | Planned |
+| DEPLOY-05 | Phase 19 | Planned |
