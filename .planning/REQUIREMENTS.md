@@ -18,7 +18,7 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 ### Activity Analytics
 
-- [ ] **HEALTH-12**: System calculates activity trends (steps, active/basal energy, distance) over configurable windows (7/14/30-day), following the existing trend-analytics pattern
+- [x] **HEALTH-12**: System calculates activity trends (steps, active/basal energy, distance) over configurable windows (7/14/30-day), following the existing trend-analytics pattern
 
 *(Sleep and recovery indicators — resting heart rate, HRV, sleep quality — are explicitly cut from v2.0: the user's real Apple Health export has zero such records in 4.5 years. See Out of Scope.)*
 
@@ -26,9 +26,9 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 - [x] **NUTR-02**: Nutrition data (calories, protein, carbs, fat, fiber, sugar, sodium) syncs into BRETT via the same Health Auto Export webhook receiver used for activity data — supersedes `NUTR-01`'s original "dedicated provider integration" framing; Apple Health already aggregates data from the user's existing nutrition-logging app, so no separate provider integration is needed
 - [x] **NUTR-03**: Nutrition sync is idempotent, following the same dedup/idempotency guarantees as activity and body data
-- [ ] **NUTR-04**: System calculates nutrition trends (daily/weekly average calories and macros) over configurable windows, consistent with existing trend-analytics patterns
+- [x] **NUTR-04**: System calculates nutrition trends (daily/weekly average calories and macros) over configurable windows, consistent with existing trend-analytics patterns
 - [x] **NUTR-05**: Nutrition data freshness is surfaced through the same freshness/coverage envelope (DQ-01/DQ-02)
-- [ ] **NUTR-06**: A new read-only MCP tool exposes nutrition summary/trend data on demand, following the one-tool-per-analytics-slice pattern already used for volume, frequency, and body-weight trend
+- [x] **NUTR-06**: A new read-only MCP tool exposes nutrition summary/trend data on demand, following the one-tool-per-analytics-slice pattern already used for volume, frequency, and body-weight trend
 
 *(Scattered single-entry micronutrients — vitamins, minerals with 1-2 lifetime records — aren't a reliable ongoing source and are excluded; scope is calories + the six consistently-logged macros.)*
 
@@ -41,8 +41,8 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 ### Reports
 
-- [ ] **RPT-01**: A new MCP tool composes a weekly report — training volume, strength progression, weight/measurement changes, nutrition summary, trends, and actionable recommendations — for a given week
-- [ ] **RPT-02**: A new MCP tool composes a monthly report with the same coverage, normalized appropriately for the longer window
+- [x] **RPT-01**: A new MCP tool composes a weekly report — training volume, strength progression, weight/measurement changes, nutrition summary, trends, and actionable recommendations — for a given week
+- [x] **RPT-02**: A new MCP tool composes a monthly report with the same coverage, normalized appropriately for the longer window
 - [x] **RPT-03**: Report tools are verified against a real Claude scheduled-task run; if scheduled sessions cannot load MCP tools (a documented, unresolved risk), reports remain fully functional on-demand and that limitation is documented in `docs/coaching-instructions.md` rather than silently assumed to work
 
 ### Body Measurements
@@ -103,18 +103,18 @@ Which phases cover which requirements. Populated during roadmap creation.
 | HEALTH-09 | Phase 8 | Complete |
 | HEALTH-10 | Phase 9 | Pending |
 | HEALTH-11 | Phase 8 | Complete |
-| HEALTH-12 | Phase 13 | Pending |
+| HEALTH-12 | Phase 13 | Complete |
 | NUTR-02 | Phase 8 | Complete |
 | NUTR-03 | Phase 8 | Complete |
-| NUTR-04 | Phase 13 | Pending |
+| NUTR-04 | Phase 13 | Complete |
 | NUTR-05 | Phase 8 | Complete |
-| NUTR-06 | Phase 13 | Pending |
+| NUTR-06 | Phase 13 | Complete |
 | STR-01 | Phase 10 | Complete |
 | STR-02 | Phase 10 | Complete |
 | STR-03 | Phase 10 | Complete |
 | STR-04 | Phase 10 | Complete |
-| RPT-01 | Phase 13 | Pending |
-| RPT-02 | Phase 13 | Pending |
+| RPT-01 | Phase 13 | Complete |
+| RPT-02 | Phase 13 | Complete |
 | RPT-03 | Phase 13 | Complete |
 | ~~BODY-03~~ | Phase 11 | **Dropped 2026-09-03** |
 | ~~BODY-04~~ | Phase 11 | **Dropped 2026-09-03** |
