@@ -1,1066 +1,1001 @@
-# Pitfalls Research
+# Pitfalls Research — v2.1 Longitudinal Physique Analysis
 
-**Domain:** Adding v2.0 capabilities to BRETT — a shipped, production-live, read-only fitness MCP backend
-**Researched:** 2026-09-02
-**Confidence:** HIGH for everything grounded in this repo's source (read directly); HIGH for Health Auto Export behaviour (official Help Center); MEDIUM-HIGH for Claude scheduled-task connector failures (two GitHub issues fetched directly, both closed "not planned"); MEDIUM for Claude Desktop "Always approve" irreversibility (community sources only).
+**Domain:** Adding model-generated (VLM/LLM subjective) longitudinal observations to an existing
+deterministic, SQL-first fitness-analytics system with a read-only MCP surface and one prior
+confirm-gated write tool.
+**Researched:** 2026-09-05
+**Confidence:** MEDIUM overall — HIGH on everything traceable to this repo's own code and tests
+(recomposition.py, body_measurements.py, test_mcp_isolation.py, test_analytics_reports.py,
+logging.py); MEDIUM on VLM/LLM rating-consistency and anchoring claims, sourced to academic
+literature rather than to a controlled test of *this* model on *this* task, which does not yet
+exist and which Pitfall 1 recommends running before the schema is locked.
 
-> **Scope note.** This document is deliberately *not* generic fitness-app advice. Every pitfall below is
-> anchored to a specific file, line, constant, constraint or deployment flag that already exists in BRETT
-> today, and describes what breaks when one of the five v2.0 features is bolted onto it. Where a pitfall is
-> already anticipated by an in-repo docstring or guard, that is stated — because the most dangerous
-> pitfalls here are the ones where v1.0's authors *wrote down the counter-argument* and v2.0 is about to
-> walk past it.
+This file assumes familiarity with `.planning/research/PITFALLS.md`'s v2.0 predecessor (not
+duplicated here) — in particular its Pitfalls #13–16, which established the confirmation-token
+pattern, the write-guard narrowing pattern, the `safe_tool` three-state result pattern, and the
+append-only-history-over-mutable-column pattern. Every one of those precedents is reused, not
+reinvented, below; the new pitfalls are where reuse is *not* enough.
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: The webhook route is registered after the catch-all mount and silently never runs
+### Pitfall 1: The vision model does not agree with itself, and there is no ground truth to check it against
 
 **What goes wrong:**
-`backend/app/main.py:98` ends with `app.mount("/", mcp_app)` — a catch-all mount at the root, registered
-last *on purpose*, with the comment "Registered LAST because it is a catch-all: FastAPI's own routes are
-matched first and therefore win." Starlette matches routes in registration order. Add
-`app.include_router(webhooks.router)` **below** that line and the mount matches first: every POST to
-`/webhooks/health-auto-export` is handed to the MCP sub-app, which answers with an MCP-shaped 404/406 or a
-401 from `RequireAuthMiddleware`. The route exists, imports fine, has tests that pass against a
-`TestClient` built from a bare router — and is dead in production.
+Asked to rate the same physique twice — same photos, same day, fresh context — a VLM will not
+return identical per-muscle-group ratings on a 19-value taxonomy. This is not a BRETT-specific
+risk; it is a documented property of LLM/VLM judgment. "Rating Roulette: Self-Inconsistency in
+LLM-as-a-Judge Frameworks" (arXiv:2510.27106, Oct 2025) reports low intra-rater reliability
+across repeated runs on subjective scoring tasks — "almost arbitrary in the worst case." The same
+line of work notes a genuine trade-off BRETT cannot dodge: forcing `temperature=0` for
+reproducibility can *degrade* agreement with a plausible human rating, while sampling at
+`temperature=1` and aggregating improves accuracy but destroys the very reproducibility a
+byte-identical, testable system wants (MEDIUM confidence — general LLM-judge literature, not a
+BRETT-specific or vision-specific measurement).
+
+BRETT has no independent ground truth to reconcile this against. Unlike a workout set (kg × reps,
+checkable against the Hevy app) or a nutrition macro (checkable against Apple Health), a physique
+rating's only possible check is a photo BRETT has deliberately chosen never to store. Once the
+rating is written, there is nothing left in the system to re-derive it from or audit it against —
+the observation *is* the record, permanently, from that point on.
+
+Sources of drift beyond pure sampling noise, specific to this feature's multi-month lifetime:
+- **Model version changes.** The user's Claude Project will be served by whatever model version
+  Anthropic runs on a given month. A rating taken in September under one model and one taken in
+  December under a newer model are not directly comparable, and nothing in the stored schema
+  says which model produced which row.
+- **Photo condition variance.** Lighting, angle, camera, pose, time of day (pre/post-workout
+  pump, hydration, sodium/carb timing) all move a physique rating independent of any real
+  change — variance the user does not control turn-by-turn and BRETT cannot see, since it never
+  receives the photo.
+- **Conversational framing.** The exact wording of the request, what else is in context, and how
+  the prior observation is presented can all shift the rating, because the rating is produced by
+  a general-purpose conversational model, not a calibrated instrument.
 
 **Why it happens:**
-Every other route in the file (`app.include_router(health.router)`, line 90) sits above the mount, so the
-ordering rule is invisible unless you read the comment. The natural editing instinct is to append.
+The milestone's own design (PROJECT.md) already reduces variance the smart way — relative rating
+against the prior observation rather than absolute rating from scratch — but that mitigation
+targets *inter-session* variance (comparing month N to month N+1), not *intra-session*
+reproducibility (would this exact request, run twice, produce the same output). No test in this
+codebase's tradition (byte-identical narrative, deterministic classification, container-verified
+analytics) can be applied to the rating-production step itself, because that step happens inside
+Claude's conversation, outside BRETT's process, with no BRETT-side determinism lever to pull.
 
 **How to avoid:**
-Register the webhook router **above** line 98, immediately after the health router. Add a test in the
-style of `backend/tests/test_mcp_mount.py` that asserts the webhook path resolves to the FastAPI route and
-not the mounted app — assert on the *response shape* (a FastAPI 422 validation error for a bad body, say),
-not merely on "not 404", because the MCP app also returns 404s.
+- **Run a self-consistency spike before finalizing the schema or the write tool's contract.**
+  This is the milestone's central, retirable-with-evidence risk — the same shape as Phase 2's
+  auth spike and Phase 13's RPT-03 scheduled-task spike. Concretely: submit the same 2–3 sets of
+  progress photos to Claude for physique rating multiple times (same session, fresh sessions,
+  different phrasing of the request), with and without a synthetic "prior observation" context,
+  and record how much the per-muscle rating and the free text move. This produces the number that
+  should set the diff analytics' "improved/regressed" thresholds in Pitfall 4's sibling module
+  (`analytics/physique.py`) rather than guessing at a semantically meaningful step size on a
+  19-value taxonomy.
+- **Persist provenance with every observation**, not just the rating: which model surfaced it
+  (from context available at write time, or a fixed schema version if the model identity is not
+  reliably obtainable), and the raw timestamp. This does not fix drift, but it makes a
+  model-version discontinuity a queryable fact instead of an invisible one — the same posture
+  `source_name` takes for Health Auto Export vs Hevy write-back (v2.0 Pitfall #7/#8 precedent).
+- **Never present a rating with implied numeric precision it cannot support.** A 19-value
+  taxonomy is already coarse by design; treat it as ordinal, never as an interval scale a diff
+  can average or interpolate on (this is also Pitfall 4's concern, from the analytics side).
+- **Do not build a false-precision confidence score.** A model-reported "confidence: high" on its
+  own rating is not evidence of accuracy — VLMs are not calibrated instruments, and manufacturing
+  a confidence field would give the illusion of a QA mechanism this design does not have.
 
 **Warning signs:**
-A webhook that returns 401 with an MCP `WWW-Authenticate` header, or a 404 whose body is not FastAPI's
-`{"detail":"Not Found"}`. Health Auto Export's Activity Log showing consistent non-2xx with no server log
-line from your handler.
+Two observations logged minutes apart (a user re-running the analysis to "check") disagree on a
+muscle group's rating. A rating changes direction (improved → regressed → improved) across three
+consecutive monthly observations with no plausible physiological cause. The free-text notes for
+two consecutive months contradict each other on a directly observable fact (e.g., one month notes
+"visible ab separation," the next says "no visible abs" with no intervening cut).
 
-**Phase to address:** Apple Health webhook ingest phase, first plan.
+**Phase to address:** A dedicated spike phase, before the physique write tool or schema is
+finalized — this is the milestone's highest-uncertainty question and should be retired with
+evidence the way v2.0's RPT-03 was, not assumed.
 
 ---
 
-### Pitfall 2: The webhook shares one global 30/min token bucket with `/mcp`, and Health Auto Export does not retry
+### Pitfall 2: The anchoring mitigation is also a ratchet — the second-order risk the milestone accepted without a bound
 
 **What goes wrong:**
-`backend/app/middleware.py` builds **one process-wide `TokenBucket`** (`build_limiter`, capacity 30, refill
-30/min) applied to every path except `/health` and `/.well-known/` (`EXEMPT_PREFIXES`, line 57). It is
-registered app-level in `main.py:79`, i.e. *outside* the router, so it fires before routing. A new webhook
-path inherits it automatically.
+Feeding the prior observation as context is a real and well-motivated mitigation for one failure
+mode (absolute-rating drift across sessions with no memory) — but it trades that failure mode for
+a different one: **anchoring the model on its own prior output**. A rater told "last time you
+said this muscle group was a 7" is now primed to answer "still about a 7, maybe a shade better,"
+regardless of what the current photo actually shows, because relative judgment against a stated
+anchor is exactly the psychological effect the technique is named for. Sequential-judgment
+research on repeated subjective ratings (face attractiveness, ringtone agreeableness — Yu &
+Zhang, PMC5995378) documents both contrastive and *assimilative* sequential effects, and notes the
+assimilative effect specifically "is strengthened by response repetition" — i.e., by exactly the
+pattern of feeding the same rater its own last answer, repeatedly, that this design is built
+around (MEDIUM confidence — psychology-of-judgment literature on repeated ratings generally, not
+a study of this exact VLM-anchoring setup). A closely analogous applied finding: sequential
+context effects have been documented in radiologists' diagnostic interpretation of successive
+mammograms (PMC5858736) — a domain chosen deliberately close to this one, since it is also
+"look at an image, judge a body, informed by what was just seen or said before."
 
-Two failure directions, both real:
-- Health Auto Export with **Batch Requests ON** (which you will need — see Pitfall 4) sends many HTTP
-  requests in quick succession. Those drain the same 30-token bucket Claude's MCP calls draw from. A
-  mid-conversation `fitness_get_training_summary` gets a 429 during a health sync.
-- Conversely, an active coaching conversation drains the bucket and the health push gets 429'd.
+**The specific second-order failure this produces: a slow ratchet.** If each monthly rating is
+nudged at most one step from the last — which is exactly what a well-behaved, cautious anchored
+rater would do — then twelve consecutive one-step nudges in the same direction are
+indistinguishable, month to month, from twelve *accurate* one-step improvements. Every individual
+comparison looks reasonable (a coach being appropriately conservative, not overclaiming a big
+jump off one photo) while the cumulative year-over-year claim silently drifts arbitrarily far from
+what an independent rater looking at month 1 and month 12 side by side would actually say. This is
+the physique-rating analogue of a "boiling frog": no single narrative sentence is wrong, but the
+composed twelve-month story is unmoored from ground truth and nothing in the system would notice,
+because BRETT never holds the two photos to re-compare directly, and no analytics function in
+`app/analytics/physique.py` would have a signal to catch it — pairwise `improved/unchanged/
+regressed` diffs are exactly the computation that is blind to a slow monotonic ratchet, since
+every adjacent pair passes.
 
-The second direction is the damaging one: **Health Auto Export has no documented retry mechanism.** Its own
-docs describe checking "Activity Logs for HTTP status codes and per-day failures" and document no automatic
-retry. A 429 is therefore not backpressure — it is silent, permanent data loss for that window, unless the
-user notices and re-runs manually. Worse, if the automation is configured to **"Since Last Sync"**, a failed
-delivery may leave a gap that the next run does not re-cover.
+This is worse, not better, than pure noise. Noise (Pitfall 1) is at least *unbiased* — it
+averages toward the truth over many observations. A ratchet is *biased* — it accumulates in one
+direction and does not self-correct, and the direction it accumulates in is influenced by
+whatever the user's phrasing or mood implies about what they hope to hear, since the model is a
+conversational partner, not a blinded rater.
 
 **Why it happens:**
-The single global bucket was a deliberate, well-argued v1.0 decision (documented at length in
-`middleware.py`'s docstring: no per-IP key because the service is `--allow-unauthenticated` and the
-forwarded-address header is attacker-controlled). That reasoning is still correct *for `/mcp`*. It was
-simply never asked to arbitrate between two traffic classes with opposite retry semantics.
+The anchor was chosen to solve a real problem (an unanchored rater re-deriving a rating from zero
+every month is itself high-variance and possibly worse) and the tradeoff was accepted at the
+milestone gate as "the feature's load-bearing design decision" without, at gate time, a
+corresponding bound on how far the anchor may drift before it must be checked against something
+outside the anchor chain. A mitigation for one failure mode was adopted without asking what new
+failure mode it introduces — the same category of near-miss v2.0 caught for
+`confirm: bool` (PITFALLS v2.0 #13: a fix for the "no confirmation at all" problem that was itself
+not actually a gate).
 
-**How to avoid:**
-Give the webhook its **own bucket**, keyed by path prefix, sized for burst delivery (HAE batches) rather
-than for conversational cadence. Keep the global bucket for everything else so the DoS argument in
-`middleware.py`'s docstring still holds. Do **not** add the webhook to `EXEMPT_PREFIXES` — that would make
-an unauthenticated-by-default write path the one unbounded surface on the service. Return `503` with
-`Retry-After` rather than `429` if you want HAE to surface it as a retryable failure in its Activity Log,
-and log a distinct `webhook_rejected` event so a dropped window is findable after the fact.
+**How to avoid — periodic re-anchoring, plus a bounded-drift detector:**
+- **Never carry the anchor forward indefinitely without a reset.** Establish a maximum number of
+  consecutive anchored (relative) observations — e.g., after N months of relative rating, the next
+  observation must be rated blind (no prior-observation context passed), producing an independent
+  data point the ratchet cannot have biased. Treat the gap between the last anchored rating and
+  this fresh blind rating as the re-anchoring signal: a large jump reveals how far the chain had
+  drifted; a small one is reassuring evidence the chain tracked reality.
+- **Cross-reference against an independently-measured, non-model signal wherever one exists.**
+  This system already has one: `fitness_get_muscle_group_volume` (per-muscle direct/indirect
+  training volume) and `fitness_get_body_measurement_trend` (waist_cm, measured). A muscle group
+  reported as "steadily improving" for six consecutive months while its training volume is flat
+  or declining, or while body weight/waist trend shows no plausible mass gain, is a coherence
+  check a ratchet would fail even though no single physique observation would. This is squarely
+  what the milestone's own "cross-reference physique observations against
+  fitness_get_muscle_group_volume" feature should be scoped to catch, not just to narrate — design
+  it to SURFACE the disagreement (as a flag Claude can see and question the user about), not
+  merely to co-display two numbers.
+- **Bound the per-observation step size structurally, and make the bound visible.** If the
+  taxonomy allows a rating to move by at most one step per observation (a plausible product
+  decision to prevent single-photo overclaiming), that same rule is the thing that makes a
+  twelve-step ratchet possible. If this bound is adopted, pair it with the periodic blind
+  re-anchor above — a step-size cap with no periodic reset is a ratchet with a guaranteed floor
+  under how fast it can happen and no ceiling on how far it goes.
+- **Never let `build_narrative` describe a rating trend across more than the two most recent
+  observations as if it were a continuous verified improvement.** "Improved every month for a
+  year" is a much stronger and more falsifiable claim than "improved since last month" — the
+  former needs an average-of-first-half-vs-average-of-second-half framing at minimum, not a
+  chained string of one-step deltas, mirroring how `body_measurements.py`'s BODY-05 deliberately
+  chose latest-vs-earliest over a rolling average for a similarly untrustworthy long chain of
+  sparse comparisons (see Pitfall 6).
 
-**Warning signs:**
-`rate_limit_rejected` log lines whose `path` is the webhook path. Gaps in Apple Health data that align with
-periods of heavy Claude usage. A `sync_state`-equivalent `last_synced_at` for Apple Health that stops
-advancing while the iOS app reports success.
+**Warning signs:** A muscle group whose rating has moved in the same direction for four or more
+consecutive observations with no corresponding volume or weight-trend signal. A user expressing
+surprise that a "steady improvement" narrative doesn't match how they feel looking in the mirror.
+No test or analytics function in the codebase computes anything using more than adjacent-pair
+history.
 
-**Phase to address:** Apple Health webhook ingest phase.
+**Phase to address:** The physique-analytics phase (`analytics/physique.py`) should implement the
+cross-reference-as-coherence-check from day one, not as a "nice to have" narrative addition. The
+periodic-blind-re-anchor policy is a product/prompt-level decision that belongs in the same
+spike as Pitfall 1 — it cannot be validated without first knowing how much a blind rating differs
+from an anchored one on the same photos.
 
 ---
 
-### Pitfall 3: A FastAPI-side route inherits zero authentication on an `--allow-unauthenticated` service
+### Pitfall 3: A rating sitting beside a measurement in one report reads as equally authoritative to both the model and the human
 
 **What goes wrong:**
-BRETT's entire inbound auth story lives inside the mounted MCP sub-app. `AuthSettings` +
-`build_token_verifier` (`backend/app/mcp/auth.py`) are consumed by `MCPServer`, and the SDK's
-`RequireAuthMiddleware` wraps only `mcp_app`. The FastAPI side has exactly one route today — `/health` —
-and it is **deliberately open** (`main.py:89`: "D-04: no auth dependency -- /health is open so platform
-health checks reach it"). `scripts/deploy-cloud-run.sh` deploys with `--allow-unauthenticated`.
+The monthly report will place `weekly_volume.hard_sets` (a count from stored Hevy sets),
+`body_weight_trend.trend_rate_kg_per_week` (a rolling average of scale readings), and a physique
+observation's per-muscle rating in the same document, under headings of equal visual weight. For
+the human reading it, an opinion with a timestamp inherits the report's ambient credibility —
+everything else in it has been true so far. For Claude *composing or discussing* the report, the
+risk is sharper: the coaching instructions' central rule is "never substitute general training
+knowledge for the user's actual data, and never estimate a number a tool can return" — a rule
+written entirely around the assumption that every number the tool returns is data-in-the-measured
+sense. Nothing in `docs/coaching-instructions.md` today distinguishes "cite this figure with full
+confidence" from "cite this figure as what a model said it saw," because no such figure has ever
+existed in this system before.
 
-Consequently a new `POST /webhooks/...` on the FastAPI side is, by default, **a public write endpoint into
-a health-data database, reachable by anyone on the internet**. Nothing in the existing test suite would
-catch this: `test_mcp_auth.py` tests the MCP path, and a new webhook test written against `TestClient` with
-no header would pass precisely *because* there is no auth.
+This codebase already has exactly the right precedent for the fix, applied to a different kind of
+uncertainty. `RecompositionResult.disclaimer` (`app/analytics/recomposition.py`) is documented as
+"a REQUIRED FIELD, not documentation, so that a Phase 6 serialization change cannot drop it" — a
+fixed, verbatim, non-generated string that travels with the verdict everywhere it goes, precisely
+because a recomposition status is *decision support, never a diagnosis* and needs to say so on
+every appearance, not just in a docstring. A physique rating needs the identical treatment for a
+related but distinct reason: it is not decision support that might be wrong, it is *model output
+that is definitionally an opinion*, and conflating "here is a number I am confident about" with
+"here is what a vision model said it saw in a photo, once, this month" is the actual failure this
+pitfall names.
 
-**Why it happens:**
-"The app is authenticated" is true of the app the developer thinks about (`/mcp`). The mental model that
-auth is an app-level property is wrong here — it is a property of one mounted sub-application.
+**How other systems handle this:** provenance-tagging literature on AI-generated vs
+human-authored content (data-provenance standards work, NTIA's AI-output-disclosure framework)
+converges on tagging generation/annotation provenance as metadata that travels with the value, not
+as prose the reader must remember to apply. One directly sobering finding from user-facing
+labeling research: "labeling messages as AI-generated does not reduce their persuasive effects"
+(PMC12887897) — a disclaimer sentence alone, once read, does not reliably change how much weight
+a reader gives the content that follows it. This argues for *structural* separation (its own
+report section, its own response field, a rating that cannot be quoted without its accompanying
+disclaimer field the way `RecompositionResult.disclaimer` already cannot), not merely a caveat
+sentence trusted to do the whole job.
+
+**Why it happens:** Every other value in this system earned its trust the hard way — it is
+either read directly off a device (Hevy sets, Apple Health steps) or computed deterministically
+from device-read values with a documented formula. Extending the report's "everything here is a
+number, present it as one" convention to a rating that has neither property is the path of least
+resistance, and the report composer's existing `_report_body_fields` sees no structural difference
+between a `Decimal` and a `PhysiqueRating` — both are just fields on a dataclass to it.
 
 **How to avoid:**
-Health Auto Export **does** support custom request headers, including `Authorization: Bearer <token>` and
-`X-API-Key` (confirmed in its official REST API docs). Use one. Verify it with
-`secrets.compare_digest` over **bytes**, following the exact pattern and reasoning already established in
-`StaticTokenVerifier.__init__` (`auth.py:37-46` — a `str` compare raises `TypeError` on non-ASCII header
-bytes, which escapes as a 500 with traceback rather than a 401). Store it in Google Secret Manager beside
-`MCP_AUTH_SECRET` and add it to `Settings.secret_values()` so `configure_logging`'s scrubber redacts it.
-Fail **closed** and **silent** — return a bare 401 with no body detail, matching `auth.py`'s stated
-contract.
+- Give the physique section its own **required, non-optional disclaimer field**, worded to name
+  what it is (a vision-model opinion from a photo, not a measurement), following
+  `RecompositionResult.disclaimer`'s exact pattern: a module-level constant, never model-generated
+  prose, asserted present by a test the way `test_the_disclaimer_appears_verbatim_on_its_own_line`
+  already asserts for recomposition.
+- **Label every rated field by construction, not by convention** — e.g., a wrapper type or a
+  consistent field-naming scheme (`*_rating`, never `*_score` or `*_percent`, which read as
+  measured) so a future reader of the schema, not just the narrative, can tell rated from measured
+  apart at a glance.
+- Update `docs/coaching-instructions.md`'s metadata-envelope table (the one governing
+  `freshness`/`coverage`/`data_available`) with a new row for the physique disclaimer, with the
+  same "surface this before the answer, not after" instruction the recomposition disclaimer
+  already gets, and add physique to `test_coaching_doc.py`'s drift guard the same way every other
+  tool is covered.
+- In the narrative itself, use a distinct verb register for rated content versus measured content
+  — "logged as," "rated as," "noted as" for physique; "measured," "recorded," "totaled" for
+  everything else — enforceable the same mechanical way the banned-recommendation-token scan
+  already works (see Pitfall 4).
 
-Write the negative test: `test_webhook_rejects_a_request_with_no_credential`. Then add a *static* guard in
-the style of `backend/tests/test_mcp_isolation.py` asserting that every route registered on the FastAPI app
-other than `/health` carries an auth dependency — so route #3 cannot be added unguarded.
+**Warning signs:** A physique rating printed in the narrative with no distinguishing language from
+a measured figure on the same line. A user or Claude citing a physique rating with the same
+confidence as a body-weight trend in the same sentence. The disclaimer field being optional
+(`| None = None`) rather than required.
 
-**Warning signs:**
-An HTTP route module under `app/api/routes/` with no `Depends(...)` in its decorator. A Cloud Run request
-log showing 2xx on the webhook path from an IP outside the user's carrier ranges.
-
-**Phase to address:** Apple Health webhook ingest phase — this is the phase's first success criterion, not a hardening afterthought.
+**Phase to address:** Schema design, at the point `PhysiqueObservation`/`PhysiqueReport` types are
+defined — the disclaimer must be a required field from the first migration, not bolted on after
+the report-integration phase discovers the ambiguity live.
 
 ---
 
-### Pitfall 4: Non-idempotent ingest, when Health Auto Export re-sends overlapping windows by design
+### Pitfall 4: The determinism contract breaks in ways specific to rated, textual content — not the ways it has been tested against before
 
 **What goes wrong:**
-Health Auto Export's **Default** export period is documented as: *"Syncs data for the full previous day plus
-data up to the current date and time."* Run that automation hourly and every run re-sends the whole of
-yesterday plus a growing slice of today. Its docs describe **no deduplication mechanism** on the sender
-side. A naive `INSERT` receiver therefore accumulates duplicate rows on every run — and because the data
-feeds averages, duplicates do not error, they *bias*. A body weight re-sent 24 times gets 24 votes in a
-7-day mean.
+`build_narrative` is enforced pure, byte-identical, free of recommendation language, and free of
+any number not already present in the structured data
+(`test_the_narrative_is_byte_identical_across_calls`,
+`test_the_narrative_contains_no_recommendation_language`,
+`test_every_number_in_the_narrative_is_already_in_the_structured_fields`, all in
+`backend/tests/test_analytics_reports.py`). A physique section threatens all three, by different
+mechanisms than anything the narrative has handled before:
 
-This is the one integrity property BRETT already treats as non-negotiable for Hevy ("Hevy sync must be
-idempotent and must never corrupt existing data on partial/failed sync" — CLAUDE.md constraint), and the
-webhook is where it is easiest to forget, because a webhook *feels* like an event rather than a sync.
+1. **Byte-identical is trivially satisfiable and therefore not the useful part of the guarantee.**
+   `build_narrative` restating a *stored* rating and a *stored* free-text note twice will of
+   course produce the same bytes twice — it's the same input dict rendered by the same pure
+   function. The test will pass immediately and prove nothing new. The actual risk is upstream of
+   `build_narrative`: if `compose_report` (or the physique write tool) ever calls the model again
+   at *read* time — to "refresh" a rating, to summarize multiple observations into new prose, to
+   generate a friendlier phrasing of a stored note — purity is gone, because two calls to
+   `compose_report` on the same underlying rows can now legitimately return different bytes. The
+   design as scoped avoids this (persist once at write time, read back verbatim at report time),
+   but it is exactly the kind of scope creep a future "make the note read better" request would
+   reach for, and it is precisely the boundary `test_build_narrative_is_synchronous_and_pure`
+   exists to hold.
+2. **Free text is the banned-token scan's actual test.** `_BANNED_NARRATIVE_TOKENS` (`should`,
+   `recommend`, `suggest`, `consider`, `advise`, `deload`, `aim for`, `you need`, `try `) was
+   written against numbers-and-labels prose the backend itself composes. A user-attached physique
+   note is bounded free text *produced by a model, at write time, about a person's body* — a
+   fundamentally more likely place for advisory language to slip in ("consider adding volume to
+   lagging delts") than anything the deterministic analytics layer has ever emitted. If that note
+   is stored verbatim and later restated by `build_narrative`, the scan will genuinely and
+   correctly fail — which is the *right* outcome, but only if the constraint is enforced where it
+   is cheap to fix: **at write time**, not discovered for the first time when a stray monthly
+   report fails CI. The write tool itself should scan and reject (or truncate/strip) recommendation
+   language in the free-text notes before persisting, using the identical token list the narrative
+   test already has, so the two enforcement points cannot drift apart.
+3. **Numeric provenance breaks the moment free text contains any number.** A plausible, entirely
+   reasonable note — "waist looks like it's dropped maybe an inch, upper body noticeably fuller"
+   — contains no formal number, but "an inch" is one bad phrasing choice away from "waist down
+   ~2.5cm," which is a number the structured fields do not carry (there is no
+   `PhysiqueObservation.waist_delta_cm` — that number belongs to `fitness_get_body_measurement_trend`,
+   a different tool entirely) and `test_every_number_in_the_narrative_is_already_in_the_structured_fields`
+   would correctly flag it as a number the narrative introduced that the structured data does not
+   support. **Bound the free-text notes to qualitative language only, enforced at write time** —
+   either a schema-level constraint (reject notes containing digit sequences, mirroring
+   `_NUMBER_RE`) or an instruction to the model at generation time backed by the same rejection as
+   a backstop, never trusted alone.
+4. **The disclaimer-verbatim pattern must be replicated exactly, not approximated.** Pitfall 3's
+   physique disclaimer needs its own
+   `test_the_physique_disclaimer_appears_verbatim_on_its_own_line`-shaped test from day one,
+   because a narrative-generation refactor six months from now has no way to know a second
+   disclaimer needs the same protection `INTERPRETATION_DISCLAIMER` already has unless a test says
+   so.
 
-**Why it happens:**
-Webhooks are mentally filed as "push, therefore each delivery is new". HAE's Default period breaks that
-assumption, and the `session-id` header it sends is unique *per request*, so it looks like a dedup key while
-being exactly the wrong one — the same measurement arrives under a different `session-id` every run.
+**Why it happens:** The determinism guards were designed and hardened entirely against
+backend-generated, numeric, formulaic prose. Physique observations are the first content in the
+system's history that is (a) free text, (b) written by a model, and (c) about a subjective
+judgment. Every existing guard generalizes almost, but not quite, cleanly to this new shape, and
+"almost" is where a real report ships a banned word or an orphan number the first time a user's
+note happens to phrase things unluckily.
 
-**How to avoid:**
-Key on the **measurement's own identity**, never on delivery identity. Follow the pattern already proven in
-`backend/app/integrations/hevy/body.py:97-120`: `pg_insert(...).on_conflict_do_update(constraint=...)`
-against a natural-key unique constraint. For Apple Health metrics the natural key is
-`(user_id, source, metric_name, measured_at)` — plus the aggregation interval, because HAE can send the same
-underlying samples aggregated hourly *and* daily depending on configuration, and those are genuinely
-different rows that must not collide.
+**How to avoid:** Enforce the free-text constraints (no banned tokens, no bare numbers, length
+cap) **in the write tool**, at persistence time, not only downstream in the narrative test suite —
+the write tool is the one place a rejection can still ask the model to rephrase before anything is
+committed; the narrative test can only fail a build months later on a note already in the
+database. Reuse `_BANNED_NARRATIVE_TOKENS` and `_NUMBER_RE` (or extract them to a shared module
+both the write tool and the test suite import) so the two checks are provably the same check, not
+two lists someone forgot to keep in sync.
 
-Make the whole delivery **one transaction**. HAE reports per-day failures; a half-applied batch that returns
-500 and is never retried is worse than a rejected one.
+**Warning signs:** A physique note stored with a number in it. A CI failure on
+`test_every_number_in_the_narrative_is_already_in_the_structured_fields` traced back to a physique
+note weeks after it was written, rather than caught at write time. Any code path where
+`compose_report` or the physique section performs an `await` into anything other than
+`app/analytics/`/`app/db/repositories/` — a model call hiding inside report composition.
 
-**Warning signs:**
-Row counts growing faster than wall-clock days. A 7-day body-weight average that moves when no new weigh-in
-happened. `rows_upserted` in your ingest result consistently equal to rows received (a healthy steady-state
-run should be mostly no-op updates).
-
-**Phase to address:** Apple Health webhook ingest phase. Verify with a test that POSTs the *identical* payload twice and asserts the row count and every computed average are unchanged — the direct analogue of `test_hevy_sync.py`'s duplicate test.
+**Phase to address:** The write-tool phase owns the write-time constraint; the report-integration
+phase owns extending the existing narrative test suite with physique-specific fixtures that
+exercise a banned-token note and an over-numeric note as red-test regressions, not just green-path
+happy cases.
 
 ---
 
-### Pitfall 5: Payload size and cold start collide with a 512 MiB / 32 MiB / 30-second budget
+### Pitfall 5: `_report_body_fields` is one shared projection, and physique is deliberately not shared
 
 **What goes wrong:**
-Four hard numbers, all verified, that nobody checks until the first real sync:
+PROJECT.md already names this exactly: "`_report_body_fields` must be split on purpose. It is
+currently ONE shared projection, which is what makes 'the same sections in both reports' true
+rather than a convention; monthly-only physique breaks that deliberately." Reading
+`app/mcp/tools/reports.py` confirms the mechanism: `_report_body_fields(report)` builds one dict
+consumed by both `WeeklyReportResponse(**_report_body_fields(report))` and
+`MonthlyReportResponse(**body_fields, ...)` — a single function whose entire value is that weekly
+and monthly cannot silently diverge in what they include. The natural, minimal-diff way to add a
+field is to add one line inside `_report_body_fields`. That is exactly the change that ships
+physique data into the **weekly** report too, contradicting the explicit "weekly report
+deliberately excluded" requirement, and it would ship silently — nothing in the existing test
+suite asserts weekly *excludes* fields monthly has, because until now there were none to exclude.
 
-| Limit | Value | Source |
-|---|---|---|
-| Cloud Run max HTTP/1 request body | **32 MiB** | Google Cloud Run quotas |
-| BRETT's instance memory | **512 MiB** | `scripts/deploy-cloud-run.sh` (`--memory=512Mi`) |
-| BRETT's min instances | **0** (cold start on every idle period) | `deploy-cloud-run.sh` (`MIN_INSTANCES="${BRETT_MIN_INSTANCES:-0}"`) |
-| iOS background task budget | **30 seconds** | Health Auto Export docs |
+**Why it happens:** The shared-projection function is the path of least resistance for "add a new
+field to the report," and every existing field in it genuinely does belong in both reports. There
+is no established pattern in this codebase yet for "a monthly-only addition," because this is the
+first one.
 
-Health Auto Export's own documentation warns that backends should handle payloads of *"possibly several
-hundred megabytes"* for large exports with fine-grained aggregation. That exceeds the Cloud Run request cap
-by an order of magnitude, and FastAPI/Starlette buffers the request body in memory by default — so a payload
-that *does* squeak under 32 MiB still risks OOM-killing a 512 MiB instance, which Cloud Run surfaces as a
-generic 503 with no application log.
+**How to avoid:** Keep `_report_body_fields` unchanged as the *shared* projection, and add
+physique assembly as a separate step applied only inside the monthly branch of the tool
+registration (`fitness_get_monthly_report`), never inside the shared function. Add a test that
+specifically builds a weekly report against a user/window with physique observations present in
+the database and asserts the weekly response contains no physique field at all — a
+positive-exclusion test, not just an absence of a positive-inclusion test, mirroring how
+`test_both_periods_return_the_same_sections` already exists as the parallel positive-inclusion
+check for the shared fields today (that test will need updating to assert physique is the
+documented *exception* to "same sections," not silently broken by it).
 
-Separately: `MIN_INSTANCES=0` means the first webhook delivery after an idle period pays a full cold start.
-Add JSON parse + N upserts and you can blow past HAE's 30-second iOS background budget, which fails the
-export on the *device* side with "Health data could not be fully read."
+**Warning signs:** A diff that adds a `physique` key inside `_report_body_fields`'s return dict.
+A green `test_both_periods_return_the_same_sections` after physique ships, with no update — that
+test passing unchanged is itself the warning sign, since it means physique was either added to
+both or added to neither, and the requirement calls for neither of those.
 
-**Why it happens:**
-The `--memory=512Mi` and `--min=0` settings were correct for v1.0, where all inbound traffic was small MCP
-JSON-RPC calls and all bulk work happened in an outbound-only Cloud Run Job.
-
-**How to avoid:**
-- Configure the HAE automation with **Batch Requests ON** and a **coarse aggregation interval** (hours, not
-  seconds), and document that configuration in `docs/` as part of the setup — it is a deployment
-  prerequisite, not a user preference.
-- Enforce a request-body size cap in the webhook handler and reject oversized bodies with a clear status
-  before parsing, rather than discovering the limit as an OOM.
-- Keep the handler's synchronous work minimal: validate, upsert, return. Do not compute analytics inline.
-- Consider `--min=1` for the service, or accept cold starts and set HAE's user-configurable request timeout
-  generously. Note that `--min=1` also removes the cold-start risk against Claude's documented 10-second
-  connector-discovery budget (CLAUDE.md) — one change, two problems.
-
-**Warning signs:**
-Cloud Run 503s with no corresponding application log line (the OOM signature). HAE Activity Log entries
-showing timeouts. `--cpu-boost` masking the problem in testing but not under concurrent load with
-`--max=2`.
-
-**Phase to address:** Apple Health webhook ingest phase, with the deployment-flag change made and verified before the first real device sync.
+**Phase to address:** The report-integration phase, as its first task before any physique field is
+wired in — get the split right before there is anything to leak.
 
 ---
 
-### Pitfall 6: Parsing a 182 MB `export.xml` in-process OOMs the service
+### Pitfall 6: Sparse, irregular photo cadence breaks the diff analytics the same way it broke BODY-05, with one more failure mode BODY-05 didn't have
 
 **What goes wrong:**
-The backfill source file is real and already on disk: **`export.xml` is 182 MB** (`export_cda.xml` is 79 KB
-and is the wrong file — it is the CDA clinical-document variant, not the HealthKit sample dump).
-`xml.etree.ElementTree.parse()` builds the entire DOM in memory; for a 182 MB Apple Health export that is
-routinely 1.5–2 GB of Python objects. On a 512 MiB Cloud Run instance that is an instant OOM kill.
+BODY-05 (`app/analytics/body_measurements.py`) already lived through this exact class of problem
+and the fix is directly precedented: real body-measurement coverage was so sparse (waist 15/123
+days, body fat 0/123) that a rolling-average-with-a-measured-day-floor design — the shape
+`bodyweight.py` uses — would return `insufficient_data` almost universally, so BODY-05 chose a
+latest-vs-earliest comparison over a fixed 90-day window instead, with staleness and
+insufficient-data reported as two *independent* signals rather than one collapsed flag.
 
-**Why it happens:**
-`ElementTree.parse()` is the obvious API and works fine on the 79 KB file you test with.
+Physique observations will be sparser still — plausibly monthly at best, since taking and
+submitting progress photos is a manual, deliberate user action with no automatic sync behind it
+at all (unlike body measurements, which ride in on every Hevy sync). The specific cadences named
+in the question, and how each must be handled without a false claim:
 
-**How to avoid:**
-Two rules:
-1. **Stream it.** `ET.iterparse(path, events=("end",))` with an explicit `elem.clear()` and a
-   `root.clear()`-equivalent after each `Record` element. Without the clear, `iterparse` still accumulates
-   the tree and you have written a slower version of the same bug.
-2. **Do not run it through the web service at all.** This is a one-time operation on a file the user already
-   has locally. Run it as a `app/cli.py` subcommand (the pattern already exists — the Hevy sync runs as
-   `uv run python -m app.cli sync-hevy` in a Cloud Run Job), executed locally against the production
-   database, or as a one-off Cloud Run Job with raised memory. An HTTP upload path for a 182 MB file also
-   walks straight into Pitfall 5's 32 MiB cap.
+- **One observation ever.** There is no prior to diff against and no meaningful "improved /
+  unchanged / regressed" to report. The analytics function must return an explicit
+  `insufficient_data`/no-comparison state per muscle group — mirroring
+  `BodyMeasurementTrendResult`'s `earliest_value=None` when `coverage.insufficient_data` — never a
+  default "unchanged," which would misreport "we have nothing to compare" as "nothing changed."
+  This is the single most likely first-month state after the feature ships and must be a
+  first-class tested path, the same way `recomposition.py`'s own module docstring flags
+  `insufficient_data` as "the expected answer on live data today ... a first-class tested path."
+- **Two observations four days apart.** Both technically exist and a diff is computable, but four
+  days is not enough time for any real muscle-group development change to occur — any reported
+  "improved" here is measuring photo/lighting/pump variance and Pitfall 1's noise floor, not
+  physiological change. A minimum-elapsed-time gate is needed (analogous to
+  `RECOMP_MIN_CLASSIFIED_EXERCISES`'s "three is the smallest number for which a majority exists at
+  all," or `PlateauResult.min_elapsed_days`) — a diff computed from two observations closer
+  together than some floor (plausibly weeks, tunable) should report as unable to attribute a real
+  change rather than silently rendering the model's noise as a verdict.
+- **Two observations eight months apart.** A real diff is computable and the elapsed time is
+  clearly long enough for genuine change — but eight months is also long enough that Pitfall 1's
+  drift/model-version risk and Pitfall 2's ratchet risk (if anchored) both apply at their worst.
+  This case should be reported *with* its actual elapsed-time context surfaced prominently (the
+  same way BODY-05 surfaces `days_since_latest_reading` and `is_stale` as visible facts, not
+  buried internals) — an eight-month gap is meaningfully different context from a one-month gap
+  and Claude should be able to say so, not treat every "improved" verdict identically regardless
+  of how much time backs it.
 
-Additionally: the backfill and the ongoing webhook write into the same tables. Make the backfill use the
-**same upsert path** as the webhook, so running the backfill after the webhook has been live for a week is a
-no-op on the overlapping days rather than a duplicate-or-clobber event.
+**The failure mode BODY-05 did not have:** BODY-05's inputs are Decimal measurements — a
+subtraction of two precise numbers is always exact and always meaningful once the floor clears.
+Physique ratings are ordinal categories on a 19-value taxonomy; "improved" is not a subtraction,
+it is a directional comparison on an enum, and the analytics function must define — as data, the
+same way `recomposition.py`'s label matrices are data rather than nested ifs — exactly which
+taxonomy transitions count as improved/unchanged/regressed, with no silent default for an
+unexpected pair. A closed taxonomy makes this enumerable and testable (mirroring
+`classify_recomposition`'s 76-pair-tested label matrices), but only if it is built that way
+deliberately rather than as an ad hoc `>`/`<` comparison on whatever underlying representation
+the taxonomy uses.
 
-**Warning signs:**
-A backfill command that works on a trimmed test file and dies with exit 137 (SIGKILL) on the real one.
-Memory profile climbing monotonically through the parse.
+**Why it happens:** It is tempting to copy `bodyweight.py`'s rolling-average shape for "yet
+another trend function" out of consistency with the rest of the analytics module, exactly the
+temptation BODY-05's own module docstring warns against copying uncritically ("Deliberately NOT
+`bodyweight.py`'s rolling-average shape").
 
-**Phase to address:** Apple Health backfill phase. Success criterion should be "the real 182 MB `export.xml` parses to completion within the instance memory budget", tested against the actual file, not a fixture.
+**How to avoid:** Design `analytics/physique.py` around BODY-05's precedent from the start:
+latest-vs-prior (not a rolling window), independent `insufficient_data`/`is_stale`-shaped signals,
+an explicit minimum-elapsed-time floor for calling a two-point diff meaningful, and a closed,
+tested transition table for taxonomy-to-taxonomy comparisons. Treat "zero observations" and "one
+observation" and "two observations too close together" as three distinct, separately tested
+`insufficient_data` paths, not one.
+
+**Warning signs:** A diff function that returns "unchanged" as its default/else branch rather than
+as an explicit taxonomy-transition result. A single observation producing a non-null "trend."
+Copy-pasted code from `bodyweight.py`'s rolling-average window logic anywhere in
+`analytics/physique.py`.
+
+**Phase to address:** The physique-analytics phase, informed directly by whatever real cadence
+the user's actual photo-submission habit turns out to be (unknown until the feature ships — treat
+the assumed minimum-elapsed-time floor as `[ASSUMED]` and documented the way BODY-05's
+`STALE_AFTER_DAYS` is, a one-constant change if wrong).
 
 ---
 
-### Pitfall 7: The freshness envelope defaults to `provider="hevy"` and starts lying the moment a second provider writes
+### Pitfall 7: Widening the read-only guard from one allowlisted module to two is where the guard's whole design gets tested for real
 
 **What goes wrong:**
-`backend/app/analytics/metadata.py:137-143`:
+`test_mcp_isolation.py`'s `_WRITE_ALLOWLIST` is a `frozenset` asserted to contain **exactly one**
+entry (`program_switch.py`), with three separate tests locking that in from different angles
+(`test_mcp_never_writes`'s trailing assertion, `test_the_write_allowlist_holds_exactly_one_module`,
+`test_only_one_module_opens_a_writable_session`). This milestone's physique write tool is a second
+module that must commit. The mechanical part — add the module's filename to the frozenset,
+raise the length assertion to 2 — is trivial and is *not* the risk. The risk is what "amendment,
+not relaxation" (PROJECT.md's own stated posture) actually requires beyond that one-line change,
+and which of the surrounding guarantees a lazy version of this change would quietly drop:
 
-```python
-async def build_freshness(session, *, user_id, resources, provider: str = PROVIDER_HEVY) -> FreshnessMetadata:
-```
+- **A distinct, correctly-shaped `ToolAnnotations`.** v2.0 Pitfall #14 already documented that
+  `program_switch.py`'s tool needed `read_only_hint=False, destructive_hint=True,
+  idempotent_hint=False`, registered *outside* the shared `_TOOLS` read-only loop, with
+  `test_every_tool_is_annotated_read_only` updated to assert the exact partition by name. A
+  physique write is **not destructive** in the same sense a program switch is (it does not change
+  a governing state that alters every future classification) but it **is not idempotent** either —
+  calling it twice creates two observations, not one updated one (see Pitfall 9). The temptation
+  is to copy `program_switch.py`'s annotations wholesale; the correct move is to derive this
+  tool's own annotations from its own actual properties and update the partition assertion to
+  name three groups (N read-only, this tool, program_switch), not stretch a boolean check to
+  "two tools aren't read-only."
+- **`writable_session`, not `read_only_session`.** `program_switch.py`'s own docstring states it
+  "must NOT import the read-only session helper from `_common`... importing that helper here would
+  be a standing invitation to reach for the wrong one." The same sentence must be true, verbatim,
+  of the physique write module, and `test_only_one_module_opens_a_writable_session`'s assertion
+  needs to grow from `{"program_switch.py"}` to `{"program_switch.py", "physique_observations.py"}`
+  (or whatever the module is named) — an assertion that fails loudly, by name, if a second module
+  is missed.
+- **The write import ban keeps applying with NO allowlist**, exactly as it does today
+  (`_WRITE_IMPORT`'s regex has no exemption list at all — it is checked against every module,
+  allowlisted for `_SESSION_WRITE` or not). The physique write tool must, like `program_switch.py`,
+  call into `app/db/repositories/` for the actual `insert`, never construct one under `app/mcp/`
+  itself.
+- **Confirm the append-only, non-destructive framing is actually true at the schema level, not
+  just in the tool's docstring.** "Append-only" is a real property only if there is no `UPDATE`
+  or `DELETE` path anywhere reachable from this tool or any other — worth a schema-level backstop
+  (no `updated_at`-triggering mechanism, a table with `INSERT`-only grants if the deployment
+  target's permission model supports it) rather than resting entirely on "the code doesn't call
+  update."
 
-Every single analytics call site uses that default. `FRESHNESS_RESOURCES_BODY` is
-`(RESOURCE_BODY_MEASUREMENTS,)`, so `fitness_get_body_weight_trend` reports the `last_synced_at` of the
-**Hevy** body-measurements sync — regardless of where the weight actually came from.
+**What distinguishes a correct amendment from a quiet relaxation, concretely:** a correct
+amendment leaves `test_mcp_never_writes`, `test_the_write_allowlist_holds_exactly_one_module` (now
+"...exactly two..."), and `test_only_one_module_opens_a_writable_session` all *still asserting an
+exact, named, closed set* — the tests keep their shape and grow their membership by exactly one,
+deliberately, in the same commit that adds the tool. A quiet relaxation is any change that makes
+one of these tests structurally *more permissive* — turning `frozenset({"a", "b"})` into a length
+check, or `== {"a", "b"}` into `.issuperset({"a"})`, or deleting one of the three tests because
+"it's basically the same as the other one now." The moment a length or membership assertion
+becomes a pattern-match or a subset check, a third write tool arriving later stops being a red
+test and starts being silently accepted — which is the exact failure v2.0 Pitfall #14 named and
+which this milestone is the first real chance to get wrong by generalizing carelessly.
 
-Once Apple Health (or manual entry) writes body weight, this is a *silent lie in both directions*:
-- Apple Health pushed a weigh-in five minutes ago, Hevy's body sync last ran six hours ago → the response
-  claims six-hour-old data and Claude, obeying the coaching instructions, warns the user about staleness
-  that does not exist.
-- Hevy body sync is healthy but Health Auto Export stopped running two weeks ago → the response claims
-  fresh data and Claude answers confidently from a stale Apple Health picture.
+**Why it happens:** The existing tests were written and correctly reviewed for the "exactly one"
+case; extending them to "exactly two" requires touching hard-coded literals in three places, and
+the fastest-looking fix — loosening the assertion shape instead of listing both names — looks
+identical in a diff review unless the reviewer is specifically looking for it.
 
-This directly breaks DQ-01, the requirement PROJECT.md records as *resolved at the v2.0 boundary* — and it
-breaks it without any error, test failure, or code change in the analytics layer.
+**How to avoid:** Treat the frozenset/exact-membership assertions in `test_mcp_isolation.py` as
+themselves requiring a code-review checklist item: "does every guard still name every allowed
+module explicitly, with no assertion weakened to a superset/pattern check." Write the new tool's
+own docstring to state, the way `program_switch.py`'s already does, exactly which guard it is
+allowlisted in and why, so grepping for the tool's filename surfaces the guard's location.
 
-**Why it happens:**
-`provider` was given a default because there was exactly one provider. The default is invisible at 20+ call
-sites.
+**Warning signs:** A diff touching `test_mcp_isolation.py` that changes an `==` to an `in`, a
+`frozenset` to a `set`, or a length assertion to a range. Any of the three write-guard tests
+deleted rather than extended.
 
-**How to avoid:**
-Remove the default. Make `provider` (or better, a sequence of `(provider, resource)` pairs) **required** so
-adding a provider is a `TypeError` at every call site rather than a silent wrong answer — the same
-discipline `resolve_user_id`/`user_id`-with-no-default already applies for ASVS V4. Define the v2.0
-resource tuples explicitly (`FRESHNESS_RESOURCES_BODY` must name *every* provider that writes
-`body_measurements`) and follow the existing rule from `FRESHNESS_RESOURCES_MUSCLE`'s comment: an answer is
-only as fresh as the **stalest** input that feeds it.
-
-Write a `sync_state` row for the webhook provider on every successful delivery, so `last_synced_at` is real
-rather than perpetually `None` (which `build_freshness` correctly reports as "never synced" — accurate, and
-useless).
-
-**Warning signs:**
-A `FreshnessMetadata` response whose `resources` map has fewer keys than the number of providers writing the
-tables that answer fed from. Claude flagging staleness immediately after a successful webhook delivery.
-
-**Phase to address:** Apple Health webhook ingest phase (write the `sync_state` row) **and** the health-analytics-extension phase (fix the provider parameter). Do not defer — this pitfall is invisible until someone notices Claude giving a wrong freshness warning, which may be never.
+**Phase to address:** The physique write-tool phase, as an explicit success criterion ("the
+write-guard tests grow from one named module to two named modules, with no assertion shape
+loosened") — not left implicit.
 
 ---
 
-### Pitfall 8: `body_measurements.source` is `VARCHAR(16)` and `'health_auto_export'` is 18 characters
+### Pitfall 8: A single-call, autonomous, append-only write tool has no built-in defense against duplicate observations
 
 **What goes wrong:**
-`backend/app/db/models/body.py:50` and migration `0004_hevy_reference_tables.py:87`:
-`sa.Column("source", sa.String(length=16), nullable=False)`. Candidate source names:
+`program_switch.py` is deliberately **two calls** — the first call is inert (it only issues a
+token), and the state-changing call requires that exact server-issued token back, which is what
+makes a model unable to switch a program by accident or on a single confused turn. This
+milestone's write tool is explicitly scoped as **single-call**, because a confirmation-token
+round-trip makes little sense for "record what I observed in this photo" — there is no dangerous
+state transition to gate the way there is for a program switch, and demanding user confirmation
+for logging an observation would be friction with no matching safety benefit.
 
-| Candidate | Length | Fits `VARCHAR(16)`? |
-|---|---|---|
-| `hevy` | 4 | yes (existing) |
-| `manual` | 6 | yes (existing) |
-| `apple_health` | 12 | yes |
-| `healthkit` | 9 | yes |
-| `health_auto_export` | **18** | **no — `StringDataRightTruncation`** |
-| `apple-health-export` | 19 | no |
+But "single-call" reintroduces exactly the failure category the two-call design was built to
+prevent, in a different shape: **nothing stops the model from calling the tool twice for the same
+underlying photo submission.** A user attaches photos and says "rate my physique" — the model
+runs a vision analysis, then calls the write tool. If that response is ambiguous, if the model
+second-guesses itself, if the conversation is retried, or if `safe_tool`'s exception-wrapping
+(v2.0 Pitfall #15's precedent) fires *after* a successful commit, the natural model behavior is to
+call the write tool again "to be safe" — producing two observations for one real event, which
+directly corrupts Pitfall 6's diff analytics (a same-day duplicate is not a real second data
+point, but nothing distinguishes it from one) and directly worsens Pitfall 2's ratchet risk (a
+duplicate anchors the *next* month's rating on an artificially reinforced value).
 
-PostgreSQL raises rather than truncating, so this fails loudly — but it fails at *insert time in
-production*, potentially inside the first real webhook delivery, and the natural "fix" under pressure is to
-shorten the string in one place and miss another, leaving two spellings of the same source in one column.
+**A second, more serious version of the same problem: hallucinated ratings with no photo at all.**
+Because BRETT never receives the image, it has **no way to verify a photo was actually attached**
+to the conversation that produced a call to this tool. A model can call the write tool with a
+plausible-looking rating and note in a conversation where the user never sent a photo — through
+misunderstanding ("rate how I'm doing" interpreted as "rate my physique" with no image present),
+through the model filling in from memory of a much earlier photo, or, in the worst case,
+through the model fabricating an entirely invented physique assessment because it has been asked a
+question it wants to be helpful about. There is no field BRETT can check, no signature, no
+metadata — the backend's entire epistemic access to "was there really a photo" is the model's own
+say-so.
 
-**Why it happens:**
-16 was generous for `'hevy'` and `'manual'`. Nobody widens a column they are not thinking about.
+**How to make "there was really a photo" verifiable when the backend never sees the photo:**
+This is a hard constraint the milestone accepted deliberately (no image storage, no upload
+endpoint), so full verification is out of reach by design — but partial mitigations exist and
+should be treated as required, not optional:
+- **Require the tool call to include an explicit, structured attestation field** — e.g., a
+  required `photo_count: int` (≥1) or `photo_description` free-text field the model must populate
+  from what it actually saw (a rough description of framing/pose), not just the ratings
+  themselves. This does not prove a photo existed, but it raises the cost of hallucination (a
+  model fabricating ratings must also fabricate a plausible photo description, which is a
+  different and harder failure than just picking numbers) and gives a human reviewer something
+  concrete to sanity-check against their own memory of what they actually sent ("I sent a
+  front-relaxed shot, why does this say back-double-biceps").
+- **Update `docs/coaching-instructions.md` with an explicit, unambiguous instruction**: this tool
+  may be called **only** in direct, immediate response to photos the user has just attached in
+  the current turn, never from memory of an earlier conversation, never speculatively, and never
+  when the user's message does not include an image. This is a prompt-level control, not a
+  backend control, and it is exactly as strong as every other prompt-level control in this
+  document — meaningful but not a security boundary, the same honest framing this codebase
+  already gives `ctx.elicit()` in v2.0 Pitfall #13.
+- **Rate-limit or flag rapid repeat calls at the write-tool level**, independent of the
+  general MCP rate limiter: if a second observation for the same user lands within an
+  implausibly short window of the first (minutes, not the same day generally, since a user might
+  legitimately retake photos), treat it as a probable duplicate and require the model to
+  explicitly acknowledge overwriting/adding-to rather than silently accepting it as a distinct
+  data point. "Append-only" should not mean "duplicate-blind" — append-only governs whether old
+  rows are ever destroyed, not whether obviously-redundant new rows are accepted uncritically.
+- **Make the tool's response, on success, explicitly restate what was just recorded** (the exact
+  ratings, the exact note, the timestamp) so the model's own next sentence to the user is a
+  natural cross-check point — a wrong or hallucinated write is much more likely to be caught
+  immediately by the user reading it back than discovered months later in a report.
 
-**How to avoid:**
-Pick `'apple_health'` (12 chars, describes the *data origin* rather than the *transport*, and survives a
-future switch away from the Health Auto Export app). Define it as a module constant next to
-`bodyweight.MANUAL_SOURCE`, never as an inline literal. If you want transport-level detail, that belongs in
-`sync_state.provider` (`VARCHAR(32)`), not in the row discriminator. If a longer name is genuinely wanted,
-widen the column in the same migration that introduces the source — do not discover it at runtime.
+**Why it happens:** Single-call, low-friction write tools are the correct design for a
+genuinely low-stakes, frequent, append-only action — the design intent is sound. The risk is not
+that single-call is the wrong choice; it is that single-call plus autonomous-invocation plus
+image-blind-backend is a combination this codebase has never had to defend before, and none of
+the existing write-tool guards (`safe_tool`, the token gate, `writable_session`) were built with
+"is this call even legitimate" in scope — they all assume the call itself was warranted and only
+guard *how* it is executed.
 
-**Warning signs:**
-`asyncpg.exceptions.StringDataRightTruncationError` in the webhook path. Two source strings in
-`SELECT DISTINCT source FROM body_measurements`.
+**Warning signs:** Two physique observations for the same user with timestamps minutes apart. A
+physique observation with a note that does not plausibly describe a photo (generic, templated
+language). A conversation transcript where the write tool is called with no image visibly attached
+to the triggering user turn.
 
-**Phase to address:** Apple Health webhook ingest phase (schema migration plan).
+**Phase to address:** The physique write-tool phase — the attestation field and the
+coaching-instructions constraint are both success criteria for that phase, not follow-up polish.
 
 ---
 
-### Pitfall 9: `_dedupe_by_day` resolves source conflicts at ROW grain, which deletes columns when extended beyond weight
+### Pitfall 9: `safe_tool`'s exception-swallowing needs the same three-state treatment `program_switch.py` got, for a different reason
 
 **What goes wrong:**
-This is the most subtle data-integrity pitfall in the milestone, and it is *latent today*.
+v2.0 Pitfall #15 established that `safe_tool` wrapping a write tool can turn a *successful* write
+whose response serialization later fails into a payload the model reads as failure — inviting a
+retry that double-applies. `program_switch.py` solved this with a three-state result
+(`applied`/`not_applied`/`unknown`) and a same-transaction token-consumption pattern.
 
-`backend/app/analytics/bodyweight.py:129-155` implements D-14 — "a manual entry is a deliberate correction
-of that day's number, so it wins":
-
-```python
-def _dedupe_by_day(rows):
-    by_day, seen_manual = {}, set()
-    for row in rows:                      # ordered by (measured_on, source)
-        if row.weight_kg is None: continue
-        if row.measured_on in seen_manual: continue
-        by_day[row.measured_on] = row.weight_kg
-        if row.source == MANUAL_SOURCE: seen_manual.add(row.measured_on)
-    return by_day
-```
-
-Two things break when v2.0 extends this beyond weight-only:
-
-**(a) Row-level precedence discards columns.** The natural key is
-`UniqueConstraint("user_id", "source", "measured_on")` — the whole *row*, per source, per day. So a day can
-legitimately hold a Hevy row `(weight=65.2, waist=80.0, chest=101.0)` and a manual row
-`(weight=64.8, waist=NULL, chest=NULL)`. Row-level "manual wins" is correct for weight and **destroys the
-waist and chest readings for that day**. The v2.0 requirement is explicitly "trend/comparison analytics
-across weight *and* circumference/composition columns" — so the moment this function is generalised, the
-correct rule becomes a **per-column coalesce with a stated source precedence**, not a per-row winner.
-Copying `_dedupe_by_day`'s shape for `waist_cm` is the obvious move and it silently deletes data.
-
-**(b) The precedence ladder has exactly two rungs, and third-source precedence is decided by the
-alphabet.** The ordering is `ORDER BY measured_on, source`, and correctness relies on `'hevy' < 'manual'`
-alphabetically with a `seen_manual` guard on top. Introduce `'apple_health'` and it sorts **first**
-(`'apple_health' < 'hevy' < 'manual'`), so a day with both an Apple Health and a Hevy weigh-in resolves to
-**Hevy**, because `h` comes after `a` — a precedence nobody chose, nobody wrote down, and no test asserts.
-For body weight specifically that is arguably the *wrong* answer: a smart-scale reading synced through
-HealthKit is usually more trustworthy than a Hevy manual log.
-
-The v1.0 authors saw half of this coming — the docstring says "Moot today -- zero `'manual'` rows exist --
-and locked now so it cannot silently become a double-count the day manual entry ships." The double-count is
-guarded. The column-shadowing and the third-source ordering are not.
-
-**Why it happens:**
-The function is correct, tested, and reads as finished. Its correctness depends on two facts that are true
-today and false in v2.0: that there is exactly one column, and exactly two sources.
+The physique write tool needs the identical discipline, but the *consequence* of getting it wrong
+is different in kind, not just degree, from the program-switch case: a duplicated program switch
+is a state that can be read back and corrected (call the read tool, see the actual program, switch
+again if needed) — the system has a canonical single source of truth for "what program am I on
+right now." A duplicated physique observation has **no equivalent correction path**, because
+"append-only" means there is no canonical "current state" to read back and reconcile against —
+every row is permanent history, and Pitfall 6 and Pitfall 2 already establish that duplicate or
+falsely-anchored rows actively corrupt the longitudinal analysis, not just the current-moment
+answer. An `unknown`-state response after a possible-but-unconfirmed commit is *more* dangerous
+here than for program switching, because the natural model recovery move — "let me just check
+what was recorded" — requires a read tool over the physique history, which does not exist unless
+this milestone builds one (the milestone's stated scope is a write tool plus diff analytics plus
+report integration; a dedicated `fitness_get_physique_history` read tool is not explicitly listed
+and should be, precisely so `unknown`-state recovery has somewhere to go).
 
 **How to avoid:**
-- Replace the implicit alphabetical ordering with an **explicit precedence map**, e.g.
-  `_SOURCE_PRECEDENCE = MappingProxyType({"manual": 3, "apple_health": 2, "hevy": 1})` — the same
-  `MappingProxyType` discipline `recomposition._LABEL_MATRIX` and `exercise_map.py` already use so a caller
-  cannot retune a health verdict at runtime. Raise on an unknown source rather than defaulting it to zero;
-  a silently-lowest-precedence source is a source that never appears.
-- Resolve **per column**, not per row: for each `(day, metric)` take the value from the highest-precedence
-  source that has a non-NULL value for *that metric*.
-- Add the regression test that does not exist today: one day, three sources, partially overlapping columns,
-  asserting every column resolves independently.
+- Apply the identical three-state `safe_tool` pattern from `program_switch.py`, with the `unknown`
+  path's message explicitly instructing the model to check the current physique history before
+  writing again — which only works if a read tool exists for it to check against.
+- **Add a read tool over physique observation history as part of this milestone**, not as
+  a future nice-to-have, specifically so an `unknown`-state write has a legitimate, low-risk
+  recovery action, mirroring how the program-switch `unknown` path relies on
+  `fitness_get_training_program` already existing.
+- Make the write's commit the last statement in the transaction, exactly as
+  `program_switch.py`'s docstring requires of itself, minimizing the post-commit failure window.
 
-**Warning signs:**
-A waist or chest series that develops holes on exactly the days a manual weight was entered. A body-weight
-value that changes when Apple Health is connected, with no new weigh-in.
+**Warning signs:** A write tool with no corresponding read tool. An `unknown`-state degraded
+response whose reason text does not name a specific recovery action.
 
-**Phase to address:** Historical body measurements phase — but the *fix* must land before or with the Apple Health webhook phase, since Apple Health is the third source that triggers (b).
+**Phase to address:** The physique write-tool phase should ship the read tool alongside the write
+tool for exactly this reason, even though the milestone's headline feature is the write path.
 
 ---
 
-### Pitfall 10: The repo already documents, with live-data evidence, why max-weight was rejected as the progression signal
+### Pitfall 10: Free-text physique notes are the one place in this system where stored data is about the user's body, in words, forever
 
 **What goes wrong:**
-`backend/app/analytics/progression.py:7-10`, verbatim:
+BRETT's stated privacy design for this milestone is strong and correctly scoped — no image ever
+reaches the backend, which removes the single largest privacy liability a physique-tracking
+feature could have. But this correctly leaves a **residual** surface that the milestone's own
+framing ("removes most of the data-security surface") could be read as dismissing rather than
+managing: the bounded free-text notes ("leanness, conditioning and symmetry") are themselves a
+description of the user's body, stored in plain structured columns, and — per this codebase's own
+existing logging design — **fully subject to the same flows every other piece of data goes
+through**: they can appear in structlog output (tool-call argument/result logging), in MCP tool
+responses (the exact channel physique data is meant to travel through), in the monthly report
+narrative (verbatim, per this milestone's own design), and in Cloud Run's log sink, all with the
+service deployed `--allow-unauthenticated` for the HTTP surface generally.
 
-> **The day's headline set is the one with the highest ESTIMATED 1RM, not the heaviest.** Epley maps 60 kg x
-> 10 to 80.000 and 70 kg x 5 to 81.667: a lighter set at more reps can imply more strength. Picking the
-> heaviest weight instead returns a number that is real, in the right units, and wrong — and it silently
-> flattens a lifter who progressed by adding reps rather than load.
+`app/logging.py`'s two structural redaction layers (`censor_keys`'s deny-list `DENY_KEYS`, and
+`make_value_scrubber`'s known-secret-value scrub) are both built for **credential-shaped**
+secrets — API keys, tokens, DSNs, passwords. Neither layer has any concept of "this string
+describes something sensitive about the user's body" — that is not a key-name pattern
+(`censor_keys` matches on key names like `api_key`, `password`) nor a known-fixed-value pattern
+(`make_value_scrubber` matches specific secret string values known at config time). A physique
+note is free-form text whose sensitivity is about its *content*, which neither existing layer is
+designed to detect, and which — correctly — should probably not be redacted from logs the way a
+credential is, since a completely redacted log line is useless for debugging a real bug in this
+feature. This is a real, load-bearing tension, not a bug to "just fix" by extending the deny-list.
 
-The v2.0 decision to make max-weight-lifted primary is a *user-preference* decision ("the user trains and
-thinks in terms of the heaviest weight moved"), and it is legitimate. But it walks directly into a failure
-mode the v1.0 author identified and wrote down. If the switch is implemented as "change the ranking key in
-`best_set_per_day`", then on this user's actual data — where `progression.py:24-27` records that every
-high-frequency template spans reps 5–12 with a standard deviation of 1.9–2.4 — a rep-progression block
-(same load, more reps, week over week) reads as a **flat line**, and `classify_trend` returns `stable` for
-training that is objectively improving.
-
-**Why it happens:**
-The requirement says "max-weight-lifted becomes the primary signal". The smallest change that satisfies that
-sentence is a one-line ranking swap. The consequence is three modules away.
+**Why it happens:** The existing redaction pipeline was built entirely against the threat model
+of "a credential must never leak," which is the correct threat model for API keys and tokens and
+was correctly and thoroughly solved for it (three ordering-constrained layers, tested). Physique
+notes introduce a genuinely different threat model — not "this must never appear anywhere" but
+"this should not appear more places than necessary, and should never appear in a place with wider
+access than the user's own MCP conversation" — and the existing pipeline was never asked to solve
+that problem, so nothing in it will notice the new data category needs a different policy.
 
 **How to avoid:**
-Treat this as a **two-signal design**, not a substitution. Concretely:
-- Keep `best_set_per_day`'s existing e1RM-ranked selection *and* add a max-weight-ranked selection, both
-  derived from the same `qualifying_set_rows` fold (the module's own "one aggregate, folded once" rule).
-  `SessionBest` already carries `best_weight_kg` beside `best_e1rm_kg` — the data is there.
-- Make the *headline* verdict max-weight, and carry the e1RM verdict as a required sibling field, the same
-  way `RecompositionResult` carries `progression_signal` beside `status` specifically so a disagreement is
-  visible rather than resolved.
-- Surface the disagreement explicitly: "max weight flat, estimated 1RM improving" is the sentence that
-  detects rep progression, and it is only sayable if both numbers are in the payload.
+- **Do not attempt to extend `DENY_KEYS`/`make_value_scrubber` to redact physique note content** —
+  that would make the feature's own core output invisible in its own logs, which is the wrong
+  tradeoff for a single-user personal project's debuggability.
+- **Instead, scope what actually logs.** Audit the write tool and the report composer for whether
+  tool-call argument/result logging (if any exists at `structlog` call sites in `app/mcp/tools/`)
+  includes full free-text note content at INFO level, versus logging only metadata (user id,
+  timestamp, muscle group, whether a note was present) at INFO and reserving full content for
+  DEBUG or omitting it from logs entirely. This is a scoping decision, not a redaction mechanism —
+  the right target is "logs contain enough to debug a stuck request, not a second copy of the
+  user's full physique history."
+- **Confirm Cloud Run's log retention/access model** matches the sensitivity of what is now
+  flowing through it — this was true before this milestone too (workout data, nutrition data are
+  already personal), but physique notes are qualitatively the most personal free text this system
+  will have ever produced, and it's worth an explicit check that log access is not broader than
+  the same operator access every other log line already has, rather than assuming so.
+- **The bounded length on free-text notes (already a stated design constraint) is itself a
+  mitigation** — bound it deliberately short enough that it stays a qualitative descriptor
+  ("visible ab separation, delts noticeably fuller") and cannot become an essay-length personal
+  reflection, which both serves Pitfall 4's numeric/tone constraints and limits how much sensitive
+  free text exists per row.
 
-The precedent is already in the codebase: `progression.py:29-35` argues at length that PROG-02 and PROG-03
-"will disagree on real data, and both will be right", and solves it by making each carry its window as a
-field. Do the same for the two strength signals.
+**Warning signs:** A structlog call site logging a full tool-call payload at INFO for the physique
+write tool, visible the same way any other tool's args currently are. No documented answer to
+"who can read Cloud Run logs for this service" existing anywhere in the deployment docs.
 
-**Warning signs:**
-A trend verdict of `stable` for an exercise whose `total_reps` is climbing across weeks. `weeks_with_data`
-jumping from a gated subset to 100% of training weeks (see Pitfall 11). A user saying "but I *am* getting
-stronger" about an exercise the tool calls flat.
-
-**Phase to address:** Strength-metric-shift phase, as an explicit design decision recorded in the phase context — with `progression.py`'s existing docstring quoted and answered, not deleted.
+**Phase to address:** The physique write-tool phase, as a logging-scope review alongside the tool
+implementation — not a separate security pass after the fact.
 
 ---
 
-### Pitfall 11: Max weight is ungated, so removing e1RM's gates destroys the "we could not tell" honesty path
+### Pitfall 11: A system that rates a person's body every month and reports regressions is a wellbeing hazard, not just a feature
 
 **What goes wrong:**
-`estimate_1rm` (`backend/app/analytics/estimates.py:64-89`) applies two gates and returns a
-`NoEstimateReason` when either fails: modality must be exactly `weight_reps` (`E1RM_EXERCISE_TYPE`), reps
-must be 1–`MAX_TRUSTED_REPS` (12). The live-data consequence is recorded in the module: **4,802 of 7,719
-live hard sets pass both gates**, and `progression.py:14-16` notes **376 of 2,239 exercise-sessions (16.8%)
-have no e1RM-qualifying set at all**.
+This is a real engineering constraint with design consequences, not a caveat to append. A monthly
+"regressed" verdict on a muscle group — especially one produced by the noisy, potentially-biased
+process Pitfalls 1 and 2 describe — can land as a demoralizing, decontextualized judgment on a
+person's body from what reads as an authoritative system, at a cadence (monthly, indefinitely)
+that most human coaching relationships would never sustain without a great deal of context and
+rapport the tool call itself cannot supply. The specific failure modes worth designing against:
 
-Max weight has no such gates by design — `records.py` says so explicitly: *"D-02's 12-rep cap gates the
-ESTIMATE, never the observation. The rep PR and the max-weight PR are deliberately un-gated."*
+- **A single noisy "regressed" rating (Pitfall 1) reported with the same flat confidence as
+  everything else in the report** can read as a confirmed fact about the user's body when it may
+  be nothing more than a lighting difference between two photos.
+- **A report that leads with or foregrounds a regression**, the way `docs/coaching-instructions.md`
+  currently instructs Claude to "lead with the answer in one or two sentences," could mean the
+  answer a user gets, unprompted, to "how was this month" opens with a claim their body got worse
+  — which is a materially different experience from opening with "your bench went up 5kg," even
+  though both are structurally "the answer."
+- **This is the one domain in the whole system where "decision support, never a diagnosis" (the
+  recomposition disclaimer's own framing) is not enough**, because a recomposition verdict is
+  about training/eating behavior a user can act on immediately, while a physique rating is about
+  a body a user cannot change on any comparable timescale — the same caveat sentence does less
+  work here.
+- **Comparison-shopping against an idealized standard is a risk the 19-value taxonomy itself must
+  guard against.** If the taxonomy or its labels imply an aesthetic ideal (e.g., anchored on
+  competitive bodybuilding development) rather than the user's own trajectory, every monthly
+  rating becomes a comparison against a standard the user never chose to be held to, which is a
+  distinct harm from comparing this month to last month.
 
-So switching the primary signal to max weight makes **~100% of sessions qualify**. Downstream, that is not
-"more data", it is the loss of a signal:
-- `weeks_with_data` on `ExerciseTrend` jumps, so `MIN_TREND_WEEKS = 4` stops filtering anything and
-  `TrendVerdict.UNCLEAR` all but disappears.
-- `aggregate_progression` (`recomposition.py:107-150`) deliberately **excludes `unclear` from the
-  denominator**. If `unclear` vanishes, the denominator inflates with low-information exercises and
-  `RECOMP_PROGRESSION_NET_BAND = 0.25` is being applied to a different population than it was calibrated on.
-- `scan_plateau`'s D-07a skip (`best_e1rm_kg is None` → skip, neither extends nor breaks the streak) becomes
-  a dead branch. Deload weeks and high-rep accessory days now *extend* plateau streaks — reintroducing
-  exactly the false positive the skip exists to prevent, in the opposite direction.
-- `ProgressionPoint.no_estimate_reason` is a field in the MCP response contract that stops being populated,
-  so Claude loses the "here is *why* there is no number" explanation without any schema change.
+**Design choices that mitigate this, several already implied by the milestone's own scoping and
+worth making explicit requirements rather than incidental outcomes:**
+- **Monthly-only, never weekly** (already decided, PROJECT.md) — this is itself the primary
+  mitigation against an oppressive cadence, and should not be revisited without re-examining this
+  pitfall specifically.
+- **Relative-to-self framing, never relative-to-ideal** — the taxonomy and the coaching
+  instructions should frame every rating and every diff strictly against the user's own prior
+  observation, never against a population norm or an implied aesthetic target. This is a natural
+  extension of the milestone's existing "rate relative to last observation, not absolutely" design
+  decision, but it needs to be stated as a requirement for the *labels and prompt*, not just the
+  *mechanism*.
+- **Never let a physique regression stand alone without its coherence check.** Pitfall 2's
+  cross-reference against training volume is also a wellbeing mitigation, not just an accuracy
+  one: "regressed, and your training volume for that muscle also dropped 40% this month" is a
+  legibly explicable, actionable fact; "regressed" alone, unexplained, is just a verdict.
+  `docs/coaching-instructions.md` should instruct Claude to never report a physique regression
+  without checking and surfacing the corresponding volume/training context in the same answer.
+- **Frame uncertainty honestly and specifically, following this codebase's existing convention** —
+  the coverage/freshness envelope pattern already trains Claude to say "we don't have enough data
+  to say" rather than force a confident verdict; the physique disclaimer (Pitfall 3) should
+  explicitly license the same move: a single ambiguous or borderline photo-based observation is
+  allowed to be reported as "no clear change," not forced into improved/regressed.
+- **Give the user, not just the system, control over whether this section runs at all.** Given
+  this is a single-user personal project and not a product with an opt-out UX to design, the
+  practical version of this control is: the feature is invoked, not automatic — physique
+  observations only enter the system when the user chooses to attach photos and ask for a rating,
+  never on a schedule the way weekly/monthly reports otherwise auto-populate from continuously
+  synced data. This should be an explicit, stated design constraint (not merely a fact that falls
+  out of "photos are attached in conversation"): the monthly report's physique section should
+  render an honest "no observation this period" rather than prompting or nagging for one.
 
-**Why it happens:**
-Ungated feels strictly better — more coverage, fewer nulls. The gates were never about coverage; they were
-about not putting a number on a set that cannot support one.
+**Why it happens:** Every other analytics module in this system reports on training, nutrition,
+and body-composition numbers that are behaviorally and clinically well-trodden ground for how to
+present without inducing anxiety (rate-of-change framing, decision-support disclaimers, the
+"too fast"/"stable"/"on target" ladders already tuned for exactly this in `recomposition.py`).
+Physique appearance rating has no equivalent design tradition inside this codebase to draw on, so
+the instinct is to treat it as "one more analytics section" and apply the same report-composition
+pattern without asking whether the same presentation norms actually transfer.
 
-**How to avoid:**
-Decide, per downstream consumer, what "insufficient" means under the new signal, and say it in the phase
-context before writing code:
-- Keep a **modality gate** for max weight. A bodyweight or duration-only exercise has no meaningful "heaviest
-  weight" — `progression.py:93` already documents 48 live non-warm-up sets with a genuine `Decimal("0.000")`
-  weight, which the `_NO_WEIGHT_RANK = Decimal(-1)` sentinel exists to rank below real weights. That
-  sentinel logic must survive the switch or a bodyweight exercise will report a max weight of 0 kg as a real
-  observation.
-- Keep `no_estimate_reason` populated (rename it if the semantics widen), so the honesty channel stays open.
-- Re-derive `MIN_TREND_WEEKS` and the plateau skip semantics against the new signal rather than inheriting
-  numbers tuned for the gated one.
+**How to avoid:** Treat this pitfall's mitigations as testable, phase-owned requirements — "the
+coaching instructions never report a physique regression without volume context in the same
+answer" is exactly as verifiable by the existing drift-guard-style test pattern
+(`test_coaching_doc.py`) as any other instruction in that document already is.
 
-**Warning signs:**
-`UNCLEAR` verdict count dropping to near zero. Plateau durations getting *longer* across the board.
-`no_estimate_reason` absent from every response.
+**Warning signs:** A monthly report narrative that states a regression with no accompanying
+volume/training context anywhere in the same response. Physique ratings auto-requested or implied
+as expected on a cadence rather than purely user-initiated.
 
-**Phase to address:** Strength-metric-shift phase.
+**Phase to address:** The report-integration phase for the narrative-framing rules; the
+coaching-instructions update (likely the same phase, given this project's precedent of updating
+`docs/coaching-instructions.md` in the same phase new tools ship) for the "always pair a
+regression with context" instruction.
 
 ---
 
-### Pitfall 12: Three tuned constants are calibrated against e1RM's continuous distribution, and max weight is a step function
+### Pitfall 12: The cross-reference feature can manufacture a causal story two independently-noisy signals do not support
 
 **What goes wrong:**
-The switch changes the *statistical character* of the input, and every threshold downstream was tuned to the
-old character on live data. In detail:
-
-| Constant | Value | Where | Calibrated how |
-|---|---|---|---|
-| `TREND_STABLE_BAND_PERCENT_PER_WEEK` | `0.5` %/wk | `progression.py:328` | **Derived**: D-07's 2% band ÷ D-05's 4 weeks. Validated on live data: 9 improving / 9 stable / 10 declining across 28 exercises |
-| `PLATEAU_IMPROVEMENT_TOLERANCE` | `0.02` (2%) | `progression.py:522` | Chosen to absorb Epley rep-scheme noise |
-| `RECOMP_PROGRESSION_NET_BAND` | `0.25` | `recomposition.py:93` | Applied to the 9/9/10 live split |
-
-Two structural problems:
-
-**(a) D-18's derivation collapses.** `progression.py:314-328` is explicit that 0.5%/week is *not an
-independent number* — it is 2%/4 weeks, and sharing one underlying figure is what makes PROG-02 and PROG-03
-unable to contradict each other **by construction**. If the plateau tolerance and the trend band are
-re-tuned independently for max weight, that structural guarantee is gone, and the codebase will happily
-report an exercise as `improving` at a rate the plateau scanner refuses to call an improvement.
-
-**(b) Max weight moves in discrete increments, not continuously.** Machine stacks and plate loading move in
-2.5–5 kg steps. On a 100 kg lift a single 5 kg increment is a **5% jump** — 2.5× the plateau tolerance — so
-*every* load increase breaks the streak. Between increases, every session is *exactly* equal, so the
-tolerance band does nothing at all. The 2% band, which was a noise filter for a continuous quantity, becomes
-a no-op applied to a step function. Meanwhile OLS (`_weekly_slope`) over a staircase with long flats and
-occasional jumps produces a slope dominated by *when* the jump landed in the window — move the window one
-week and the verdict flips.
-
-**Why it happens:**
-The constants have names that read like policy ("2% tolerance") rather than like calibration artefacts. Only
-the comments record that they were fitted to a specific distribution on specific data.
-
-**How to avoid:**
-- Re-run the calibration the same way v1.0 did — against the live account, reporting the improving /
-  stable / declining split — and record the new numbers and the split in the phase context. A threshold
-  carried over without re-validation is a number that was right about a different quantity.
-- Preserve the *derivation relationship*: whatever the new band is, derive the trend band from the plateau
-  tolerance and the minimum window, and say so in a comment, so D-18's structural guarantee survives.
-- Consider whether "plateau" even means the same thing under max weight. Under e1RM it meant "your ceiling
-  hasn't moved". Under max weight it means "you haven't added load" — which is a longer, coarser, and
-  arguably more useful signal, but it is a **different definition** and `PlateauResult`'s
-  `threshold_percent` / `min_sessions` / `min_elapsed_days` echo fields must describe the new one honestly.
-
-**Warning signs:**
-Trend verdicts that flip when `weeks` changes by one. All exercises classifying as `improving` or
-`declining` with almost nothing `stable` (band too tight for a step function), or the reverse.
-`recomposition_status` changing for the whole account on the deploy that ships the switch.
-
-**Phase to address:** Strength-metric-shift phase. The phase's success criterion should be a *before/after* comparison table on live data, not just green tests — green tests will stay green, because the fixtures move with the code.
-
----
-
-### Pitfall 13: `confirm=true` as a plain tool parameter is not a confirmation gate
-
-**What goes wrong:**
-This is the highest-severity pitfall in the milestone, because it is the one that lets a language model
-mutate state without the user's knowledge, in a system whose entire security posture to date has been
-"nothing can write".
-
-PROJECT.md's decision describes a "two-call design: first call warns, second call with `confirm=true`
-switches". If `confirm` is exposed as a `bool` in the tool's `inputSchema`, **the model can set it to `true`
-on the very first call.** There is no protocol-level rule that a model must make the warning call first;
-`confirm` is just another argument it is free to populate, and a model that has been told "switch me to a
-cut" will helpfully do exactly that in one shot. The warning step is advisory, not a gate.
-
-Compounding it: `mcp 2.0.0`'s `Context.elicit()` exists and looks like the correct primitive — but the
-SDK's own docstring (read from the installed package) says:
-
-> "If the client is an agent, it might decide how to handle the elicitation — **either by asking the user or
-> automatically generating a response.**"
-
-So elicitation is *also* not a guaranteed human gate. And `Context.client_capabilities` documents that it is
-`None` "when the client declared none (e.g. an **anonymous stateless request** without the reserved `_meta`
-keys)" — BRETT builds its app with `stateless_http=True` (`server.py:221`), so a capability check will
-frequently return `None` and a tool that depends on elicitation will fail on the one client the user
-actually uses.
-
-On the client side: Claude Desktop's tool-approval dialog has an "Always approve" option which community
-sources report **cannot be undone** once clicked. Client-side approval is therefore a control the user can
-permanently disable by accident.
-
-**Why it happens:**
-"Two-call confirm" sounds like a protocol. Implemented as a boolean parameter, it is a naming convention.
-
-**How to avoid:**
-Make the second call **impossible to construct without the first**:
-- The warn call returns a **server-generated, single-use, short-TTL confirmation token** (e.g.
-  `secrets.token_urlsafe(16)`), persisted server-side with the *exact target state* it authorises
-  (`from_program`, `to_program`, `issued_at`, `expires_at`, `consumed_at`).
-- The switch call takes `confirmation_token: str`, not `confirm: bool`. The model cannot guess it; it can
-  only echo back what the server just gave it, which means the warning text was necessarily rendered into
-  the conversation first.
-- Bind the token to the target: if the token was issued for "switch to cut" and the second call asks for
-  "switch to lean bulk", reject. Otherwise the model can reuse a token to perform a *different* switch than
-  the one the user saw described.
-- Consume atomically (`UPDATE ... WHERE consumed_at IS NULL RETURNING ...`) so a retried second call is a
-  no-op rather than a double-switch.
-- Expire in minutes, not hours. A stale token found in a scrolled-back conversation must not still work.
-
-Do **not** rely on `ctx.elicit()` as the control. It is acceptable as an *additional* prompt where the
-client supports it; it is not the gate.
-
-**Warning signs:**
-A tool schema containing a boolean named `confirm`, `force`, `yes`, or `acknowledged`. A test that switches
-a program in a single tool call. Any code path where the first call has a side effect.
-
-**Phase to address:** Training-programs / write-tool phase. This is the phase's defining success criterion: "a single tool call cannot change the active program", proven by a test that tries.
-
----
-
-### Pitfall 14: Adding one write tool disarms the guards that protect the other thirteen
-
-**What goes wrong:**
-BRETT's read-only guarantee is enforced by four mechanisms, and the *smallest* way to add a write tool
-breaks or bypasses each of them:
-
-| Mechanism | Where | What the write tool does to it |
-|---|---|---|
-| PostgreSQL `READ ONLY` transaction | `_common.read_only_session` (`_common.py:123-154`) | Needs a writable session. Temptation: relax `read_only_session` itself, which silently un-protects all 13 read tools |
-| Static ban on writes in `app/mcp/` | `test_mcp_isolation.py:129` `test_mcp_never_writes` — bans `session.commit\|flush\|add\|add_all` and `from sqlalchemy import insert\|update\|delete` across every module under `app/mcp/` | **Will fail on the commit that adds the tool.** Temptation: delete the test |
-| `READ_ONLY` annotations applied by loop | `server.py:215-216` — `for _fn, _description in _TOOLS: mcp.add_tool(..., annotations=READ_ONLY)` | Adding the write tool to `_TOOLS` gives it `read_only_hint=True, destructive_hint=False`. `test_every_tool_is_annotated_read_only` **passes**, while the tool writes. The annotation is now an active lie to the client |
-| No required scopes | `server.py:116` `required_scopes=None`, with the in-code note *"Revisit when the first write tool ships."* | Left as-is, the write tool is authorised by exactly the same token as a read |
-
-**Why it happens:**
-Each guard fails in a way whose cheapest fix is to weaken it globally. `test_mcp_never_writes` in particular
-produces a red test with a message telling you the file must not write — and the two-second fix is to remove
-the file from the walk or the assertion from the test.
-
-**How to avoid:**
-- **Narrow, never remove.** `test_mcp_never_writes` should take an explicit single-module allowlist (the
-  program-switch tool module, by exact filename) and assert that the allowlist has **exactly one entry** —
-  so adding a second write tool is also a red test. This mirrors how `test_mcp_uses_no_raw_sql_text` already
-  exempts `ping.py` "by name".
-- Add a **second** static assertion: that `read_only_session` is *not* referenced in the write module and
-  that no other module references the writable-session helper. Two guards pointing at each other.
-- Give the write tool its **own** `ToolAnnotations` — `read_only_hint=False`, `destructive_hint=True`,
-  `idempotent_hint=False` — registered outside the `_TOOLS` loop, and update
-  `test_every_tool_is_annotated_read_only` to assert *the exact partition*: 13 read-only tools by name, 1
-  write tool by name. A test that says "all tools are read-only" must become a test that says "these 13 are
-  read-only and this 1 is not", or it silently stops meaning anything.
-- Revisit `required_scopes` as the in-code note instructs. Note the tradeoff the same comment records:
-  adding a required scope "would mean re-consenting the Phase 2 connector that already works." A reasonable
-  middle path is a scope required *only* by the write tool, checked in the tool body against
-  `AccessToken.scopes` — but be aware `AuthKitJWTVerifier` populates scopes from the WorkOS `scope` claim,
-  so this needs a corresponding AuthKit configuration change and an end-to-end re-verification, not just
-  server code.
-- The writable session must **not** live in `app/analytics/` — `test_analytics_isolation.py` bans writes
-  there too, and for good reason. Put it in `app/db/repositories/` (which owns writes today) or a new
-  `app/services/programs.py`, and have the MCP tool call it.
-
-**Warning signs:**
-A diff that deletes or weakens an assertion in `test_mcp_isolation.py`. A `git log` entry touching
-`_common.read_only_session`. The write tool appearing inside the `_TOOLS` tuple.
-
-**Phase to address:** Training-programs / write-tool phase.
-
----
-
-### Pitfall 15: `safe_tool` swallows write failures and reports them as "degraded", inviting a retry that double-applies
-
-**What goes wrong:**
-`_common.safe_tool` (`_common.py:254-290`) wraps every tool: any exception is logged and replaced with a
-caller-supplied `degraded()` payload. It exists for an excellent, verified reason — `mcp 2.0.0` returns
-`str(exception)` to the model verbatim, and an asyncpg connection error carries the full DSN.
-
-Applied unchanged to a write tool, it produces two distinct bugs:
-1. **A failed write is indistinguishable from a failed read.** Claude receives a generic
-   `data_available: false` payload and, following the coaching instructions' "call a tool before making any
-   claim" discipline, may simply try again — re-consuming or re-requesting a confirmation and potentially
-   applying the switch twice.
-2. **Worse: an exception raised *after* `commit()`** — during response serialisation, or in a follow-up read
-   — returns a *failure* payload for a write that **succeeded**. The user is told the program did not
-   change; it did. If they then retry, the second switch is applied to a state they do not know about.
-
-**Why it happens:**
-`safe_tool` is applied uniformly by convention (`test_every_tool_module_guards_its_public_tools` in
-`test_mcp_isolation.py:212` asserts it), so the write tool gets it automatically.
-
-**How to avoid:**
-Keep `safe_tool` — the DSN leak is real — but give the write tool a **three-state** result rather than a
-boolean: `applied` / `not_applied` / `unknown`. Return `unknown` from the exception path and have the
-degraded payload instruct the model to **read the current program back** rather than retry. Structure the
-tool so that commit is the **last** statement and everything after it is pure serialisation of already-held
-values, minimising the post-commit failure window. Consume the confirmation token **in the same transaction
-as the switch**, so "token consumed" and "switch applied" cannot disagree.
-
-**Warning signs:**
-A write tool whose `degraded()` factory returns the same shape as a read tool's. A conversation transcript
-where Claude calls the switch tool twice in a row.
-
-**Phase to address:** Training-programs / write-tool phase.
-
----
-
-### Pitfall 16: Storing the active program as a mutable column makes every historical answer retroactively wrong
-
-**What goes wrong:**
-`recomposition.py:68-97` hardcodes five lean-bulk constants with the comment: *"The user's stated goal is a
-LEAN BULK. There is no `users.goal` column and none is being added; the goal shapes these threshold VALUES
-and nothing structural."* v2.0 replaces those with program data.
-
-The obvious model is a `users.active_program` column (or a `programs` table with an `is_active` flag). But
-`get_recomposition_status` classifies against a **12-week lookback** (`RECOMP_LOOKBACK_WEEKS = 12`) and a
-4-week smoothed weight rate. If the program is a single mutable value, then switching from Lean Bulk to Cut
-today re-classifies the **previous twelve weeks** under cut thresholds. Asked "how did my bulk go?", Claude
-answers using cut thresholds, and the answer it gave last week is now unreproducible. In a system whose
-entire value proposition is *"answer from actual data instead of guessing"*, a retroactively-mutating
-threshold is a silent correctness failure — and one the user is uniquely positioned to notice and lose trust
-over.
-
-**Why it happens:**
-"Active program" reads as current state, not as history. The temporal dimension only becomes visible when
-you notice the classifier looks 12 weeks back.
-
-**How to avoid:**
-Model it as **effective-dated history**: `program_periods(user_id, program, started_on, ended_on)`, with the
-switch tool closing the current period and opening a new one. Then:
-- `get_recomposition_status` resolves thresholds for the period(s) its window covers, and a window spanning
-  a switch is a *reportable fact* — return the program alongside the verdict, exactly as `PlateauResult`
-  returns its window and threshold alongside its verdict, for exactly the same reason
-  (`progression.py:29-35`: "a verdict without its window is a contradiction waiting to be narrated").
-- A window straddling a program change should say so rather than silently picking one.
-
-This also gives the write tool something honest to report: "switched from Lean Bulk (started 2026-06-14, 11
-weeks) to Cut" — which is a far better confirmation prompt than "switch program?".
-
-**Warning signs:**
-A `programs` table with a boolean `is_active` and no date columns. A recomposition response that does not
-name the program it classified against. Two runs of the same question a day apart giving different verdicts
-with no new data.
-
-**Phase to address:** Training-programs / write-tool phase, in the schema plan — this is a modelling decision, and it is nearly free now and expensive after there is history.
-
----
-
-### Pitfall 17: Building the report feature around a client capability that is documented-broken and closed "not planned"
-
-**What goes wrong:**
-PROJECT.md's decision: *"Weekly/monthly reports = on-demand MCP tools driven by Claude's own scheduled-tasks
-feature, not a BRETT-side scheduler."* The architectural half of that (no server-side scheduler, no push
-channel, reports as ordinary MCP tools) is sound and low-risk. The **delivery** half depends on a client
-feature with a documented failure mode:
-
-- **anthropics/claude-code#43397** (opened 2026-04-04, **closed as not planned**): *"Cloud scheduled tasks
-  cannot access MCP connectors — tools not loaded into session."* The agent runs `ToolSearch` per connector
-  and gets "No matching deferred tools found" for all of them. **100% reproducible.** Sending any user
-  message into the same session immediately makes the connectors available — i.e. the failure is specific to
-  autonomous start, which is the entire point of scheduling. Listed as a regression from before 2026-03-31.
-- **anthropics/claude-code#45306** (opened 2026-04-08, **closed as not planned**): scheduled tasks fail
-  *silently* — the agent only has WebFetch, WebSearch, RemoteTrigger and filesystem tools, and reports "the
-  required integrations are not available in this environment." Affects both API-created and UI-created
-  triggers.
-- Related issues span Claude Desktop too (#35899, #36327), plus #40835 ("creating new tasks disables
-  connectors in existing tasks").
-- Separately, community reports describe OAuth token expiry crashing scheduled tasks — directly relevant
-  here, because `AuthKitJWTVerifier` **fails closed** by design (`auth.py:69-73`) and a non-interactive
-  session has no way to complete a refresh.
-
-The risk is not "the reports are bad". It is that the milestone's success criterion — "reports Claude can
-deliver on a schedule" — may be **unachievable for reasons entirely outside this repo**, discovered only at
-the end of the phase.
-
-**Why it happens:**
-The feature is real, documented and demoed. Its interaction with third-party connectors is where it breaks,
-and that is not visible from the feature's own documentation.
-
-**How to avoid:**
-- **Spike it first, in a day, before building the report tools.** Schedule a task that calls the *existing*
-  `fitness_ping` and check it actually runs autonomously. This is the cheapest possible de-risk and it uses
-  a tool that already ships.
-- **Decouple the value from the delivery.** Design the report tools so they are fully valuable **on demand**
-  ("give me my weekly report"). Then scheduling is an enhancement, and a scheduled-task failure is a missed
-  convenience rather than a failed phase.
-- If the spike fails, the documented community workaround for #43397 is to structure the scheduled prompt to
-  **delegate to a sub-agent**, which initialises MCP tools correctly. Capture that in
-  `docs/coaching-instructions.md` or a setup doc rather than in server code.
-- Record explicitly in the phase context that this dependency is unverified and outside the repo's control.
-
-**Warning signs:**
-A scheduled run that completes with no output and no error. A run whose transcript contains "I don't have a
-BRETT tool available in this environment". A 401 in Cloud Run logs at the scheduled time.
-
-**Phase to address:** Report-tools phase, as a **spike plan before** the implementation plans. Consider sequencing this phase early enough that a negative result can reshape the milestone rather than sink a phase.
-
----
-
-### Pitfall 18: The report tool fans out across every analytics module and blows both the context budget and the cold-start budget
-
-**What goes wrong:**
-A weekly/monthly report composing "volume, strength, measurements, trends, and recommendations into one
-structured payload" is `fitness_get_training_summary` again, but wider. That tool's docstring
-(`mcp/tools/schemas.py`, `TrainingSummaryResponse`) records the measurement that made it possible:
-
-> "composing the four analytics results verbatim measures ~24 KB structured / ~57 KB wire at a 4-week
-> window; this shape is ~3,963 / ~9,502."
-
-That is a **6× reduction achieved by deliberate field selection**, and it is why the summary tool
-*excludes* personal records, plateaus, the per-exercise frequency list and the per-week × per-muscle grid. A
-monthly report is a wider window (higher `weeks`) over *more* modules — the naive composition is
-comfortably worse than the 24 KB shape that was already rejected.
-
-Simultaneously, on the runtime side: `get_recomposition_status` alone already calls
-`get_body_weight_trend` → `get_exercise_trends` → `get_weekly_volume`, each with its own
-`build_coverage`/`build_freshness` round trips. A report that adds records, plateaus, per-muscle rollups and
-multi-column measurement trends multiplies the query count, on a service with `MIN_INSTANCES=0` (cold start)
-and `MAX_INSTANCES=2` (SQLAlchemy pool ≤10 connections per instance).
-
-**Why it happens:**
-"One structured payload" reads as a composition problem. It is a budget problem, and the budget was already
-found to be binding at a narrower scope.
-
-**How to avoid:**
-- Set the byte budget **before** writing the tool, in the phase context, and measure it the way Phase 6
-  measured the summary (structured and wire, at the widest legal window). Add it to
-  `test_mcp_tool_budget.py`, which already exists for this purpose.
-- Add a `MAX_REPORT_WEEKS` cap next to `MAX_SUMMARY_WEEKS = 12` in `_common.py` — the monthly report's window
-  is the multiplier on everything.
-- Reuse the existing composition (`get_training_summary`'s selected fields) as the report's spine and add
-  *narrow* extras, rather than composing full analytics results and trimming afterwards.
-- Use `truncate()` (`_common.py:293`) for every list, and carry both returned flags — an unlabelled cap in a
-  report is exactly the "wrong answer with no signal that anything was withheld" that function's docstring
-  warns about, and a report is the response most likely to be read as complete.
-
-**Warning signs:**
-A report tool that calls three or more `app.analytics` entry points without a measured payload size. Tool
-latency creeping toward the client's tool-call timeout on a cold instance.
-
-**Phase to address:** Report-tools phase.
-
----
-
-### Pitfall 19: The coaching document has ~1,800 characters of headroom, and v2.0 wants to add four topics to it
-
-**What goes wrong:**
-`backend/tests/test_coaching_doc.py` enforces `_PASTE_CEILING_CHARS = 9_000` — the practical ceiling for a
-Claude Project's custom-instructions field, past which *"it silently did not all fit"* becomes the likely
-failure, and *"that failure is invisible from this repo."* `docs/coaching-instructions.md` is currently
-**7,216 characters**. Headroom: **1,784 characters.**
-
-v2.0 needs that document to gain: Apple Health data sources and their freshness semantics, the max-weight vs
-e1RM distinction (and how to narrate a disagreement between them), the new report tools, the program-switch
-confirmation protocol (what to say on the warn call, what not to do), the new body-measurement tools, and —
-simultaneously — the requirement to become **more concise**.
-
-The same test also enforces a **bidirectional drift guard**: every `fitness_*` token in the document must
-exist in the live MCP registry, and every registered tool (except the `fitness_ping` canary) must appear in
-the document. So new tools *must* be documented — it is not optional — while the budget shrinks.
-
-**Why it happens:**
-The ceiling is enforced by a test nobody thinks about until it goes red, at which point the cheapest fix is
-to raise the constant — which converts a loud failure into the silent truncation the constant exists to
-prevent.
-
-**How to avoid:**
-Treat the coaching document as a **budgeted artefact with a rewrite plan**, not an append target. The
-"concise coaching style" requirement is the lever: it is not a separate nice-to-have, it is what pays for
-the new content. Draft the v2.0 document by rewriting from scratch against the new tool set rather than
-editing in place. Do **not** raise `_PASTE_CEILING_CHARS`. If content genuinely will not fit, move the
-overflow into the server's `_INSTRUCTIONS` string (`server.py:76-86`) — but note that file's own honest
-caveat: whether Claude's custom connector actually injects `instructions` into the model's system prompt is
-**UNVERIFIED**, so it is a belt, not a replacement for the braces.
-
-**Warning signs:**
-`test_coaching_doc.py` failing on length. A diff that increases `_PASTE_CEILING_CHARS`. A tool shipped
-without a corresponding row in the document's mapping table (the drift guard catches this — do not silence
-it).
-
-**Phase to address:** Coaching-style phase, sequenced **after** all new tools exist so the rewrite happens once against the final registry.
+"Is the underdeveloped area also the undertrained one?" is a genuinely valuable question and a
+good use of existing data — but it is a comparison between two signals of very different
+reliability: `fitness_get_muscle_group_volume` is deterministic, measured, well-tested data; a
+physique rating is the single noisiest, least-verifiable signal in the entire system (Pitfalls 1
+and 2). A report or narrative sentence that says "your delts are underdeveloped, and delt volume
+is also low" reads as a confirmed causal finding, when what actually happened is one reliable
+number and one unreliable opinion happened to point the same direction this month — which,
+given enough muscle groups checked every month, will sometimes happen by chance alone even if the
+rating were pure noise. The inverse is just as important to handle honestly: when the two signals
+*disagree* (rated as underdeveloped, but volume is actually high, or vice versa), that disagreement
+is informative — Pitfall 2 already names it as a ratchet-detection signal — but only if the
+narrative reports it as "these two signals disagree" rather than quietly preferring the one
+that produces a tidier story.
+
+**How to avoid:** Frame the cross-reference in both the analytics response and the narrative as a
+**correlation observation to consider**, explicitly and structurally distinct from a verdict —
+report both numbers, name the disagreement when there is one, and do not let the composed sentence
+imply the volume number *caused* or *explains* the rating unless the disagreement/agreement
+framing itself is the entire content of the sentence ("rated underdeveloped and also the
+lowest-volume muscle group this period" is fine; "underdeveloped because undertrained" is not,
+and is itself banned-recommendation-adjacent causal language worth adding to Pitfall 4's token
+scan consideration).
+
+**Warning signs:** Narrative language using "because," "due to," or "as a result of" to connect a
+physique rating and a volume figure.
+
+**Phase to address:** The physique-analytics phase, when the cross-reference computation itself is
+designed — the framing constraint belongs in the same function that produces the comparison, not
+left to be caught later in the narrative layer.
 
 ---
 
 ## Technical Debt Patterns
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
-|----------|-------------------|----------------|-----------------|
-| Delete `test_mcp_never_writes` to land the write tool | Green suite in one line | Silently reopens write capability for all 13 read tools; the guard's whole value was that it fails on the commit that introduces a violation | **Never.** Narrow it to a one-module allowlist and assert the allowlist length |
-| Add the write tool to the `_TOOLS` loop | No new registration code | Tool advertises `readOnlyHint: true, destructiveHint: false` to the client — an active lie, and `test_every_tool_is_annotated_read_only` keeps passing | **Never.** Register it separately with its own annotations |
-| `confirm: bool` instead of a server-issued token | Simpler schema, one fewer table | The model can set it on the first call; the "two-call design" becomes a naming convention | **Never** — this is the milestone's only write path |
-| Reuse `_dedupe_by_day`'s row-level shape for circumference columns | Symmetric with the weight path, no new concepts | Manual weight-only entries silently delete that day's Hevy circumference readings | **Never.** Per-column coalesce with explicit precedence |
-| Keep `build_freshness(provider=PROVIDER_HEVY)` default | Zero call sites to change | DQ-01 lies in both directions once a second provider writes; no test catches it | Only until the first non-Hevy write lands — i.e. not past the webhook phase |
-| `users.active_program` column instead of dated periods | One column, trivial write tool | Twelve weeks of history retroactively re-classified on every switch; past answers unreproducible | Acceptable **only** if recomposition drops to a window shorter than the shortest program — it does not (12 weeks) |
-| Reuse the global rate-limit bucket for the webhook | No new code | HAE has no retry; a 429 is permanent data loss for that window | Acceptable only for an initial spike, never for the shipped receiver |
-| Parse `export.xml` with `ElementTree.parse()` | Five lines | OOM on the real 182 MB file; only shows up against production data | Acceptable in a throwaway local exploration script only |
-| Raise `_PASTE_CEILING_CHARS` above 9,000 | Coaching doc test goes green | Converts a loud failure into silent truncation of the instructions Claude actually reads | **Never** — rewrite the doc instead |
-| Ship the strength switch without re-calibrating the three tuned constants | Small diff, green tests (fixtures move with the code) | Trend/plateau/recomposition verdicts change account-wide with no evidence they are right | **Never.** The constants were fitted to a distribution that no longer applies |
-| Skip writing a `sync_state` row for the webhook provider | One fewer write per delivery | `last_synced_at` is permanently `None`; Claude flags Apple Health as "never synced" forever | **Never** — it is one upsert |
-
----
+|----------|--------------------|-----------------|------------------|
+| Skip the self-consistency spike (Pitfall 1) and ship the schema/write tool directly | Faster to a working demo | The taxonomy, diff thresholds and step-size caps are all calibrated on a guess rather than a measurement, and a wrong calibration is a schema migration to fix later | Never — this is the milestone's central risk and the cheapest moment to measure it is before anything depends on the answer |
+| Copy `program_switch.py`'s two-call token pattern onto the physique write tool "to be consistent" | Reuses a proven pattern, less design work | Adds real friction (a confirmation round-trip) to a low-stakes, frequent action with no matching safety benefit, and trains the user to click through confirmations, weakening the pattern's value where it actually matters (program switching) | Never for this tool; the milestone correctly scoped it single-call — the debt to avoid is the opposite one (see Pitfall 8's mitigations instead) |
+| Add physique fields directly inside `_report_body_fields` for a quick first cut | Fastest path to "it shows up in the monthly report" | Ships into the weekly report too, violating a stated requirement, and the fix later is a compatibility-breaking response-shape change once a client has seen the wrong shape | Never — see Pitfall 5 |
+| Let the write tool's free-text validation be "ask the model nicely in the prompt" with no backend rejection | No extra code | The banned-token and numeric-provenance guards WILL eventually fail on a real user note, discovered as a CI red herring months after the note was written, with no easy way to retroactively fix already-stored rows under an append-only design | Acceptable only as a stopgap alongside a tracked task to add the backend check before the append-only property makes stored violations permanent |
+| Reuse `MEASURED_DAY_FLOORS`-style constants from body measurements for the physique elapsed-time floor without re-deriving them | Saves a calibration decision | Body measurement gaps and photo-submission gaps have no reason to share a cadence; borrowing the constant borrows an assumption that was tuned for a different data source | Acceptable only as an explicitly `[ASSUMED]`, documented placeholder pending real usage data, exactly as D-06's nutrition-floor reuse already is elsewhere in this codebase |
 
 ## Integration Gotchas
 
 | Integration | Common Mistake | Correct Approach |
-|-------------|----------------|------------------|
-| **Health Auto Export → webhook** | Assuming each delivery is new data | Default period re-sends "full previous day plus data up to now" on **every** run, with no sender-side dedup. Upsert on a natural key `(user_id, source, metric, measured_at, interval)` — the `pg_insert(...).on_conflict_do_update(...)` pattern already in `integrations/hevy/body.py:97-120` |
-| **Health Auto Export → webhook** | Using the `session-id` header as an idempotency key | It is unique **per request**, so the same measurement arrives under a new `session-id` every run. It is the exact opposite of an idempotency key. Key on measurement identity |
-| **Health Auto Export → webhook** | Returning 4xx/5xx to signal "retry later" | No retry mechanism is documented. A non-2xx is a **dropped window**, surfaced only in the app's Activity Log. Accept-then-process, and make failures loud in your own logs and `sync_state.last_error` |
-| **Health Auto Export → webhook** | Leaving the route unauthenticated because "the URL is secret" | HAE supports custom headers (`Authorization: Bearer …`, `X-API-Key: …`). Use one. CLAUDE.md already rejects obscure-URL-as-auth for `/mcp`; the same reasoning applies here, more so — this one **writes** |
-| **Health Auto Export → webhook** | Accepting the default (fine-grained) aggregation | Docs warn payloads may reach "several hundred megabytes"; Cloud Run's HTTP/1 request cap is **32 MiB**. Require Batch Requests ON and a coarse interval, and document it as a setup prerequisite |
-| **Apple Health timestamps** | Storing the local wall-clock time HAE sends | Repo rule: timestamps stored UTC, grouped by local day via `ZoneInfo(user.timezone)`. HAE emits ISO-8601 with offset — parse the offset, convert to UTC, and let `app.core.time.local_day` do the grouping. `body_measurements.measured_on` is a `Date` by deliberate design (`body.py` docstring) — do not "upgrade" it to a timestamp |
-| **Apple Health → `body_measurements`** | Writing a new `source` string longer than 16 chars | Column is `VARCHAR(16)`. `'health_auto_export'` (18) raises `StringDataRightTruncation`. Use `'apple_health'` (12) |
-| **Cloud Run** | Assuming FastAPI-side routes inherit MCP auth | `RequireAuthMiddleware` wraps only the mounted `mcp_app`. The service is `--allow-unauthenticated`. Every FastAPI route needs its own dependency |
-| **Cloud Run** | Adding routes below `app.mount("/", mcp_app)` in `main.py:98` | Registration order decides matching. New routers go **above** the mount |
-| **WorkOS AuthKit + scheduled tasks** | Assuming a scheduled run can refresh an expired token | `AuthKitJWTVerifier` fails **closed** by design; a non-interactive session cannot complete a consent flow. Expect scheduled runs to fail after token expiry and design the report tools to be valuable on demand |
-| **MCP SDK 2.0.0** | Using `ctx.elicit()` as the confirmation gate | The SDK docstring states an agent client "might… automatically generate a response". `client_capabilities` is `None` under `stateless_http=True`. Elicitation is an enhancement, not a control |
-
----
+|-------------|------------------|--------------------|
+| Monthly report composer (`compose_report`) | Calling a model from inside report composition to "refresh" or reformat a stored rating, breaking `build_narrative`'s purity/determinism guarantee | Read stored observations verbatim; all model interaction happens once, at write time, never at read/report time |
+| `docs/coaching-instructions.md` drift guard (`test_coaching_doc.py`) | Adding the new tool(s) to the registry without updating the coaching doc, or updating the doc without the corresponding tool-name/parameter accuracy the drift guard checks | Update the coaching doc in the same phase the tool ships, following the project's own established precedent (every prior phase that shipped a tool did this) |
+| `app/mcp/tools/schemas.py` response budgeting | Treating physique observation history as unbounded in a read tool's response the way full PR/plateau lists were deliberately NOT done in the report tools | Cap and roll up, following `MAX_REPORT_PR_HIGHLIGHTS`/`roll_up_muscles`'s precedent, if a read tool over history is added (Pitfall 9) |
 
 ## Performance Traps
 
 | Trap | Symptoms | Prevention | When It Breaks |
-|------|----------|------------|----------------|
-| Full-DOM parse of `export.xml` | Exit 137 / SIGKILL; memory climbing monotonically | `iterparse` + `elem.clear()`, run from the CLI not the web service | Immediately — the file is already 182 MB |
-| Buffering a large webhook body on a 512 MiB instance | Cloud Run 503 with **no** application log line | Reject oversized bodies before parsing; require HAE Batch Requests | First large sync, or first backfill-shaped push |
-| Report tool fanning out across 5+ analytics entry points | Tool latency climbing; timeouts on cold instances | Reuse `get_training_summary`'s selected-field spine; add `MAX_REPORT_WEEKS`; measure in `test_mcp_tool_budget.py` | At `weeks=12`+ on a cold start with `MIN_INSTANCES=0` |
-| Naive composition of full analytics results into the report payload | Payload well past the ~24 KB shape Phase 6 already rejected | Set and test the byte budget before implementation | At the widest legal window — i.e. exactly when a monthly report is most wanted |
-| Per-day Apple Health metrics at second/minute aggregation | Row counts in the millions; `body_measurements`-adjacent queries slowing | Coarse aggregation at the source; store daily rollups, not raw samples, for anything analytics reads | Within weeks of continuous sync |
-| One global 30/min bucket arbitrating two traffic classes | `rate_limit_rejected` on the webhook path; MCP 429s during a health sync | Separate bucket per traffic class | First concurrent sync + conversation |
-| SQLAlchemy pool ≤10/instance × `MAX_INSTANCES=2` | Connection-pool timeouts under a webhook batch plus an MCP conversation | Keep the webhook handler's transaction short; do not compute analytics inline | When batch deliveries overlap active coaching |
-
----
+|------|----------|------------|-----------------|
+| A physique-history read tool with no window/limit, growing one row per month forever | Slow response, growing payload, eventually exceeds Claude's connector budgets | Bound the read tool the same way every other list-shaped tool in this system already is (default/limit pattern from `fitness_get_recent_workouts`) | Not urgent given monthly cadence (12 rows/year), but worth designing correctly from the first version rather than retrofitting |
 
 ## Security Mistakes
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Unauthenticated webhook route on an `--allow-unauthenticated` service | Anyone on the internet can write arbitrary health data into the database — poisoning every analytic and every coaching answer | Shared secret in an HAE custom header, verified with `secrets.compare_digest` over **bytes** (per `auth.py:37-46`), fail closed and silent |
-| Webhook secret in the URL path instead of a header | CLAUDE.md already rejects this for `/mcp` ("a credential in a URL is a security vulnerability"); URLs land in Cloud Run request logs in plaintext | `Authorization` or `X-API-Key` header |
-| New secret not added to `Settings.secret_values()` | The logging scrubber (`configure_logging`, wired in `main.py:26`) never learns to redact it; it leaks into logs on the first exception | Add to `secret_values()` in the same commit as the setting; `test_secret_redaction.py` is the existing pattern |
-| Echoing webhook validation errors back to the caller | An unauthenticated endpoint that reflects parse detail is a probing oracle — the same reasoning as `_RATE_LIMITED_BODY`'s single-key body (`middleware.py:62`) | Constant, detail-free error bodies; detail to the log, findable by correlation id |
-| `confirm: bool` on the write tool | A language model can mutate the user's training program without the user ever seeing a warning | Server-issued, single-use, target-bound, short-TTL confirmation token |
-| Write tool inheriting `required_scopes=None` | A read token authorises a write; no way to issue a read-only credential later | Revisit per `server.py:116`'s own note; consider a write-only scope checked in the tool body |
-| Write tool registered with `READ_ONLY` annotations | The client is told the tool is non-destructive; a user's "always allow" decision for read tools may extend to it | Distinct annotations, registered outside the `_TOOLS` loop |
-| Relaxing `read_only_session` to accommodate one write tool | Removes the *server-side* control protecting the other 13 tools — the control that exists precisely because annotations "should not be relied upon for security enforcement" | A separate writable-session helper, used by exactly one module, statically asserted |
-| Apple Health raw samples (HR, HRV, sleep) reaching logs | Blueprint §44's deny-list explicitly covers raw health samples | Log counts and metric names only, never values; extend the structlog processor and `test_secret_redaction.py` before the first ingest |
-| Manual-entry endpoint added to the FastAPI side without auth | A second unauthenticated write path, for the same reason as the webhook | Same header-auth dependency; the static "every route has an auth dependency" guard covers both |
-
----
+| Treating "no image stored" as "no privacy work needed" | Free-text notes about the user's body flow through logs, MCP responses and reports with no equivalent redaction/scoping review that credentials get | Explicit logging-scope review (Pitfall 10) as a phase deliverable, not an assumption |
+| Loosening `test_mcp_isolation.py`'s exact-membership write-guard assertions to admit a second module more easily | A third write tool later passes the guard by accident, silently | Keep every guard an exact, named, closed set (Pitfall 7) |
+| No attestation or plausibility check on write-tool calls | A hallucinated or duplicated physique observation is indistinguishable from a real one once written, under an append-only design with no correction path | Structured attestation field, coaching-doc constraint, duplicate-window flag (Pitfall 8) |
 
 ## UX Pitfalls
 
 | Pitfall | User Impact | Better Approach |
-|---------|-------------|-----------------|
-| Silent strength-metric change | Every trend verdict, plateau and recomposition status shifts overnight with no explanation; the user's trust in the numbers is the product | Return **both** signals with the primary named, and note the change in the coaching document so Claude can explain it once |
-| Reporting max weight for bodyweight/duration exercises | "Your max weight on Plank is 0 kg" — a real number, in the right units, meaningless | Preserve a modality gate and the `_NO_WEIGHT_RANK` sentinel semantics; report "not applicable" with a reason |
-| A confirmation prompt that does not say what changes | "Switch program? yes/no" tells the user nothing about consequences | Warn call returns the current program, its duration, the target program, and **what thresholds change** — the write tool is the one place the user meets the program model directly |
-| A report that silently truncates lists | Claude reads "30 exercises" as "you train 30 exercises" and answers confidently from a partial picture | `truncate()` and carry both flags into the response model, per `_common.py:293`'s docstring |
-| Freshness that describes the wrong provider | Claude either warns about staleness that doesn't exist (erodes trust in the warnings) or stays silent about staleness that does (erodes trust in the answers) | Per-provider freshness; a response is as fresh as its stalest input |
-| A scheduled report that silently produces nothing | The user assumes no report means nothing to report | Verify the scheduling path with a spike; make the on-demand path the primary experience |
-| Manual body-measurement entry with no unit affordance | Repo internal units are kg/cm; a user entering 180 for height-in-cm vs lbs-vs-kg confusion corrupts trend analytics | Convert at the application boundary only (existing constraint); validate ranges and reject implausible values rather than storing them |
-
----
+|---------|--------------|-------------------|
+| A physique regression reported with the same flat, confident tone as a measured figure | Demoralizing, feels like an authoritative verdict on the user's body from noisy input | Distinct disclaimer, distinct verb register, paired volume/training context (Pitfalls 3, 11) |
+| A twelve-month "steady improvement" narrative built from chained one-step deltas | False confidence in a trend that may be a ratchet artifact, not real progress | Periodic blind re-anchor, cross-reference coherence check, no long-chain trend narration beyond adjacent pairs (Pitfall 2) |
+| The report nagging or implying an observation is "due" this month | Turns a voluntary, low-stakes feature into an obligation | Honest "no observation this period," never a prompt to submit one (Pitfall 11) |
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Webhook receiver:** often missing *auth* — verify a request with **no** credential gets 401, in a test
-- [ ] **Webhook receiver:** often missing *idempotency* — verify POSTing the identical payload twice changes no row count and no computed average
-- [ ] **Webhook receiver:** often missing *route ordering* — verify the path resolves to the FastAPI route, not the catch-all mount, by asserting on FastAPI-shaped error bodies
-- [ ] **Webhook receiver:** often missing a *`sync_state` row* — verify `last_synced_at` for the new provider advances after a successful delivery
-- [ ] **Webhook receiver:** often missing its *own rate-limit bucket* — verify a burst of webhook requests does not 429 a concurrent `/mcp` call
-- [ ] **Apple Health backfill:** often missing *streaming* — verify against the real 182 MB `export.xml`, not a fixture
-- [ ] **Apple Health backfill:** often missing *convergence with the webhook path* — verify running the backfill after the webhook has been live is a no-op on overlapping days
-- [ ] **Strength metric shift:** often missing *re-calibration* — verify the three tuned constants against live data and record the new improving/stable/declining split
-- [ ] **Strength metric shift:** often missing the *blast-radius check* — verify what `fitness_get_recomposition_status` and `fitness_get_training_summary` return before and after; `recomposition.py` changes behaviour with **zero** lines edited in it
-- [ ] **Strength metric shift:** often missing the *"we could not tell" path* — verify `UNCLEAR` verdicts and a no-value-reason field still occur
-- [ ] **Body measurements:** often missing *per-column* source resolution — verify a manual weight-only row does not erase that day's Hevy circumference values
-- [ ] **Body measurements:** often missing *explicit third-source precedence* — verify a day with `apple_health` + `hevy` + `manual` resolves by a stated map, not by the alphabet
-- [ ] **Body measurements:** often missing the *`VARCHAR(16)` check* — verify the chosen source string inserts
-- [ ] **Write tool:** often missing a *real gate* — verify a single call with every parameter the model can supply cannot change the program
-- [ ] **Write tool:** often missing *token binding* — verify a token issued for "switch to Cut" cannot be used to switch to Recomp
-- [ ] **Write tool:** often missing *single use* — verify replaying the second call is a no-op, not a second switch
-- [ ] **Write tool:** often missing *honest annotations* — verify it advertises `readOnlyHint: false, destructiveHint: true`, and that the 13 read tools still advertise read-only
-- [ ] **Write tool:** often missing *narrowed guards* — verify `test_mcp_never_writes` still fails for any module other than the one allowlisted write module
-- [ ] **Write tool:** often missing *post-commit failure handling* — verify a failure after commit does not report "not applied"
-- [ ] **Programs:** often missing *effective dating* — verify a 12-week recomposition question spanning a program switch names the program(s) it classified against
-- [ ] **Report tools:** often missing a *measured budget* — verify structured and wire size at the widest legal window, in `test_mcp_tool_budget.py`
-- [ ] **Report tools:** often missing the *delivery spike* — verify a scheduled task can actually invoke `fitness_ping` autonomously
-- [ ] **Coaching doc:** often missing *budget discipline* — verify it is still under 9,000 characters **without** raising the constant, and that the bidirectional drift guard passes
-
----
+- [ ] **Write-guard update:** Often looks done at "frozenset has two entries now" — verify all
+      three write-guard tests were updated with the module's exact name, none loosened to a
+      pattern/subset check (Pitfall 7).
+- [ ] **Determinism contract:** Often looks done at "byte-identical test passes" — verify the
+      free-text banned-token and numeric-provenance checks were exercised against a red-test
+      fixture containing a violation, not just a clean happy-path fixture (Pitfall 4).
+- [ ] **Report split:** Often looks done at "monthly report shows physique" — verify a weekly
+      report against the same user/window explicitly does NOT contain a physique field, asserted
+      by a positive-exclusion test (Pitfall 5).
+- [ ] **Disclaimer:** Often looks done at "narrative mentions this is a model rating" — verify the
+      disclaimer is a required schema field, present even in the `insufficient_data` path, and
+      asserted verbatim by a dedicated test the way `INTERPRETATION_DISCLAIMER` already is
+      (Pitfall 3).
+- [ ] **Sparse-data handling:** Often looks done at "diff works when there are two observations" —
+      verify zero-observation, one-observation, and too-close-together-observation paths are each
+      explicitly tested, not merely not-crashing (Pitfall 6).
+- [ ] **Coaching doc:** Often looks done at "tool is listed in the table" — verify the physique
+      tool's row states the photo-must-be-attached constraint and the cross-reference-before-
+      reporting-regression instruction, not just the call signature (Pitfalls 8, 11).
+- [ ] **Self-consistency evidence:** Often looks done at "the design has an anchoring mitigation" —
+      verify the spike actually measured how much the rating moves across repeated/blind/anchored
+      calls on the same photos, with the result recorded the way `13-SPIKE-RESULT.md` records
+      v2.0's spike, before the schema's step-size/threshold constants are finalized (Pitfall 1).
 
 ## Recovery Strategies
 
 | Pitfall | Recovery Cost | Recovery Steps |
-|---------|---------------|----------------|
-| Duplicate rows from a non-idempotent webhook | **LOW** while young, **MEDIUM** later | Dedup by natural key keeping the earliest `created_at`; add the unique constraint; backfill-verify averages against a Neon PITR branch (the drill from Phase 7 is already proven) |
-| Public unauthenticated webhook discovered live | **MEDIUM** | Redeploy with auth immediately; audit `body_measurements`/health tables for rows outside plausible ranges or delivered from unexpected times; rotate the (now-known) endpoint path as well as adding the secret |
-| Circumference data erased by row-level dedupe | **HIGH** if it reached the DB, **LOW** if only in the read path | If dedupe was read-only (as `_dedupe_by_day` is today) no data was lost — fix the function. If a write-side "merge" was implemented, restore from a Neon PITR branch |
-| Strength-metric switch shipped without re-calibration | **LOW–MEDIUM** | Constants are three literals in two files; revert or retune and redeploy. The **user-trust** cost of having given wrong verdicts is not recoverable by a redeploy — which is why this belongs in the phase's success criteria |
-| Write tool with a bypassable confirm | **MEDIUM** | Ship the token gate; audit `program_periods` (if effective-dated, the history is intact and auditable — a mutable column would leave no trace, which is Pitfall 16's second argument) |
-| Static write guards deleted | **LOW** to restore, **HIGH** to detect | Restore from git history and narrow rather than remove; add the allowlist-length assertion so the same shortcut fails next time |
-| Program modelled as a mutable column, history already accumulated | **HIGH** | Migrate to `program_periods` with a single synthetic period covering all prior history — but the actual switch dates are unrecoverable, so historical verdicts stay approximate forever |
-| Scheduled delivery proves impossible | **LOW** if spiked first, **HIGH** if discovered at phase end | With the on-demand-first design, degrade to "ask for your weekly report" and document the sub-agent workaround. Without it, the phase's headline criterion fails with no fallback |
-| `export.xml` backfill OOM | **LOW** | Rewrite as `iterparse` + CLI. No data damage — the failure is before any write, provided the ingest is transactional |
-| Coaching doc silently truncated in the Claude Project | **LOW** to fix, **HIGH** to detect | Invisible from this repo by design. Only prevention works: keep the ceiling, rewrite rather than append |
-
----
+|---------|-----------------|-------------------|
+| Physique fields leaked into the weekly report (Pitfall 5) | LOW | Move the assembly step out of `_report_body_fields` into the monthly-only branch; add the missing exclusion test; no data was corrupted, only over-exposed in one response shape |
+| A stored free-text note contains banned/numeric language, caught after the fact (Pitfall 4) | MEDIUM | Append-only means the row cannot be silently edited without breaking the "never mutate history" property — the honest fix is a data migration that flags the row as excluded-from-narrative (a boolean, not a deletion) so `build_narrative` skips it while the historical record stays intact |
+| A duplicate observation from a retried write (Pitfall 8) | MEDIUM | Requires a documented manual-correction path even under "append-only" — e.g., a `superseded_by`/`voided` marker rather than deletion, preserving the append-only audit trail while letting analytics exclude the duplicate; this needs to be designed in from the start, not improvised once the first duplicate actually happens |
+| The write-guard tests were loosened to admit the second module less strictly (Pitfall 7) | LOW | Revert to exact-membership assertions; this is a pure code-review catch with no data consequence if caught before merge |
+| Evidence emerges post-ship that the anchored rating chain has ratcheted (Pitfall 2) | HIGH | No clean fix — the historical chain cannot be re-rated without new photos of the past, which do not exist. The only real recovery is starting a fresh, explicitly-blind anchor point going forward and being honest in the narrative that pre-reset history should be read with reduced confidence. This is the strongest argument for treating Pitfall 2's periodic re-anchor as a day-one requirement rather than a later fix |
 
 ## Pitfall-to-Phase Mapping
 
 | Pitfall | Prevention Phase | Verification |
-|---------|------------------|--------------|
-| 1. Route below the catch-all mount | Apple Health webhook ingest | Test asserts FastAPI-shaped (not MCP-shaped) response on the webhook path |
-| 2. Shared rate-limit bucket | Apple Health webhook ingest | Burst of webhook requests does not 429 a concurrent `/mcp` call |
-| 3. Unauthenticated FastAPI route | Apple Health webhook ingest | No-credential request → 401; static guard that every non-`/health` route has an auth dependency |
-| 4. Non-idempotent ingest | Apple Health webhook ingest | Identical payload POSTed twice → identical row count and identical computed averages |
-| 5. Payload size / cold start | Apple Health webhook ingest | Oversized body rejected before parse; deployment flags reviewed and changed before first live sync |
-| 6. `export.xml` OOM | Apple Health backfill | Real 182 MB file parses within the memory budget; backfill-after-webhook is a no-op on overlapping days |
-| 7. Freshness provider default | Apple Health webhook ingest (write `sync_state`) + health-analytics extension (remove the default) | `provider` has no default; `FreshnessMetadata.resources` names every writing provider |
-| 8. `VARCHAR(16)` source | Apple Health webhook ingest (migration plan) | Chosen source constant inserts against real PostgreSQL |
-| 9. Row-level dedupe / implicit precedence | Historical body measurements — fix must land **with or before** the webhook phase | Three-source, partially-overlapping-column test; explicit `MappingProxyType` precedence map |
-| 10. Max-weight flattens rep progression | Strength-metric shift | Both signals returned; a rep-progression fixture is not classified `stable` |
-| 11. Ungated max weight destroys the honesty path | Strength-metric shift | `UNCLEAR` verdicts and a no-value reason still occur; modality gate retained |
-| 12. Tuned constants mis-calibrated | Strength-metric shift | Before/after verdict table on live data recorded in the phase context |
-| 13. `confirm=true` bypass | Training programs / write tool | A single tool call cannot change the program; token is target-bound and single-use |
-| 14. Guards disarmed | Training programs / write tool | `test_mcp_never_writes` narrowed with an allowlist-length assertion; annotation partition test (13 read / 1 write) |
-| 15. `safe_tool` masks write outcome | Training programs / write tool | Three-state result; post-commit failure does not report "not applied" |
-| 16. Mutable program column | Training programs / write tool (schema plan) | Recomposition response names the program(s) it classified against; a straddling window says so |
-| 17. Scheduled-task connector failure | Report tools — **spike plan first** | A scheduled task autonomously invokes `fitness_ping`; on-demand path valuable independently |
-| 18. Report fan-out budget | Report tools | Measured structured/wire size at the widest window, asserted in `test_mcp_tool_budget.py` |
-| 19. Coaching doc ceiling | Coaching style — **sequenced last** | Under 9,000 chars without raising the constant; bidirectional drift guard green |
+|---------|--------------------|-----------------|
+| 1. Rater self-inconsistency, no ground truth | Spike, before schema/write-tool design locks | A recorded spike result (same shape as `13-SPIKE-RESULT.md`) measuring rating movement across repeated/blind calls on fixed photos |
+| 2. Anchoring ratchet | Physique-analytics phase (cross-reference-as-coherence-check); spike informs the re-anchor cadence | A test asserting the diff function flags N consecutive same-direction moves with no corroborating volume signal; a documented periodic-blind-reanchor policy |
+| 3. Rating stored/displayed as if measured | Schema-design step of the write-tool phase | A required, non-optional disclaimer field asserted present by a dedicated test, on every response shape including `insufficient_data` |
+| 4. Determinism contract breakage (purity, banned tokens, numeric provenance) | Write-tool phase (write-time enforcement) + report-integration phase (test fixtures) | Red-test fixtures containing a banned-token note and an over-numeric note, both rejected at write time; shared token/number-pattern source between write tool and narrative test |
+| 5. `_report_body_fields` shared-projection leak | Report-integration phase, first task | A positive-exclusion test: weekly report for a user/window with physique data present contains no physique field |
+| 6. Sparse/irregular cadence traps | Physique-analytics phase | Explicit, separately tested zero/one/too-close-together observation paths; documented `[ASSUMED]` minimum-elapsed-time constant |
+| 7. Write-guard widening correctness | Write-tool phase, explicit success criterion | All three write-guard tests grow to name two modules exactly, none loosened in shape |
+| 8. Duplicate/hallucinated writes | Write-tool phase | Attestation field present in schema; coaching-doc instruction restricting the tool to photo-attached turns; duplicate-window flag behavior tested |
+| 9. `safe_tool` three-state result + missing read path | Write-tool phase | Read tool over physique history ships alongside the write tool; `unknown`-state message names the read tool as the recovery action |
+| 10. Free-text logging/privacy scope | Write-tool phase, logging-scope review | Explicit statement of what logs at what level for this tool; no full-note-content logging at INFO by default |
+| 11. Wellbeing design consequences | Report-integration phase (framing) + coaching-doc update | Coaching-doc drift-guard test covers the "never report a regression without volume context" instruction; monthly-only and user-initiated-only constraints preserved |
+| 12. Cross-reference manufacturing false causation | Physique-analytics phase | Narrative/response framing test rejecting causal language (`because`, `due to`) around the cross-reference |
 
 ### Suggested phase-ordering consequences
 
-- **Pitfall 9 forces an ordering constraint:** the source-precedence fix must land *with or before* the Apple Health webhook phase, because Apple Health is the third source that silently activates the alphabetical-precedence bug. If the roadmap puts body measurements after Apple Health, the precedence map must be pulled forward into the webhook phase.
-- **Pitfall 17 argues for sequencing the report-tools spike early**, ahead of its implementation plans and possibly ahead of other phases — a negative result should reshape the milestone, not sink a phase at its end.
-- **Pitfall 19 argues for sequencing the coaching-style phase last**, so the document is rewritten once against the final tool registry rather than edited N times against a moving one.
-- **Pitfalls 13–16 cluster into a single write-tool phase** that is more security-shaped than feature-shaped. Its success criteria should read like a threat model, not a feature list.
-- **Phases likely needing their own deeper research:** the write-tool phase (confirmation-token design, scope strategy, AuthKit implications) and the strength-metric-shift phase (re-calibration methodology against live data). The webhook phase is mostly *verification* work against facts already established here.
+Pitfall 1's spike should run **before** any other phase in this milestone, for the same reason
+Phase 2's auth spike and Phase 13's RPT-03 spike ran before the features that depended on their
+answers: the taxonomy's step size, the diff analytics' thresholds, the minimum-elapsed-time floor,
+and the re-anchor cadence (Pitfalls 1, 2, 6) are all downstream of a number this spike is the
+cheapest place to produce. Building the schema first and hoping the spike's findings fit into it
+risks a second migration.
 
----
+The write-tool phase (Pitfalls 3, 4 write-time half, 7, 8, 9, 10) should ship the read tool
+alongside the write tool, contrary to how the milestone scope currently reads (write tool, then
+analytics, then report) — Pitfall 9 explains why a write-only first phase leaves an `unknown`-state
+recovery path with nowhere to go.
+
+The physique-analytics phase (Pitfalls 2 coherence check, 6, 12) should not be scoped as "just the
+diff" — the cross-reference is load-bearing for both the accuracy story (Pitfall 2) and the honesty
+story (Pitfall 12), not a bonus feature to add if time permits.
+
+The report-integration phase (Pitfalls 4 test-fixture half, 5, 11) inherits the most mature
+existing guard-rail machinery in the codebase (`test_analytics_reports.py`'s determinism suite) and
+should extend it with physique-specific red-test fixtures as its first task, before wiring the
+section into `compose_report` for real.
 
 ## Sources
 
-**Repository source, read directly (HIGH confidence — this is the strongest evidence in this document):**
-- `backend/app/main.py` — bootstrap order, middleware registration order, catch-all mount at line 98, open `/health`
-- `backend/app/middleware.py` — single global `TokenBucket`, `EXEMPT_PREFIXES`, no-client-header policy
-- `backend/app/mcp/server.py` — `required_scopes=None` with "revisit when the first write tool ships", the `READ_ONLY` annotation loop, `stateless_http=True`, `_INSTRUCTIONS`
-- `backend/app/mcp/auth.py` — `StaticTokenVerifier` bytes-compare rationale, `AuthKitJWTVerifier` fail-closed design
-- `backend/app/mcp/tools/_common.py` — `read_only_session`, `safe_tool`, `truncate`, response-cap constants
-- `backend/app/analytics/progression.py` — the max-weight-is-wrong paragraph (lines 7–10), `TREND_STABLE_BAND_PERCENT_PER_WEEK`, `PLATEAU_IMPROVEMENT_TOLERANCE`, D-18's derivation, D-07a skip semantics, `_NO_WEIGHT_RANK`
-- `backend/app/analytics/estimates.py` — `MAX_TRUSTED_REPS`, `E1RM_EXERCISE_TYPE`, `NoEstimateReason`, live-data gate statistics
-- `backend/app/analytics/recomposition.py` — hardcoded lean-bulk constants, `RECOMP_PROGRESSION_NET_BAND`, `RECOMP_LOOKBACK_WEEKS`, `aggregate_progression`'s `unclear` exclusion
-- `backend/app/analytics/bodyweight.py` — `_dedupe_by_day` (lines 129–155), `MANUAL_SOURCE`, D-14
-- `backend/app/analytics/metadata.py` — `build_freshness(provider=PROVIDER_HEVY)` default, `FRESHNESS_RESOURCES_*`
-- `backend/app/db/models/body.py` + `backend/migrations/versions/0004_hevy_reference_tables.py` — `source` `VARCHAR(16)`, `(user_id, source, measured_on)` natural key
-- `backend/app/integrations/hevy/body.py` — the proven `on_conflict_do_update` upsert pattern
-- `backend/tests/test_mcp_isolation.py` — `test_mcp_never_writes`, `test_mcp_uses_no_raw_sql_text`'s by-name exemption pattern
-- `backend/tests/test_mcp_tool_schemas.py` — `test_every_tool_is_annotated_read_only`
-- `backend/tests/test_coaching_doc.py` — `_PASTE_CEILING_CHARS = 9_000`, bidirectional drift guard
-- `backend/tests/test_analytics_isolation.py` — write ban in `app/analytics/`
-- `scripts/deploy-cloud-run.sh` — `--allow-unauthenticated`, `--memory=512Mi`, `--max=2`, `--timeout=300`, `MIN_INSTANCES=0`
-- `docs/coaching-instructions.md` — 7,216 characters measured
-- `export.xml` — 182 MB measured on disk
-
-**Installed package introspection (HIGH confidence):**
-- `mcp 2.0.0` — `Context.elicit` signature and docstring ("if the client is an agent, it might… automatically generate a response"), `Context.client_capabilities` (`None` for anonymous stateless requests), `Context.headers` ("never treat one as an identity assertion"), elicitation type surface
-
-**Official third-party documentation (HIGH confidence):**
-- [Sync Apple Health Data to REST API — HealthyApps Help Center](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api/) — export periods and overlap, batch requests, custom auth headers, automatic headers including `session-id`, no documented retry, iOS 30-second background budget, "several hundred megabytes" payload warning
-- [Cloud Run quotas and limits — Google Cloud](https://docs.cloud.google.com/run/quotas) — 32 MiB max HTTP/1 request size
-- [health-auto-export — GitHub (Lybron)](https://github.com/Lybron/health-auto-export) — 150+ metrics, format overview
-
-**GitHub issues, fetched directly (MEDIUM-HIGH confidence):**
-- [anthropics/claude-code#43397](https://github.com/anthropics/claude-code/issues/43397) — "Cloud scheduled tasks cannot access MCP connectors — tools not loaded into session", 2026-04-04, **closed as not planned**, 100% reproducible, sub-agent workaround
-- [anthropics/claude-code#45306](https://github.com/anthropics/claude-code/issues/45306) — "Scheduled task MCP connector tools unavailable in execution environment", 2026-04-08, **closed as not planned**, silent failures
-
-**Community / secondary (MEDIUM–LOW confidence, flagged inline where used):**
-- [Get started with custom connectors using remote MCP — Anthropic Help Center](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) — tool approval guidance, "only click Allow always when you trust the server to run unsupervised"
-- [How to make Claude Desktop auto-approve MCP tools](https://kahunam.com/articles/web-development/how-to-make-claude-desktop-auto-approve-mcp-tools-a-power-users-guide/) — report that "Always approve" cannot be undone (**LOW** — single community source, treat as a risk to design against rather than a verified fact)
+- This repository, read directly: `.planning/PROJECT.md`, `.planning/MILESTONES.md`,
+  `.planning/research/PITFALLS.md` (v2.0, Pitfalls #13–16 specifically),
+  `backend/app/analytics/recomposition.py`, `backend/app/analytics/body_measurements.py`,
+  `backend/app/mcp/tools/reports.py`, `backend/app/logging.py`, `backend/tests/test_mcp_isolation.py`,
+  `backend/tests/test_mcp_readonly.py`, `backend/tests/test_analytics_reports.py`,
+  `backend/app/mcp/tools/program_switch.py`, `docs/coaching-instructions.md` — **HIGH confidence**,
+  all claims about this codebase's existing guards, tests and precedents are read from the source,
+  not inferred.
+- "Rating Roulette: Self-Inconsistency in LLM-As-A-Judge Frameworks," arXiv:2510.27106 (Oct 2025),
+  also ACL Findings EMNLP 2025 — intra-rater reliability, temperature/reproducibility tradeoff —
+  **MEDIUM confidence** (general LLM-judge literature, not a study of this project's specific
+  vision-rating task).
+- Yu, S. & Zhang, T., "Sequential biases on subjective judgments: Evidence from face
+  attractiveness and ringtone agreeableness judgment," PMC5995378 — assimilative sequential
+  effects strengthened by response repetition — **MEDIUM confidence** (psychology-of-judgment
+  literature, applied here by close analogy, not a study of VLM rating specifically).
+- "Modeling sequential context effects in diagnostic interpretation of screening mammograms,"
+  PMC5858736 — sequential context effects in repeated image-based diagnostic judgment, the closest
+  found analogue to "rate a body from a photo, informed by what was judged last time" —
+  **MEDIUM confidence**.
+- "Labeling messages as AI-generated does not reduce their persuasive effects," PMC12887897 —
+  motivates structural (not merely textual-disclaimer) provenance separation — **MEDIUM
+  confidence**.
+- Data-provenance standards discussion (IAPP, NTIA AI-output-disclosure framework, general
+  industry sources found via search) — general framing for provenance-as-metadata rather than
+  provenance-as-prose — **LOW/MEDIUM confidence**, industry/policy commentary rather than a
+  controlled study.
+- No source was found — and none is claimed — for a controlled measurement of *this specific*
+  model's self-consistency or anchoring behavior on physique-photo rating specifically; Pitfall 1
+  explicitly recommends producing that evidence via a project-run spike rather than relying on the
+  general literature above, which is directionally supportive but not a substitute for a direct
+  measurement.
 
 ---
-*Pitfalls research for: adding five v2.0 capabilities to a shipped read-only fitness MCP backend*
-*Researched: 2026-09-02*
+*Pitfalls research for: BRETT v2.1 Longitudinal Physique Analysis*
+*Researched: 2026-09-05*

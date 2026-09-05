@@ -1,607 +1,347 @@
 # Feature Research
 
-**Domain:** Personal fitness / body-recomposition data platform (v2.0 milestone: Apple Health ingestion, max-weight strength tracking, periodic reports, body measurements, training programs)
-**Researched:** 2026-09-02
-**Confidence:** HIGH for capability #1 (verified against vendor docs, vendor reference server source, two independent third-party implementations, **and the user's own 191 MB `export.xml`**); MEDIUM-HIGH for #2–#5 (industry convention + published coaching guidelines, which vary by source)
+**Domain:** Longitudinal physique / body-composition visual assessment, as a structured-data ledger fed by a vision-capable LLM analyst (not a computer-vision pipeline, not a stored-photo app)
+**Milestone:** BRETT v2.1 — Longitudinal Physique Analysis
+**Researched:** 2026-09-05
+**Confidence:** MEDIUM-HIGH overall. HIGH for what is structurally decided already (read from `.planning/PROJECT.md` and the existing codebase patterns this feature must fit). MEDIUM for the rating-scale design (grounded in psychometric literature on ordinal-scale granularity plus bodybuilding judging convention, but there is no published, validated instrument for "rate regional muscular development from a monthly progress photo" — this recommendation is a synthesis, not a citation of an existing standard). MEDIUM for muscle-visibility classification (anatomical/pose reasoning cross-checked against bodybuilding posing guides, not a formal study). LOW→MEDIUM for photo-based body-fat-percent accuracy claims, sourced but with a caveat noted inline.
 
 ---
 
-## Executive Note: Read This Before The Tables
+## 0. Read First: What Is Already Decided (do not re-litigate)
 
-Two findings dominate this milestone and are drawn from **the user's actual Apple Health export**
-(`/Volumes/.../BRETT/export.xml`, HealthKit Export Version 14, `ExportDate 2026-08-26 10:09:33 +0700`,
-191,257,897 bytes, 438,649 `<Record>` elements). These are not guesses — they are counts run against
-the file.
+Per `.planning/PROJECT.md`'s milestone gate (2026-09-05), these are fixed inputs to this research, not open questions:
 
-### Finding A — Apple Health workouts are 97% Hevy duplicates
+- BRETT never receives or stores an image. Claude analyzes photos attached in-conversation; only structured observations persist.
+- Ratings are keyed on the existing 19-value `CanonicalMuscleGroup` taxonomy (`backend/app/normalization/muscles.py`), plus bounded free-text notes on **leanness, conditioning and symmetry** (this phrasing — three named qualitative axes, not per-muscle — is already chosen).
+- The prior observation is returned as context at analysis time so Claude rates *relative to itself*, not from scratch. This is called out as "the feature's load-bearing design decision" — the rating-scale recommendation below is built to serve this, not to work in isolation.
+- Diff analytics (`analytics/physique.py`) produce **improved / unchanged / regressed** per muscle group — a 3-state ordinal comparison, already decided, computed from stored rows only.
+- Physique appears in the **monthly report only**; weekly is deliberately excluded. Section 4 below independently corroborates this from the progress-photo literature.
+- Ratings are labelled as subjective model output, following the `RecompositionResult.disclaimer` pattern in `backend/app/analytics/recomposition.py` (a required field carrying a fixed disclaimer string verbatim, not generated prose).
+- The read-only MCP guard is amended, narrowed to named modules — the same posture `program_switch.py` took in Phase 12, not a general re-opening of write access.
 
-```
-Workout elements by sourceName:      218  "Hevy"
-                                       3  "Foodvisor"
-                                       2  "Gymverse"
-                                       1  "Zing"
-Workout activity types:              221  HKWorkoutActivityTypeTraditionalStrengthTraining
-                                       3  HKWorkoutActivityTypeOther
-```
-
-BRETT already has 327 workouts synced directly from the Hevy API. Ingesting Apple Health workouts —
-from either `export.xml` or the Health Auto Export `workouts` array — would **double-count training
-volume, sessions, and frequency** for the same sessions BRETT already owns at higher fidelity (Apple
-Health has no per-set weight/rep data for strength training; Hevy does). The same duplication exists
-for body data: all 8 `WaistCircumference` records and the early `BodyMass` records carry
-`sourceName="Hevy"`, and BRETT already holds 125 `body_measurements` rows from the Hevy API.
-
-**Consequence:** "ingest Apple Health workouts" is an anti-feature, not a feature. Apple Health's job
-in BRETT is the data Hevy *cannot* provide (steps, active energy, sleep), not a second copy of the
-data Hevy already provides.
-
-### Finding B — The recovery/sleep data the milestone assumes does not exist
-
-```
-HKQuantityTypeIdentifierHeartRate                     0
-HKQuantityTypeIdentifierRestingHeartRate              0
-HKQuantityTypeIdentifierHeartRateVariabilitySDNN      0
-HKQuantityTypeIdentifierVO2Max                        0
-HKQuantityTypeIdentifierAppleExerciseTime             0
-HKQuantityTypeIdentifierBodyFatPercentage             0
-HKQuantityTypeIdentifierLeanBodyMass                  0
-HKQuantityTypeIdentifierBodyMassIndex                 0
-
-HKCategoryTypeIdentifierSleepAnalysis              2411   ALL value="HKCategoryValueSleepAnalysisInBed"
-                                                          range 2022-03-20 .. 2024-11-30  (STOPPED ~21 months ago)
-                                                          0 records in 2025, 0 in 2026
-ActivitySummary                                    1443   2022-09-14 .. 2026-08-26
-                                                          activeEnergyBurned populated
-                                                          appleExerciseTime=0, appleStandHours=0 on every row
-StepCount                                         48261   2022-03-10 .. 2026-08-26, sub-daily (5-10 min) buckets
-                                                          two sourceNames ("Vegant's iPhone", "V's iPhone")
-```
-
-The user is **iPhone-only, no Apple Watch**. There is no heart-rate history of any kind, so resting
-HR, HRV, VO2 max and Apple exercise time cannot be backfilled and will not arrive via Health Auto
-Export either unless a Watch is purchased. Sleep exists only as undifferentiated `InBed` intervals
-(no Core/REM/Deep/Asleep stages — those require a Watch) and stopped entirely on 2024-11-30.
-
-**Consequence:** PROJECT.md's Active requirement "Health analytics extension: activity/sleep/recovery
-trends" must be re-scoped to **activity only** (steps, active energy, distance, flights) plus an
-optional sleep path that will be empty at launch. Building sleep-stage or HRV-based recovery
-analytics now means shipping code with no data and no test fixtures except synthetic ones.
+Everything below works **within** this shape. It does not propose reopening any of it.
 
 ---
 
-## Capability #1 — Apple Health Ingestion via Health Auto Export
+## 1. Rating Scale Design (the core deliverable of this research)
 
-### The Verified Payload Contract
+### 1.1 How real practitioners actually assess physique visually
 
-**Sources (all HIGH confidence):** vendor help centre pages last updated 2026-08-23; the vendor's own
-open-source reference server (`HealthyApps/health-auto-export-server`, TypeScript/Mongoose models read
-directly); and two independent third-party implementations that agree on field names
-(`meltforce/FreeReps` spec doc, `korosuke613/vitalbridge` metric table). Cross-checked against
-`irvinlim/apple-health-ingester` Go structs for historical/version quirks.
+**IFBB/NPC bodybuilding judging** is instructive for *what dimensions matter*, but its *scoring mechanism* is the wrong model to copy directly.
 
-#### Transport
+- Judged dimensions, consistently across NPC/IFBB rule sets and independent explainers: **muscle mass/size, symmetry (left-right balance, upper/lower proportion, front/back balance), conditioning (leanness, muscle separation, vascularity, skin tone), and separation/definition between muscle groups** ([BarBend](https://barbend.com/news/how-bodybuilding-is-judged/), [NPC News Online official rules](https://npcnewsonline.com/official-bodybuilding-rules/)). MEDIUM confidence — consistent across multiple independent sources, not a primary IFBB rulebook fetch.
+- Critically, judging is **comparative placement, not absolute point-scoring**. Each judge ranks competitors 1st/2nd/3rd/etc. in a single round; placings are summed across 5–9 judges with high/low trimmed, and the lowest total wins ([BarBend scoring explainer](https://barbend.com/news/how-scoring-in-bodybuilding-works/); [tenuncuerpo10](https://www.tenuncuerpo10.com/en/2026/04/how-do-judges-score-at-ifbb-championships-learn-how-the-scoring-system-works/)). MEDIUM confidence.
+- **Why this matters for BRETT and why it does NOT transfer directly:** IFBB's reliability comes from **averaging many independent judges' relative rankings of the same lineup at the same instant**, which cancels individual judge bias. BRETT has **one rater (Claude), one subject, evaluated once a month, months apart**. There is no lineup to rank against and no second judge to average with. Copying the *scoring shape* (comparative placement across competitors) is meaningless here; copying the *dimension list* (mass/symmetry/conditioning/separation) is useful and is reflected in the recommended scale and free-text fields below.
 
-| Property | Verified value |
-|---|---|
-| Method | `POST` only, to a user-entered full URL (`http://` or `https://`) |
-| Content-Type | `application/json` for JSON, `multipart/form-data` for CSV (set automatically by the app) |
-| Auth | **User-configured custom headers.** Docs name `X-API-Key: <key>` and `Authorization: Bearer <token>` explicitly. No OAuth, no signing, no HMAC. |
-| Automatic headers | `automation-name`, `automation-id`, `automation-aggregation`, `automation-period`, `session-id` — confirmed in vendor docs **and** independently in the FreeReps spec |
-| Export version | `Version 1` (legacy) / `Version 2` (current, recommended) — a per-automation setting |
-| Batching | `Batch Requests` toggle (JSON only) splits one export across multiple POSTs |
-| Payload size | Vendor warns "possibly several hundred megabytes"; the vendor's own reference server sets `express.json({ limit: '200mb' })` |
-| Timeout | User-selectable request timeout in the app |
-| Retry | **None documented.** Failures are recorded in in-app Activity Logs and that is all. |
-| Requires | Premium subscription (API Export is a paid feature) |
+**Visual body-fat-percentage estimation** has a documented, non-trivial error band, and it degrades further outside laboratory conditions:
 
-#### Top-level shape
+- Trained observers repeatedly exposed to known body-composition subjects can estimate percent body fat to within roughly **±3–5% of criterion (lab) measurements**, but **inter-rater variability of ~2.7% mean difference between two trained raters** was documented even under those favorable conditions, and the original study's own conclusion was that **skinfold/lab methods are preferable to visual inspection** ([PubMed: Bolonchuk et al., "The validity of visual estimations of percent body fat in lean males"](https://pubmed.ncbi.nlm.nih.gov/1569858/) — MEDIUM confidence; full text was not accessible past the abstract listing during this research, so treat the exact percentages as reported by secondary summarization rather than independently re-verified from the primary text).
+- Modern computer-vision/AI 2D-photo methods do better in controlled studies — mean errors around **2–4%** against DEXA/BIA in some trials ([Nature npj Digital Medicine, AI 2D-photo body fat study](https://www.nature.com/articles/s41746-024-01380-6); [Nature npj Digital Medicine, smartphone adiposity validation](https://www.nature.com/articles/s41746-022-00628-3)) — MEDIUM confidence, and these are purpose-built CV models trained and validated against a specific pose/lighting protocol and a criterion measurement, which is a materially different setup from an LLM eyeballing a phone photo taken in a bathroom.
+- **The takeaway that matters for BRETT:** even the *best-documented, purpose-built, validated* methods carry multi-percentage-point error, and the *closest analogue to what Claude would actually be doing* (a single trained human, one photo, no criterion feedback loop) is the noisiest case in the literature. There is no basis to claim a numeric body-fat percentage from a progress photo with any defensible error bound. This directly informs the anti-feature recommendation in Section 5.
 
-```json
-{
-  "data": {
-    "metrics": [],
-    "workouts": [],
-    "symptoms": [],
-    "ecg": [],
-    "heartRateNotifications": [],
-    "stateOfMind": [],
-    "cycleTracking": [],
-    "medications": []
-  }
-}
-```
+**Published ordinal scales for regional muscular development, specifically:** none were found. This is a genuine gap, not an oversight — searches for a validated clinical or sports-science instrument scoring *regional* (per-muscle-group) visual development from photographs turned up nothing resembling a peer-reviewed scale. The closest real-world analogues are:
+- Consumer fitness apps' bespoke scales — e.g., GainFrame's per-muscle-area rating on a 4-level **Needs Work → Developing → Strong → Elite** progression across ~12 muscle areas, feeding into a separate 1–100 composite "physique score" with named tiers (Starting/Building/Solid/Impressive/Elite) ([GainFrame blog](https://gainframe.app/blog/best-progress-photo-apps/), [GainFrame product page](https://gainframe.app/)) — MEDIUM confidence (vendor's own marketing copy, not a validated instrument). This is useful prior art for granularity (4 levels) but its top-anchor language ("Elite," a 1–100 score) is explicitly the kind of population-relative, gamified framing Section 5 recommends BRETT avoid.
+- The IFBB/NPC comparative system above, which is not adaptable to single-rater, no-lineup use.
 
-Only the arrays matching the automation's selected Data Type are present. A BRETT ingest endpoint must
-treat every array as optional.
+**Ordinal scale granularity vs. rater reliability — what the measurement literature says:**
 
-#### Metric shapes (four distinct ones — this is the normalizer's real job)
+- Across multiple independent psychometric reviews, the consistent finding is that **reliability and validity improve as categories increase from very few up through roughly 7, with the biggest gains happening between 2 and 4–5 categories, and returns flattening from 7 onward** — one review states inter-rater reliability "increases from two-point to seven-point scales," with 7-category scales behaving "functionally interchangeable with as many as 100 ordered categories" ([ResearchGate: Optimal Number of Response Categories in Rating Scales](https://www.researchgate.net/publication/12546546_Optimal_Number_of_Response_Categories_in_Rating_Scales_Reliability_Validity_Discriminating_Power_and_Respondent_Preferences); [ScienceDirect, same study](https://www.sciencedirect.com/science/article/abs/pii/S0001691899000505); [ResearchGate: Effect of Number of Response Categories on Reliability and Validity](https://www.researchgate.net/publication/236979916_Effect_of_the_Number_of_Response_Categories_on_the_Reliability_and_Validity_of_Rating_Scales)). MEDIUM confidence — consistent finding across several independent papers summarized via search, not independently re-derived from primary data.
+- The practical consensus is **4–7 well-anchored, semantically explicit categories** as the reliability-optimizing range; below 4 loses discriminating power, above 7 adds negligible signal and risk of noise ([arXiv, Likert scale response-category error paper](https://arxiv.org/pdf/2502.02846)).
+- **Important caveat for extrapolating to this feature:** every one of these studies concerns *self-report survey* Likert scales or *trained human raters with a feedback/calibration loop*, evaluating a fresh stimulus each time. BRETT's situation is different in two ways that both argue for the **lower end** of that range, not the upper end: (1) the rater is a single LLM instance per session with no calibration training and no ground truth to check itself against, and (2) confounding variance from photo conditions (Section 3) is large relative to the true month-to-month signal, so finer gradations are more likely to encode noise (lighting, pump, angle) than real change. There is no published research validating this extrapolation — it is reasoned from the cited granularity literature plus the project's own established pattern of preferring coarse, defensible categories over precise-looking numbers with unstated error bars (`recomposition.py`'s explicit rejection of numeric body-fat/waist inputs; `body_measurements.py`'s independent `insufficient_data`/`is_stale` booleans rather than one blended confidence score).
 
-```json
-// 1. Standard quantity — the overwhelming majority
-{ "name": "step_count", "units": "count",
-  "data": [ { "qty": 8500, "date": "2024-02-06 14:30:00 -0800", "source": "Apple Watch" } ] }
+### 1.2 The concrete recommended scale
 
-// 2. Heart rate — CAPITALIZED keys, no qty
-{ "name": "heart_rate", "units": "bpm",
-  "data": [ { "date": "2024-02-06 14:30:00 -0800", "Min": 65, "Avg": 72, "Max": 85 } ] }
+**Per-muscle-group development level — a 5-point ordinal scale, absolute at each observation, diffed ordinally across observations.**
 
-// 3. Blood pressure — no qty
-{ "name": "blood_pressure", "units": "mmHg",
-  "data": [ { "date": "2024-02-06 14:30:00 -0800", "systolic": 120, "diastolic": 80 } ] }
+| Level | Name | Definition |
+|---|---|---|
+| 1 | Minimal | No discernible shape or separation beyond baseline muscle tone at this leanness. The region reads as smooth/flat relative to the rest of this person's own physique. |
+| 2 | Emerging | Some shape or fullness is visible, but with little to no separation from adjacent muscle groups; outline is soft/rounded rather than distinct. |
+| 3 | Developed | Clear, unmistakable shape and size. Separation from at least one bordering muscle group is visible under this photo's lighting/leanness. The region is a normal, present feature of the physique — not a flaw and not a highlight. |
+| 4 | Well-Developed | Pronounced size and shape with separation visible on multiple borders. Striations or vascularity may be visible if leanness allows. The region reads as one of this physique's stronger/more complete areas. |
+| 5 | Standout | Exceptional size and definition **relative to the rest of this same person's physique** — the most prominent, complete-looking region in these photos. Never a comparison to other people, population norms, or competitive standards (see Section 5, anti-feature: comparative-to-others judgments). |
+| — | Not Assessable | First-class non-answer, not a forced guess. Used when the submitted photo set does not include an angle/pose that shows this region (see Section 2 table), or the region is obscured by clothing, lighting, or pose in this specific submission. Carries a short `not_assessable_reason` rather than silently defaulting to a numeric level — this mirrors `body_measurements.py`'s pattern of treating "we have nothing" as its own explicit signal rather than encoding it as a fabricated value. |
 
-// 4a. Sleep, Summarize Data = ON  (detect via presence of "totalSleep"; "date" is DATE-ONLY)
-{ "name": "sleep_analysis", "units": "hr",
-  "data": [ { "date": "2024-02-06", "totalSleep": 7.5, "asleep": 7.0, "core": 3.5,
-              "deep": 1.5, "rem": 2.0,
-              "sleepStart": "2024-02-05 23:00:00 -0800", "sleepEnd": "2024-02-06 06:30:00 -0800",
-              "inBed": 8.0, "inBedStart": "...", "inBedEnd": "..." } ] }
+**Why 5, not 3, 7, or 10, and why absolute-per-observation rather than pure relative-delta:**
 
-// 4b. Sleep, Summarize Data = OFF  (detect via presence of "startDate")
-{ "name": "sleep_analysis", "units": "hr",
-  "data": [ { "startDate": "...", "endDate": "...", "qty": 0.5, "value": "Core" } ] }
-//   value ∈ Awake | Asleep | In Bed | Core | REM | Deep | Unspecified
-```
+- **Not 3.** Three collapses too much: it cannot distinguish "just starting to show" from "clearly developed but not a strong point," which is exactly the distinction a monthly ledger over a year needs to be useful at all. It would also make the improved/unchanged/regressed diff nearly binary (almost everything reads "unchanged" because there's nowhere to move without crossing a huge gap), defeating the purpose of tracking at this cadence.
+- **Not 7 or 10.** Per Section 1.1, the reliability gains of finer granularity assume a calibrated rater with a feedback loop and low measurement noise. Here the rater is uncalibrated (no external ground truth ever checks a Claude rating) and the measurement noise from photo confounders (Section 3) is large. A 10-point scale invites Claude to produce false precision — a level-6-vs-7 distinction that reflects lighting or pump state, not six additional weeks of hypertrophy. Given 19 muscle groups rated every month, a wider scale also multiplies the surface area for session-to-session drift: 19 independent fine judgments per month compounds inconsistency faster than 19 coarse ones.
+- **Not a pure relative delta (e.g., "+1/0/-1 vs last time") stored as the primitive.** PROJECT.md already specifies per-muscle-group *development ratings*, i.e., an absolute value at each observation, with the diff computed downstream in `analytics/physique.py` — this preserves a real, independently-meaningful ledger (you can ask "what was my chest rated at in March" without needing every intermediate delta), and the diff itself becomes a trivial, deterministic ordinal comparison (`current_level > prior_level` → improved, `==` → unchanged, `<` → regressed, either side `None` → not comparable) with **zero new arithmetic and no model call in the analytics path** — matching the milestone's own stated constraint.
+- **The prior-observation-context design decision is what makes an absolute 5-point scale defensible despite having only one uncalibrated rater.** Feeding Claude its own prior rating and notes before asking for a new one converts "rate this in isolation" (where drift is severe) into "does this look more, the same, or less developed than what I described last time" (an anchored comparative judgment, much closer to what the granularity literature's better-performing designs actually test). The scale's level *language* should be handed to Claude verbatim as part of the tool description or coaching instructions — the same way `INTERPRETATION_DISCLAIMER` in `recomposition.py` travels as a literal constant rather than being regenerated — so the anchors do not drift wording month to month even though the rater (a stateless LLM call) has no persistent memory between sessions.
 
-`source` is documented as "String, **when available**" and the vendor adds: *"On iOS 27+, `source` may
-be omitted [for] cumulative and heart rate data due [to] iOS changes affecting performance."* Never
-key on `source`.
+**Whole-body qualitative notes — bounded free text, not scored:**
 
-#### Workouts Version 2
+Per PROJECT.md's own phrasing, leanness, conditioning and symmetry are **notes**, not per-muscle numeric axes. Recommendation: three separate bounded free-text fields (not one blob), each capped (a concrete number: **300 characters** is proposed here, unsourced but consistent with the project's discipline of measured, budgeted response sizes rather than open-ended prose — see Phase 13's "within MEASURED byte budgets" precedent for report tools):
 
-Required: `id` (String UUID), `name`, `start`, `end`, `duration` (seconds).
-Optional, all as nested `{ "qty": n, "units": "..." }` objects: `activeEnergyBurned`, `totalEnergy`,
-`intensity` (MET), `distance`, `speed`/`avgSpeed`/`maxSpeed`, `elevationUp`/`elevationDown`,
-`temperature`, `humidity`, `stepCadence`, `flightsClimbed`, plus `location` (`Indoor|Outdoor|Pool|Open
-Water`) and `isIndoor` (Boolean). Time-series arrays (`heartRateData`, `heartRateRecovery`,
-`stepCount`, `activeEnergy`, …) carry `{date, qty|Min/Avg/Max, units, source?}` per point. `route[]`
-carries lat/lon/altitude/course/speed + accuracies + `timestamp`. Version 1 has **no `id`** — a
-critical difference for idempotency.
+- `leanness_notes` — qualitative only ("visibly leaner through the midsection than last observation, less noticeable in the upper body" — never a numeric body-fat estimate; see anti-feature 5.1).
+- `conditioning_notes` — vascularity, muscle "hardness"/fullness, skin tone/definition as a qualitative snapshot.
+- `symmetry_notes` — left/right or upper/lower balance observations, which the 19-value taxonomy cannot represent on its own since it has no left/right split.
 
-#### The three parsing landmines
+This is deliberately the IFBB dimension list (mass → captured by the per-muscle levels; symmetry, conditioning → captured by these two notes fields; separation → folded into the per-muscle level definitions above) reduced to what a single monthly rater can say honestly without inventing false numeric precision.
 
-1. **Timestamps are NOT ISO 8601.** Format is `yyyy-MM-dd HH:mm:ss Z`, e.g.
-   `"2024-02-06 14:30:00 -0800"`. `datetime.fromisoformat` will reject it. Worse, the
-   `irvinlim/apple-health-ingester` parser maintains a fallback list because the app emits 12-hour
-   forms when the device has *Settings → General → Date & Time → 24-Hour Time* off, **and newer iOS
-   versions insert a narrow no-break space (U+202F) before AM/PM**:
-   Go layouts, written here with the narrow space ESCAPED so it survives copy-paste:
-   `"2006-01-02 15:04:05 -0700"` (24h), `"2006-01-02 3:04:05 PM -0700"` (12h, ASCII space),
-   and `"2006-01-02 3:04:05\u202fPM -0700"` (12h, U+202F NARROW NO-BREAK SPACE before AM/PM).
-   Lowercase `pm` variants of the last two also occur. A parser that only handles the ASCII-space
-   form will fail on newer iOS with a message that reads like a corrupt payload.
-   Aggregated sleep's `date` is date-only (`"2024-02-06"`), a fifth format.
-2. **Units follow the user's in-app Unit Preferences, not a fixed system.** Distance is `mi` *or*
-   `km`; speed `mph` *or* `kmph`; temperature `degF` *or* `degC`; elevation `ft` *or* `m`; body mass
-   `kg` *or* `lb`. BRETT's internal units are kg/m/kcal/s/cm, so the `units` field must be read and
-   converted at the boundary. Hard-coding kg will silently corrupt weight trend if the phone's locale
-   ever changes.
-3. **Metric names are not a stable enum.** The vendor's own sources disagree:
+---
 
-   | Concept | Vendor server enum | Vendor help-centre prose | Community implementations |
-   |---|---|---|---|
-   | Body weight | `weight_body_mass` | `weight_&_body_mass` | `weight_body_mass` (×2, independent) |
-   | VO2 max | `vo2max` | — | `vo2_max` (×2) |
-   | Walking HR | `walking_heart_rate` | — | `walking_heart_rate_average` |
+## 2. Muscle-Group Photo Visibility — all 19 canonical groups
 
-   Two independent third-party parsers plus the vendor's server code agree on `weight_body_mass`, so
-   that is the working assumption — but the normalizer must be an **allowlist map with a logged
-   unknown-name path**, never a strict enum that 500s. Ground truth is one Manual Export away.
+Source for the taxonomy: `backend/app/normalization/muscles.py` (`CanonicalMuscleGroup`, 19 values, read directly for this research). Source for pose/visibility reasoning: bodybuilding posing guides describing what each mandatory pose reveals ([Garage Gym Reviews](https://www.garagegymreviews.com/bodybuilding-poses), [StrengthLog](https://www.strengthlog.com/bodybuilding-poses/)), cross-checked against standard progress-photo guidance recommending **three relaxed angles — front, side, back** — rather than flexed competition poses for routine monthly tracking ([SET FOR SET](https://www.setforset.com/blogs/news/how-to-take-progress-pics), [Five Starr Physique](https://fivestarrphysique.com/progress-photo-guidelines/)). None of the 19 groups is an anatomically deep/obscured muscle in the way a psoas or rotator-cuff would be ([NCBI/StatPearls on psoas](https://www.ncbi.nlm.nih.gov/books/NBK535418/), used as the "genuinely invisible" reference point) — Hevy's taxonomy and this project's split are already built from superficial, trainable, hypertrophy-relevant muscle groups, so "not assessable" below always means *occluded by pose/clothing/angle in a normal photo set*, never *anatomically invisible*.
 
-#### Delivery reliability — the constraint that shapes the whole design
+MEDIUM confidence throughout this table — reasoned from posing-guide descriptions and anatomy, not from a controlled study rating real photos.
 
-Vendor documentation, verbatim: *"Apps are not allowed to access health data while iPhone is locked.
-Automations will only run during periods when your device is unlocked. This is a limitation imposed by
-Apple which cannot be circumvented."* Plus: *"Background tasks will typically need to complete within
-30 seconds"*; automations may not run under Low Power Mode, disabled Background App Refresh, or system
-resource pressure; and there is **no retry**. Sync Cadence is "select a number and interval" but the
-docs state plainly it "is not an exact schedule and does not guarantee that the app will open or run in
-the background at that interval."
+| Canonical Muscle Group | Visibility from standard relaxed photos (front/side/back) | Classification | Angle(s) needed | Notes |
+|---|---|---|---|---|
+| `chest` | Clearly visible, front and side | **Reliably assessable** | Front, side | Best of the 19; front-relaxed alone usually suffices. |
+| `lats` | Visible front (width, "V-taper") and back (width/thickness) | **Reliably assessable** | Front, back | Back view shows more; front alone underrepresents lat development. |
+| `upper_back` (rhomboids/mid-traps) | Only visible from a back angle, and subtle even then unless quite lean | **Partially assessable** | Back (required) | Frequently indistinct from `traps`/`lats` in a relaxed, non-flexed back photo; low resolution of judgment without a flexed rear pose most users won't take monthly. |
+| `traps` | Visible from front (neck-to-shoulder line) and back (thickness) | **Reliably assessable** | Front, back | Upper-trap slope reads clearly in a relaxed front photo even without flexing. |
+| `lower_back` (erectors) | Only visible from behind, and only shows real definition at low body-fat | **Partially assessable** | Back (required) | Body-fat- and lighting-dependent even when the angle is right; expect frequent "not assessable" at higher body-fat percentages, which is a correct answer, not a gap. |
+| `front_delts` | Clearly visible from front | **Reliably assessable** | Front | |
+| `side_delts` | Clearly visible from front and side (drives shoulder "width") | **Reliably assessable** | Front, side | |
+| `rear_delts` | Only visible from behind; easy to miss even in a back photo unless shoulders are slightly turned or the arm hangs away from the torso | **Partially assessable** | Back (required) | The single most commonly-skipped region in typical progress-photo sets — most people's "back relaxed" photo does not reveal rear-delt shape distinctly. |
+| `biceps` | Visible in any arm-uncovered photo, more so with a slight arm flex | **Reliably assessable** | Front or side (arms visible) | Fully relaxed arms understate biceps peak/shape vs. a flexed pose — see Section 3's flex-state confound. |
+| `triceps` | On the back of the upper arm — poorly shown by a front-relaxed pose, better from the side or back | **Partially assessable** | Side, back | Front-only photo sets systematically under-assess this group; needs at least a side angle with the arm visible. |
+| `forearms` | Visible in almost any photo with bare arms | **Reliably assessable** | Any (arms visible) | Development differences are real but visually subtle month to month. |
+| `abs` | Visible from front, extremely leanness-dependent | **Reliably assessable (leanness-dependent)** | Front | The single most confound-sensitive group: bloating, hydration, pump, and whether the subject is actively bracing the midsection all change apparent visibility more than a month of real training does (see Section 3). |
+| `obliques` | Visible from front and especially side/three-quarter angles, similarly leanness-dependent | **Reliably assessable (leanness-dependent)** | Front, side | |
+| `quads` | Clearly visible front, given shorts/no leg covering | **Reliably assessable** | Front, side | Conditional on clothing — see Section 3 clothing note. |
+| `hamstrings` | On the back of the thigh — invisible from front, only shown by a back angle with legs uncovered | **Partially assessable** | Back (required, legs uncovered) | Standard relaxed standing photos (even a "back relaxed" one) often show hamstrings only faintly since the pose isn't designed to reveal them; a slight one-leg-back stance or three-quarter turn helps but isn't standard practice for a home progress photo. |
+| `glutes` | Only visible from behind, and clothing-dependent | **Partially assessable** | Back (required), clothing-dependent | Most people's back-relaxed progress photos are taken in gym shorts that fully cover this region — visibility here says as much about the user's clothing choice as their photo protocol. |
+| `calves` | Visible front, side, and back given shorts | **Reliably assessable** | Front, side, or back | Most consistently visible lower-body group regardless of angle chosen, given legs uncovered. |
+| `abductors` (outer hip/glute medius region) | Blends visually into the quad/glute outline; not a distinct visible bulge for the overwhelming majority of people at any normal training level, and typically covered by shorts even when uncovered elsewhere | **Not assessable** | — | Structurally the same problem the codebase's own comment about `full_body`/D-03 describes for volume: attempting to rate a value here would manufacture a number nobody can actually see, not report a real observation. |
+| `adductors` (inner thigh) | Inner thigh; essentially never a distinct, separately-identifiable visual feature in a standing photo at any angle, and almost universally covered by clothing | **Not assessable** | — | Same reasoning as `abductors`. |
 
-Two failure messages the vendor documents are worth designing against because they mean *nothing was
-uploaded*: `"No health data was found in this date range, so nothing was uploaded."` and `"Health data
-could not be fully read. The device may have locked during the export. Nothing was uploaded."`
+**Standard angle set recommended for the photo protocol (Section 3): front-relaxed, side-relaxed, back-relaxed — three photos, not the full 8-pose competition posing routine.** This is consistent with mainstream progress-photo guidance for non-competitors ([SET FOR SET](https://www.setforset.com/blogs/news/how-to-take-progress-pics)), and covers 15 of 19 groups fully or partially; the remaining gaps (`abductors`, `adductors`, and the leanness-conditional read on `abs`/`obliques`/`lower_back`) are not solved by adding more angles — they are solved by `Not Assessable` being a legitimate, expected, first-class answer.
 
-### Table Stakes — Apple Health Ingestion
+---
 
-| Feature | Why Expected | Complexity | Notes / dependency |
-|---------|--------------|------------|--------------------|
-| `POST /api/v1/ingest/health-auto-export` webhook receiver | The only delivery mechanism HAE offers | LOW | New route under `app/api/routes/`. Must be excluded from the MCP OAuth path; it needs its own shared-secret header check |
-| Static shared-secret header auth on the ingest route | HAE supports only fixed custom headers — no OAuth, no signing | LOW | `Authorization: Bearer <secret>` or `X-API-Key`. Compare with `hmac.compare_digest`. New Secret Manager entry alongside `MCP_AUTH_SECRET`. **Rate-limit it** — the existing token-bucket middleware currently exempts only `/health` and discovery |
-| Idempotent upsert on `(source, metric, local_day)` | HAE re-sends overlapping windows on every `Default` / `Previous 7 Days` run, and has no dedup of its own | MEDIUM | Mirrors the Hevy sync's idempotency guarantee. `session-id` header gives per-request identity but **not** per-datapoint identity — do not use it as the dedup key |
-| Multi-shape metric parser (qty / Min-Avg-Max / systolic-diastolic / sleep-aggregated / sleep-raw) | Four shapes exist in one array; a single Pydantic model cannot cover them | MEDIUM | Discriminate on `name` for `heart_rate` / `blood_pressure`, and on **key presence** for sleep (`totalSleep` ⇒ aggregated, `startDate` ⇒ raw) |
-| Tolerant timestamp parser covering all five documented formats | `fromisoformat` fails on every one of them | LOW | Ordered format list with memoised last-success, exactly as the Go reference implementation does. **Include the U+202F variants** |
-| Unit conversion at the boundary driven by the payload's `units` field | Payload units follow device locale; BRETT stores kg/cm/kcal/s | LOW | Extends the existing "convert at the application boundary only" constraint. Reject rather than guess on an unrecognised unit string |
-| Unknown-metric tolerance (log + skip, never 500) | Metric names demonstrably vary across HAE versions and doc sources | LOW | A 500 makes HAE mark the run failed with no retry — data is lost permanently |
-| `sync_state` rows for the new resources | Every analytics response already carries a per-resource `last_synced_at` envelope | LOW | **Direct reuse:** `SyncState` is keyed `(user_id, provider, resource)`. Add `provider='apple_health'` + resources. Then `FRESHNESS_RESOURCES_*` in `metadata.py` extends without structural change |
-| Large-body handling | Vendor warns of "several hundred megabytes"; their own server allows 200 MB | MEDIUM | Cloud Run's request limit and BRETT's own body cap must be set deliberately. Instruct the user to enable **Batch Requests** and narrow metric selection — a config-side mitigation is far cheaper than a streaming parser |
-| Ingest observability (accepted/skipped/unknown counts per request) | HAE gives the user only in-app Activity Logs; without server-side counts, silent partial ingestion is invisible | LOW | Structured log via existing `structlog` setup + correlation ID. **Deny-list applies:** never log raw health samples |
+## 3. Photo Protocol & Standardization — what moves apparent physique independent of real change
 
-### Table Stakes — One-Time `export.xml` Backfill
+Progress-photo guides converge on a consistent list of controllable confounders ([SET FOR SET](https://www.setforset.com/blogs/news/how-to-take-progress-pics), [Five Starr Physique](https://fivestarrphysique.com/progress-photo-guidelines/), [Gymnoteplus](https://www.gymnoteplus.com/blog/how-to-take-progress-photos), [MacroFactor's progress-photo tips](https://help.macrofactorapp.com/en/articles/117-tips-for-taking-good-progress-photos)). MEDIUM confidence — consistent across many independent fitness-industry sources, not a controlled study, but the physiological mechanisms cited (glycogen/water loading, vasodilation from exercise) are well-established and uncontroversial.
 
-| Feature | Why Expected | Complexity | Notes / dependency |
-|---------|--------------|------------|--------------------|
-| Streaming XML parse (`iterparse` + `elem.clear()`) | The real file is 191 MB / 438,649 records; `ElementTree.parse` will load the whole DOM | MEDIUM | Offline CLI (`app/cli.py`), never an HTTP endpoint. Not on the Cloud Run request path at all |
-| **Source-aware exclusion** of `sourceName="Hevy"` records | 218/224 workouts, all 8 waist records and the early body-mass records are Hevy re-exports of data BRETT already owns | LOW-but-critical | This single filter is the difference between a correct backfill and permanently double-counted history |
-| Daily aggregation of sub-daily quantity records in `Asia/Jakarta` | Step/energy records are 5–10 minute buckets; analytics is local-day grained | MEDIUM | **Reuses `app/analytics/rollup.py::resolve_window` timezone apparatus and `app/core/time.py::local_day`.** Do not introduce a second timezone path |
-| Cross-source overlap handling for the two iPhone `sourceName`s | 40,452 records from "Vegant's iPhone" + 7,809 from "V's iPhone"; the Health app dedups in its UI, the raw XML does not | MEDIUM | Naive summation over an overlap window inflates step counts. Prefer-one-source-per-day is the cheap correct answer |
-| Dry-run / idempotent re-run | A 191 MB import that half-succeeds must be safely repeatable | LOW | Same upsert path as the webhook; the constraint "never corrupt existing data on partial/failed sync" already applies |
+| Variable | Documented effect on apparent physique | Independent of real change? |
+|---|---|---|
+| **Pump state** (photo taken right after training vs. rested) | Recently-trained muscle is vasodilated and glycogen/fluid-shifted into the tissue, looking measurably larger and more vascular for roughly an hour or more post-exercise | Yes — this is the single most commonly cited distortion in every guide reviewed |
+| **Glycogen/carbohydrate intake in the prior 1–2 days** | Low-carb days flatten muscle appearance (less intramuscular glycogen and associated water); high-carb days fill it out, sometimes reducing visible separation via subcutaneous water | Yes |
+| **Hydration / sodium intake** | Water retention (high sodium, poor sleep, certain supplements) smooths visible definition, especially abs/obliques | Yes |
+| **Time of day** | Water and food shift through the day; a fasted morning photo is the most repeatable baseline cited across every guide | Yes, if inconsistent between sessions |
+| **Lighting angle and quality** | Side/angled or harsh lighting creates shadow-based definition that isn't structural; flat/frontal lighting can wash out real definition. One guide notes you "can look 10 pounds lighter or heavier" purely from lighting choice | Yes, and a large effect |
+| **Camera distance and height, and lens distortion** | A closer/wider-angle shot systematically distorts proportions (perspective foreshortening) differently from a photo taken from further back with the same framing | Yes |
+| **Pose / flex state** | Actively flexing (even lightly) shows dramatically more shape and separation than fully relaxed, especially for abs and biceps; being consistent about "relaxed" vs. "lightly flexed" between sessions matters more than which one is chosen | Yes — and directly interacts with the per-muscle scale in Section 1.2, since a level-3 relaxed and a level-3-lightly-flexed rating are not the same claim |
+| **Clothing** | Baggy or dark clothing obscures the exact outlines the taxonomy needs (this is why `glutes`/`hamstrings` are "partially assessable" rather than "reliably assessable" in Section 2) | Not itself a real-vs-apparent confound, but a coverage confound — it changes what's assessable, not what's true |
 
-### Differentiators — Apple Health
+**Implication for what an observation should record as metadata (not part of the rating itself):** the observation schema should carry a small, bounded set of self-reported confounder flags/fields alongside the ratings, so a future comparison can be honest about them rather than silently treating two photos as equivalent when they weren't taken under equivalent conditions. Concretely:
+
+- `photo_angles_present` (which of front/side/back were actually submitted this time — drives which muscle groups can even be attempted, per Section 2's table)
+- `pose_state` (e.g., relaxed vs. lightly flexed — bounded enum, not free text, since Section 1.2's scale depends on this being comparable)
+- A short free-text `conditions_note` field for anything the user or Claude flags as unusual this time (e.g., "day after a high-sodium meal," "photo taken immediately post-workout") — this is where the confounders above get honestly logged rather than silently absorbed into the rating
+
+This is the same category of design BRETT already uses in `body_measurements.py` — `is_stale` and `insufficient_data` are **independent, non-collapsed signals** specifically so "we cannot compare" and "this is old news" stay distinguishable. Confounder metadata here plays the analogous role: "the rating changed" and "the conditions were comparable" must stay two separate, inspectable facts, not one blended verdict.
+
+**Corroboration of the milestone's monthly-only decision:** multiple independent guides converge on "**photos taken less than two weeks apart rarely show visible change**" and recommend a minimum interval in the 2–4 week range, with clearly noticeable change more reliably visible at a 1–3 month remove ([Gymnoteplus](https://www.gymnoteplus.com/blog/how-to-take-progress-photos)); separately, visible (not just physiological) muscle change is generally reported to need roughly **6–12 weeks of consistent training** to show up clearly in comparison photos at all, with 3–6 months being described as a more credible window for unambiguous change. This independently supports (it does not merely restate) the milestone gate's decision to exclude physique from the weekly report and include it only monthly — a weekly cadence would be comparing photos at an interval the literature says is below the noise floor for real, visible change.
+
+---
+
+## 4. Longitudinal Comparison as a User-Facing Feature
+
+How existing apps present physique change over time, and what makes it feel meaningful:
+
+- **PeakBFF**: weekly check-ins (photo + optional weight + note) in one private timeline, with a before/after **slider** comparison between any two check-ins ([PeakBFF review, via GainFrame](https://www.peakbff.com/blog/en/best-private-progress-photo-app)).
+- **GainFrame**: a "Smart Filter" side-by-side comparison plus derived trend lines (monthly body-fat trend, FFMI trajectory) and a composite score that "goes up as your physique improves," alongside the 12-area Needs Work→Elite muscle map described in Section 1.1 ([GainFrame](https://gainframe.app/blog/best-progress-photo-apps/)).
+- **LocalOne Gym Pics**: privacy-first, on-device-only storage, automatic timestamping, no scoring — a pure timeline/album, explicitly positioned against apps that compute anything from the photo ([LocalOneLabs](https://localonelabs.com/pages/blog/best-fitness-progress-photo-apps)).
+- The recurring theme across every reviewed app: **"a proper tracker extracts something from the photo you can compare across time — body fat percentage, a score, a measurement, or a written analysis — rather than just being a photo album."** ([GainFrame](https://gainframe.app/blog/best-progress-photo-apps/)) — this is exactly the gap BRETT's structured-observation approach fills, and exactly why "just store the photos" (which BRETT explicitly does not do) would not have been a feature at all.
+
+**What makes a comparison feel meaningful rather than noisy**, synthesized from the above plus Section 3's confounder list:
+1. **A stated, honest baseline** — showing what changed *and* what conditions might explain a non-change (this is what `photo_angles_present`/`pose_state`/`conditions_note` metadata is for).
+2. **Comparing to the user's own history, not a population score.** GainFrame's 1–100 "Elite" framing is the opposite of this and is called out as an anti-feature below.
+3. **An interval long enough to exceed the noise floor** — the monthly-only decision, corroborated in Section 3.
+4. **Cross-referencing against a mechanism, not just restating the photo** — BRETT's planned cross-reference of "is the underdeveloped area also the undertrained one?" against `fitness_get_muscle_group_volume` is a materially stronger comparison feature than anything found in the reviewed consumer apps, none of which have real per-muscle training-volume data to cross-reference against. This is a genuine, evidence-grounded differentiator (Section 5).
+
+---
+
+## Feature Landscape
+
+### Table Stakes (Required for This Milestone to Deliver Its Stated Value)
+
+| Feature | Why Expected | Complexity | Notes |
+|---|---|---|---|
+| Structured per-muscle-group rating on the 19-value `CanonicalMuscleGroup` taxonomy | PROJECT.md requirement; without it there is nothing to diff or report | LOW | Reuses the existing enum in `backend/app/normalization/muscles.py` verbatim — no new taxonomy |
+| A defined, documented rating scale with fixed level anchors (Section 1.2) | A badly-designed or undocumented scale makes every stored value meaningless the moment wording drifts between sessions | LOW–MEDIUM | The scale text itself should live as a constant travelling verbatim into the tool schema/coaching instructions, mirroring `INTERPRETATION_DISCLAIMER` in `recomposition.py` |
+| `Not Assessable` as a first-class per-muscle state, not a forced numeric guess | 2 of 19 groups (`abductors`, `adductors`) and several conditional groups (Section 2) are routinely unobservable; forcing a number manufactures noise | LOW | Mirrors `insufficient_data`/`is_stale` pattern already established in `body_measurements.py` |
+| Bounded free-text notes: `leanness_notes`, `conditioning_notes`, `symmetry_notes` | Explicitly named in PROJECT.md's Active requirements | LOW | Cap each field (proposed: 300 chars) to keep monthly report byte budgets predictable, per Phase 13's precedent |
+| Confounder/context metadata per observation (`photo_angles_present`, `pose_state`, `conditions_note`) | Without it, a comparison can't distinguish real change from a lighting/pump/pose difference (Section 3) | LOW–MEDIUM | Small bounded enum/text fields, not a full protocol form |
+| Single-call, append-only, non-destructive MCP write tool | PROJECT.md requirement; BRETT's second-ever write path | MEDIUM | Should follow the two-call confirm-gate precedent from `fitness_switch_training_program` only if a mistaken write is genuinely costly to reverse — since this is append-only and non-destructive (a bad observation can simply be superseded next month, not corrected in place), a lighter single-call gate without a confirmation-token round trip is likely appropriate; the "second write tool cannot pass by being skipped" guard-test pattern from Phase 12 still applies |
+| Prior-observation retrieval as context at analysis (write) time | PROJECT.md's stated load-bearing design decision; also directly required by the anchored-judgment reasoning in Section 1.2 | MEDIUM | The retrieval is a read, so it can reuse existing read-path patterns; the write tool's handler composes a read before performing the write |
+| Deterministic diff (improved/unchanged/regressed) per muscle group, `analytics/physique.py` | PROJECT.md requirement; must be arithmetic-only per the project's "analytics is deterministic and testable" rule | LOW | A 3-way ordinal comparison plus `None`-handling for `Not Assessable` — no model call, no image, matches the constraint verbatim |
+| Cross-reference against `fitness_get_muscle_group_volume` | PROJECT.md requirement ("is the underdeveloped area also the undertrained one?") | LOW–MEDIUM | Existing tool/analytics function, called by name, not re-derived |
+| Subjective-output disclaimer traveling verbatim on every physique-touching response | Matches the `RecompositionResult.disclaimer` required-field pattern already established for exactly this kind of decision-support-not-diagnosis output | LOW | Same shape as `INTERPRETATION_DISCLAIMER` |
+| Monthly-only report integration, `_report_body_fields` split | PROJECT.md requirement, explicit about the split being deliberate | MEDIUM | Corroborated independently by Section 3's interval findings — not just a policy choice, a well-founded one |
+| Narrowed read-only guard amendment | Matches the Phase 12 `program_switch.py` precedent; `test_mcp_readonly.py`'s "a second write tool cannot pass by being skipped" assertion needs updating per PROJECT.md | LOW | Named-module narrowing, not a general re-opening |
+
+### Differentiators (Genuine Competitive/Personal Advantage, Evidence-Grounded)
 
 | Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| Steps + active energy as **non-training activity load** in recomposition | Explains a stalled bulk (NEAT crept up) or a faster-than-target cut without touching the training data. This is genuinely new signal Hevy cannot supply | MEDIUM | Feeds `recomposition.py` as *context*, exactly as `training_volume` already does — **not** as a classifier input. `RecompositionResult` already has the precedent |
-| Weight from non-Hevy sources (Foodvisor writes daily weigh-ins to Apple Health) | The most recent `BodyMass` records in the real export come from Foodvisor, not Hevy — genuinely additional weigh-ins that would densify the sparse trend | LOW | `BodyMeasurement.source` is `String(16)` with a `(user_id, source, measured_on)` unique key, so a third source slots in with **no migration**. But see the `_dedupe_by_day` warning under Dependencies |
-| Ingest health-check / "last delivery" surfaced to Claude | Given no retry and unlock-gated background execution, silent stoppage is the *expected* failure mode, not an edge case | LOW | `SyncState.last_synced_at` for `apple_health` flows into the existing freshness envelope for free |
+|---|---|---|---|
+| Cross-referencing visible development against real per-muscle training volume | No consumer progress-photo app reviewed (PeakBFF, GainFrame, LocalOne) has real structured training-volume data to cross-reference against — this is only possible because BRETT already has `fitness_get_muscle_group_volume` | LOW (given the dependency already exists) | Directly answers "is this undertrained or just genuinely lagging" rather than only "is this bigger than last time" |
+| Anchored/relative rating methodology via prior-observation context | Directly mitigates the single-rater, no-calibration-loop weakness the granularity literature (Section 1.1) flags as a real risk; no reviewed consumer app does this — they either compute a CV-derived score fresh each time (GainFrame) or store nothing but raw photos (LocalOne) | MEDIUM | This is the milestone's own stated design decision; documenting *why* it's the right call (Section 1.2) is this research's contribution |
+| Zero photo storage / zero retention | A privacy differentiator versus every reviewed photo-storing competitor, and it is what makes the milestone's `--allow-unauthenticated` Cloud Run deployment defensible for this data category at all | Already decided, N/A to re-cost | Framed here as a differentiator, not a constraint, because it is genuinely unusual among physique-tracking products |
+| Deterministic, reproducible diff logic instead of a recomputed "score" | Matches the project's own "analytics must be deterministic and testable" rule; GainFrame's composite score, by contrast, is presumably recomputed by its CV pipeline and not guaranteed stable/reproducible in the same way | LOW | Genuine technical differentiator versus the CV-based competitors, though it is enabled by BRETT's narrower, honest scope (ratings, not photos) rather than a superior algorithm |
 
-### Anti-Features — Apple Health
+### Anti-Features (Explicitly Should NOT Be Built)
 
-| Feature | Why Requested | Why Problematic | Alternative |
-|---------|---------------|-----------------|-------------|
-| Ingest the `data.workouts` array | It is right there in the payload and the app offers it | **97% of them are Hevy re-exports.** Double-counts sessions, volume, and frequency against data BRETT already has at per-set fidelity. Apple Health strength workouts carry no weights or reps at all | Select **Health Metrics only** in the HAE automation. Leave `workouts` unparsed and log a warning if it arrives |
-| Sleep-stage (Core/REM/Deep) analytics | The payload schema has the fields | **Zero stage data exists.** All 2,411 sleep records are undifferentiated `InBed`, and they stop at 2024-11-30. Stages require an Apple Watch the user does not own | Parse and store `inBed` duration only. Ship stage columns nullable if you must, populate nothing, and do not build analytics on them |
-| HRV / resting-HR "recovery score" | It is the headline feature of every recovery app | **Zero records of either type in 4.5 years of history**, and none will arrive without a Watch. A recovery score computed from nothing is a fabricated number in a health context | Drop "recovery" from the milestone. Re-scope the requirement to "activity trends". Revisit if a Watch appears |
-| Ingest every one of the 150+ supported metrics | "Store it all, decide later" | The vendor explicitly warns this kills the automation: *"Even empty data types will have a performance impact"* and large exports get **killed by iOS**, producing zero deliveries | Allowlist ~6 metrics: `step_count`, `active_energy`, `walking_running_distance`, `flights_climbed`, `weight_body_mass`, `sleep_analysis` |
-| Second-or-minute Time Grouping | Maximum fidelity | Vendor: fine-grained queries "can take a long time to run and clash with system limitations." BRETT's analytics is local-day grained — sub-daily rows are storage and parse cost for zero analytical gain | `Time Grouping = Day`, `Summarize Data = ON` |
-| A generic "Apple Health" table storing arbitrary `(name, value, unit, ts)` | Future-proof, schema-free | Pushes every unit, dedup and shape decision into query time — where `bodyweight.py`'s Decimal discipline and the `insufficient_data` floors cannot reach it | Typed columns per ingested metric, same as `BodyMeasurement` does for its 17 |
-| Ingesting nutrition (`dietary_*`) because the payload offers it | 95 `DietaryEnergyConsumed` records exist in the export; Foodvisor is actively writing | PROJECT.md Out of Scope is explicit: **no nutrition work in v2.0**, automatic or manual | Leave it. Revisit at the next milestone boundary |
-
----
-
-## Capability #2 — Max-Weight-Lifted as the Primary Strength Signal
-
-### What the ecosystem actually does
-
-Hevy — the app the user trains in — already presents exactly this framing. Its exercise-performance
-graph is metric-switchable across **Heaviest Weight, One Rep Max, Best Set Volume, Session Volume,
-Total Reps**, and its *Set Records* chart deliberately shows *"the heaviest weight you've lifted for
-that specific number of repetitions"* rather than a percentage of 1RM. Hevy distinguishes a **true**
-1RM (an actual single) from a **projected** one. Most competing trackers (Strong, IronLedger,
-1RM.fit) default to estimated 1RM because it enables percentage-based programming — which BRETT does
-not do. Rippling that back: **max weight is the metric the user sees in his own app**, and estimated
-1RM is a derived convenience for a use case BRETT has no requirement for.
-
-The coaching-literature counterpart is "top set" tracking: the heaviest working set of a session,
-trended over time, with reps recorded alongside so a load increase at equal-or-more reps reads as
-progress and a load increase at fewer reps reads as ambiguous.
-
-| Feature | Category | Complexity | Notes / dependency |
-|---------|----------|------------|--------------------|
-| Max-weight series per (exercise, local day) | Table stakes | MEDIUM | `progression.py` currently picks the day's headline set by **highest estimated 1RM** (its module docstring defends this explicitly: 60 kg×10 → e1RM 80.0 beats 70 kg×5 → 81.7). Switching the selector to max weight is a small code change with a **large behavioural blast radius** |
-| Reps carried alongside every max-weight point | Table stakes | LOW | Without reps, 100 kg×1 and 100 kg×8 are the same point and a deload reads as maintenance. `ProgressionPoint` already reports weight, reps and set count |
-| Max-weight trend classification (improving/stable/declining) | Table stakes | MEDIUM | Reuses the existing least-squares slope machinery — but the **dead-band must be re-derived**. The current 2% tolerance was tuned to Epley e1RM noise across a 5–12 rep spread; max weight is a step function moving in plate increments (often 2.5 kg ≈ 2–4% at this user's loads), so a 2% band would classify a single plate jump as a trend |
-| Plateau detection on max weight | Table stakes | MEDIUM | Same window/threshold reporting contract as today. **Removes** `D-07a`'s "skip days with no e1RM-qualifying set" complication: 376/2,239 exercise-sessions (16.8%) currently produce no e1RM but *every* set has a weight, so coverage improves |
-| e1RM retained as a labelled secondary field | Table stakes | LOW | PROJECT.md is explicit that e1RM "stays available… not removed". `PersonalRecordType.ESTIMATED_1RM` and `estimates.py`'s gating stay untouched |
-| "Heaviest weight at N reps" record table | Differentiator | LOW | **Already built.** `RepsAtWeightRecord` exists in `schemas.py` precisely because "max reps at a given weight" is a list keyed by weight rather than a scalar. This is Hevy's Set Records chart, already in BRETT |
-| Per-exercise "is this a real PR or a rep-scheme artefact" annotation | Differentiator | MEDIUM | The honest answer to max-weight's biggest weakness. A new top-set weight at 1 rep after weeks of 8s is not unambiguous progress |
-| Dual-signal disagreement surfaced rather than hidden | Differentiator | LOW | The module already ships the precedent: PROG-02 and PROG-03 disagree on Overhead Press (improving over 11 weeks *and* plateaued over the last 4 sessions) and both return their window as a field. Max-weight vs e1RM disagreement is the same pattern, and it is exactly the case where a coach adds value |
-| Deleting e1RM outright | **Anti-feature** | — | Contradicts PROJECT.md; discards the gating work in `estimates.py`; and e1RM is the better signal precisely when a lifter progresses by adding reps at fixed load — which is most accessory work |
-| Auto-switching between max-weight and e1RM per exercise | **Anti-feature** | — | A metric that silently changes definition per exercise makes "am I progressing?" unanswerable and untestable. Pick one primary, report the other |
-| Warm-up sets counting toward max weight | **Anti-feature** | — | Already handled: `records.py` excludes warm-ups. Keep that exclusion on the new path — a regression here is silent and plausible-looking |
-
-**Blast-radius warning for the roadmap:** `recomposition.py` consumes `get_exercise_trends` and folds
-28 exercises into a net score against a ±0.25 band, producing the whole-body recomposition verdict.
-Changing the trend metric changes that verdict. The live-data baseline documented in the module (9
-improving / 9 stable / 10 declining) is the regression fixture — capture the new distribution
-deliberately rather than discovering it in production.
-
----
-
-## Capability #3 — Weekly / Monthly Reports
-
-### Convention from coaching practice
-
-The industry-standard weekly check-in converges on four blocks — **training compliance / adherence**,
-**energy & recovery**, **nutrition**, **body-weight trend** (near-universally a *7-day average*, never
-a raw scale reading) — closed by **one clear focus for the coming week**. The most-cited framing
-reduces this to three signals: *adherence* (did reality match the plan), *obstacles* (what got in the
-way), *agency* (what the client will change). MacroFactor's analytics dashboard is the algorithmic
-version: trend weight (weighted moving average), rate of change, adherence rate, and how those relate
-to each other — deliberately never the raw scale number.
-
-Weekly vs monthly is a **window difference, not a content difference**: weekly reports on adherence
-and short-horizon noise; monthly reports on trend, PRs, measurement deltas, and program fit.
-
-| Feature | Category | Complexity | Notes / dependency |
-|---------|----------|------------|--------------------|
-| `fitness_get_weekly_report` composing existing analytics | Table stakes | MEDIUM | Pure composition. Every input exists: `get_weekly_volume`, `get_training_frequency`, `get_exercise_trends`, `get_personal_records`, `get_body_weight_trend`, `get_recomposition_status` |
-| `fitness_get_monthly_report` — same sections, longer window | Table stakes | LOW | Once weekly exists, monthly is a window parameter plus a different section emphasis. **Do not build two composers** |
-| Period-over-period deltas in every section | Table stakes | LOW | **`compare_periods` already does per-week-normalised two-period comparison** — the hardest part is built |
-| Explicit adherence/consistency section | Table stakes | LOW | Sessions completed vs the period's own baseline. `frequency.py` supplies overall and per-muscle frequency |
-| Trend-based body-weight reporting, never raw scale | Table stakes | LOW | **Already correct.** `bodyweight.py` reports 7/14/30-day averages and a 4-week *smoothed* rate, and its docstring documents why the raw single-week delta (+0.72%/week from glycogen noise on live data) must never be classified against |
-| Freshness + coverage envelope on the report | Table stakes | LOW | Non-negotiable for a composed payload: a report that silently mixes fresh volume with 52-day-stale weigh-ins is worse than no report. `FRESHNESS_RESOURCES_ALL` already exists |
-| One-focus-for-next-period framing | Differentiator | LOW | This is **prompt work in `docs/coaching-instructions.md`, not backend work.** REQUIREMENTS.md excludes backend-generated coaching prose, and that exclusion should hold |
-| A `period_label` / explicit window on the payload | Differentiator | LOW | Same argument the progression module already makes: a verdict without its window is a contradiction waiting to be narrated |
-| Token-budgeted payload | Differentiator | MEDIUM | A report composing 6 analytics results is by far the largest MCP response BRETT will emit. The existing tools already return "compact, budgeted structured JSON" — the report needs its own explicit budget, likely with per-section caps |
-| Backend cron that *pushes* reports | **Anti-feature** | — | MCP has no push channel; a backend scheduler would have nowhere to deliver. Already decided: Claude's own scheduled-tasks feature (verified to exist, with MCP connector access in scheduled runs) drives cadence |
-| Backend-generated narrative prose | **Anti-feature** | — | Duplicates Claude's job, is untestable, and drifts from `coaching-instructions.md`. Return structured numbers; let Claude write |
-| Storing generated report snapshots | **Anti-feature** | — | Introduces a write path and a staleness class for zero benefit — analytics is deterministic, so any report is exactly reproducible from its window. Would also breach the "one narrow write tool" constraint |
-| A separate tool per report section | **Anti-feature** | — | 13 tools already; the point of a report is *one* call. Section tools already exist individually |
-
----
-
-## Capability #4 — Body Measurements Beyond Weight
-
-### Convention
-
-Standard at-home protocols track **neck, chest, waist, hip, mid-arm, thigh, calf** plus height and
-weight. Waist is treated as the single strongest indicator of central fat; limb circumferences (arm,
-thigh, calf) as lean-mass proxies. The WHO waist protocol is midpoint between the lowest rib and the
-iliac crest, at the end of a normal expiration, tape on skin. The dominant methodological message
-across sources is that **consistency beats precision** — technique variance between measurements
-swamps real change at short horizons, which is why measurement cadence is conventionally
-weekly-to-monthly rather than daily, and why comparison is presented as period-over-period deltas
-rather than as a smoothed daily curve.
-
-BRETT's `body_measurements` table **already has all 17 columns**: `weight_kg`, `lean_mass_kg`,
-`fat_percent`, and 14 circumferences including bilateral bicep/forearm/thigh/calf. Nothing writes
-`source='manual'` yet, and `bodyweight.py` reads only `weight_kg`.
-
-| Feature | Category | Complexity | Notes / dependency |
-|---------|----------|------------|--------------------|
-| Manual-entry write path | Table stakes | MEDIUM | **Zero schema work** — `source` is already `'hevy' \| 'manual'` with a `(user_id, source, measured_on)` unique key, and `external_id` is already nullable. The open question is *where the write lives*: an authenticated `/api/v1` endpoint, or the CLI. The MCP write budget is spent on program-switching |
-| Trend + period comparison across circumference columns | Table stakes | MEDIUM | **Generalise, do not fork.** `get_body_weight_trend` is weight-specific in three places: `_dedupe_by_day` returns `dict[date, Decimal]`, `_window_average` takes that mapping, and `BodyWeightTrendResult` names weight fields. The right shape is a per-metric fold reusing the same window/floor logic |
-| Per-metric `insufficient_data` floors | Table stakes | LOW | **Already the established pattern** — `build_measurement_coverage(window_days, measured_days, earliest_measurement_at)` is metric-agnostic today, and D-15's "each window has its own floor, and they are independent" generalises directly to "each metric has its own coverage" |
-| No interpolation, no carry-forward | Table stakes | LOW | **Already decided (D-13) and even more important here.** Waist has 15 of 123 rows with a three-month gap; a filled line would fabricate a recomposition trend out of nothing |
-| Sparse-metric honesty | Table stakes | LOW | Live counts: `fat_percent` 0/123, `lean_mass_kg` 0/123, `waist_cm` 15/123. `recomposition.py`'s docstring already states "Do not design a body-fat input into this module." Manual entry may change that — but only *after* rows exist |
-| Waist-to-weight divergence as a recomposition signal | Differentiator | MEDIUM | The classic recomp read: waist down while weight flat/up. Genuinely valuable *and* directly aligned with Core Value — but strictly gated on the user actually logging waist. Do not enter the label matrix until data density supports it |
-| Bilateral asymmetry surfacing (L vs R bicep/thigh/calf) | Differentiator | LOW | The schema uniquely supports it; almost no tracker reports it. Cheap once the generic per-metric fold exists |
-| Longer default window for circumferences than for weight | Differentiator | LOW | Weight uses 7/14/30-day windows because weigh-ins are near-daily. Circumference is measured monthly at best — a 7-day waist window will be empty ~90% of the time and reads as a bug |
-| Auto-deriving body fat % from circumferences (Navy formula) | **Anti-feature** | — | An estimate presented beside real measurements in a health context, with error bars wider than the change being tracked. `recomposition.py`'s existing `disclaimer` discipline exists precisely to avoid this class of claim |
-| Progress photos | **Anti-feature** | — | Binary blobs, storage cost, and a serious privacy surface on a service exposed to an LLM connector. Not in scope; not a data problem BRETT solves |
-| A `body_measurement_metrics` EAV table | **Anti-feature** | — | 17 typed `Numeric` columns already exist and carry the Decimal precision `bodyweight.py` depends on. EAV would trade that for `Numeric`-vs-`float` ambiguity and a join |
-
-**One concrete trap:** `_dedupe_by_day` prefers `'manual'` over `'hevy'` (D-14) and treats a manual row
-as authoritative *for the whole day*. Its docstring flags this as currently moot ("zero `'manual'` rows
-exist"). The moment manual entry ships, a manual row recording **only a waist measurement** on a day
-that also has a Hevy weigh-in will, under the current logic, suppress that day's weight —
-`_dedupe_by_day` adds the manual row to `seen_manual` and skips later rows for that day. The
-`weight_kg is None` guard drops the row from `by_day` but the day is still marked seen. **This is a
-live latent bug that manual entry activates.**
-
----
-
-## Capability #5 — Bulk / Cut / Recomp Program Modeling
-
-### Convention: published rate bands
-
-Sources disagree, and the disagreement is itself the finding. Rate bands are expressed as **% of
-bodyweight per unit time**, which is what `bodyweight.py` already computes.
-
-| Mode | Commonly published band | Notes |
-|---|---|---|
-| Cut | **0.5–1.0 % BW / week** loss (mainstream) | 0.25 %/wk for lean athletes in late contest prep; 1.5–2 %/wk tolerated at higher body fat or in a short mini-cut. Faster is associated with lean-mass loss and rebound |
-| Lean bulk | **0.25–0.5 % BW / week** (Helms, novice) | Helms scales by training age: novice 0.25–0.5 %/wk, **intermediate 0.1–0.2 %/wk**, advanced 0.05–0.1 %/wk. Other evidence-based sources frame the whole thing as **0.5–1 % BW / month** (≈ 0.12–0.25 %/wk) |
-| Recomp | **≈ 0 %, weight flat within a small band** | Intake within ~5–15 % of maintenance, protein 1.6–2.2 g/kg, 3–4 progressive sessions/week. Strength is the leading indicator; scale and tape lag |
-
-BRETT's current hardcoded `WEIGHT_GAIN_TOO_FAST_PERCENT_PER_WEEK = 0.25` sits at the **top** of Helms'
-novice band and roughly **2× the intermediate band** — defensible, but it is a novice-calibrated
-threshold applied to a user with 327 logged workouts. Worth a deliberate decision when the constants
-become data.
-
-| Feature | Category | Complexity | Notes / dependency |
-|---------|----------|------------|--------------------|
-| `training_programs` as real rows with mode + thresholds | Table stakes | MEDIUM | Replaces five module-level constants in `recomposition.py`. New table + Alembic migration (0005+). `users` has **no `goal` column** today — deliberately so |
-| An **active-program** concept with history | Table stakes | MEDIUM | "Am I progressing?" over a 12-week window can straddle a program switch. A single `users.active_program` FK loses that; a program row with `started_on`/`ended_on` keeps it. `RECOMP_LOOKBACK_WEEKS = 12` makes straddling the common case, not the edge case |
-| Program-aware thresholds injected into the classifier | Table stakes | MEDIUM | `_weight_bucket()` reads three module constants; it must read the active program's values. **Keep `classify_recomposition` pure** — pass thresholds as arguments. That preserves the 24-combination table-driven test |
-| Direction-aware labels per mode | Table stakes | MEDIUM | `_MATRIX_ROWS` encodes bulk semantics: `WEIGHT_LOSS_TOO_FAST` fires at −1.00 %/wk, which is *inside the normal cut band*. Under a cut, −0.8 %/wk is on target, not a safety warning. **The matrix needs a per-mode variant, or `RecompositionStatus` needs members the current 7-member enum lacks** |
-| Confirm-gated MCP write tool (two-call: warn, then `confirm=true`) | Table stakes | MEDIUM | Already decided. This is the **only** write tool. Needs: idempotency, an audit trail, program-name validation, and a first-call response that states what changes. Note MCP tool annotations (`readOnlyHint`, `destructiveHint`) are *advisory* — the two-call contract is what actually enforces confirmation, which is exactly why it was chosen |
-| Program echoed in every recomposition/report response | Table stakes | LOW | Without it, "you're gaining too fast" is unfalsifiable — the reader cannot tell which threshold produced it. `RecompositionResult.disclaimer` is the precedent for a required explanatory field |
-| Program-scoped period comparison ("this cut vs last cut") | Differentiator | MEDIUM | Program history makes this nearly free once `compare_periods` accepts program-derived windows. High coaching value |
-| Program-appropriate volume expectations | Differentiator | HIGH | Volume maintenance during a cut vs progressive overload during a bulk. Genuinely useful and genuinely hard to make deterministic — a strong candidate for **deferral**, and a phase that would need its own research |
-| Transition guidance ("this cut has run 14 weeks") | Differentiator | MEDIUM | Duration is a fact BRETT can state from `started_on`. Whether to advise a diet break is coaching judgment → prompt layer, not backend |
-| A general MCP write API | **Anti-feature** | — | PROJECT.md constrains v2.0 to exactly one narrow write tool. Every added write is new attack surface on a health dataset reachable through an LLM connector |
-| Auto-detecting the program from the weight trend | **Anti-feature** | — | Circular: the program supplies the thresholds that classify the trend. Inferring it from the trend makes the verdict self-fulfilling and impossible to falsify |
-| Calorie/macro targets on the program row | **Anti-feature** | — | Nutrition is explicitly Out of Scope for v2.0. Storing targets BRETT can never verify against intake produces confident numbers with no feedback loop |
-| Program-driven changes to volume/frequency *analytics* | **Anti-feature** | — | Programs should change **interpretation** (thresholds, labels), never **measurement**. Hard sets are hard sets. Blurring this makes historical comparison across programs meaningless |
-| Arbitrary user-defined program modes | **Anti-feature** | — | Three named modes were chosen. Free-form modes mean free-form thresholds, and `_LABEL_MATRIX`'s exhaustive-KeyError safety property depends on a closed set |
+| Feature | Why It Looks Appealing | Why It's Problematic | Alternative |
+|---|---|---|---|
+| **Precise numeric body-fat-percentage estimation from a photo** | Feels like the "real" number users actually want; several competitor apps (GainFrame) advertise it | Even validated, purpose-built computer-vision methods carry 2–4% documented error against DEXA in controlled trials; trained human visual estimation carries ~3–5% error and ~2.7% inter-rater disagreement even under favorable conditions ([PubMed](https://pubmed.ncbi.nlm.nih.gov/1569858/), [Nature npj Digital Medicine](https://www.nature.com/articles/s41746-024-01380-6)). An LLM eyeballing one uncontrolled phone photo, with no criterion measurement to ever check itself against, is the *worst-case* setup in this literature, not a favorable one. A precise-looking number here would carry unstated, unbounded error and directly contradicts the project's own established posture in `recomposition.py`, which explicitly refuses to treat body fat as an input specifically because there is no trustworthy data for it | Keep leanness strictly qualitative (`leanness_notes` free text). If a real number is ever wanted, it already exists as a measured value: `fitness_get_body_measurement_trend`'s `fat_percent` column, sourced from actual body-composition scans, not a photo guess |
+| **A composite whole-body physique score (e.g., 1–100, with tiers like "Elite")** | Gamification is engaging; GainFrame's model demonstrates market appetite for it | A single blended number hides exactly the information this feature exists to preserve (which muscle groups moved, which didn't), invites chasing a number rather than reading the underlying ratings, and the tier language itself ("Elite") is inherently a population-relative aesthetic judgment — the same category of comparison the coaching philosophy in `docs/coaching-instructions.md` avoids ("You are decision support... you do not diagnose") | Report the per-muscle levels and the improved/unchanged/regressed diff directly; no aggregation into one score |
+| **Aesthetic or comparative-to-others judgments** ("how does this compare to a typical lifter," "rate this out of 10," proportion-ideal comparisons like Adonis/golden-ratio scoring) | Sounds like useful context or motivation | This is precisely the mechanism implicated in body-checking research: repeated visual self-scrutiny against an external standard is associated with worsening body dissatisfaction and negative affect in studies of body-checking behavior, and is a recognized feature of body dysmorphic disorder presentations ([Renfrew Center](https://renfrewcenter.com/what-is-body-checking-body-dysmorphia-signs/); [PMC longitudinal body-checking study](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11671019/)). Explicitly out of place in a tool whose own instructions already state "you are decision support, not a clinician" | Level 5 ("Standout") in Section 1.2 is deliberately defined as relative to *this same person's own physique only* — the scale structurally forbids population comparison at the definition level, not just by convention |
+| **Encouraging frequent (weekly or more) photo check-ins for physique specifically** | Feels like "more data is better," and matches how some competitor apps (PeakBFF) default to weekly check-ins | Section 3 shows sub-2-week intervals fall below the real-change noise floor, so frequent re-rating would mostly encode confounder noise as apparent "regression," which is both dishonest data and a documented risk factor: increased self-photographing/checking frequency is linked to worsening body-image outcomes in at-risk individuals ([PMC](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11671019/)) | The milestone's own monthly-only decision is correct and independently corroborated (Section 3) — do not add a weekly or on-demand physique check-in path even as an option |
+| **Separate numeric axes per muscle group (mass, symmetry, conditioning, separation as 4 independent scores × 19 groups)**, mirroring full IFBB judging criteria literally | Looks more "complete" / more like real judging | IFBB's multi-axis precision is reliable *because 5–9 independent judges' rankings are averaged*, cancelling individual noise — a mechanism this single-rater, single-subject, monthly system structurally cannot reproduce. 76 numbers a month from one uncalibrated rater is manufactured precision, not more signal | One composite per-muscle development level (Section 1.2) plus the three whole-body qualitative note fields already covers the IFBB dimension list at a granularity a single rater can actually sustain honestly |
+| **Gamification elements (streaks, badges, "physique score" that goes up)** | Increases engagement in consumer apps | Not requested; for a personal, single-user coaching tool explicitly framed as decision support, streak/badge mechanics create exactly the compulsive-check-in incentive structure the body-checking research warns against, for no stated user benefit | None needed — the monthly report cadence and the diff narrative already provide the "did this improve" answer without a gamified wrapper |
+| **Storing or retaining the analyzed photo, even temporarily (e.g., for a future "show me the actual photo diff")** | Would enable a visual side-by-side, which reviewed competitor apps treat as a core feature | Already excluded at the milestone gate for good reason: it turns BRETT into a store of the single most privacy-sensitive data category it could hold, on a Cloud Run service deployed `--allow-unauthenticated`, with no object storage, retention policy, or image-handling code existing anywhere in the system today | Structured observations only; if a visual side-by-side is ever wanted, that is the user's own photo library, not BRETT's job |
 
 ---
 
 ## Feature Dependencies
 
 ```
-[HAE webhook receiver + shared-secret auth]
-    └──requires──> [sync_state rows for provider='apple_health']
-                       └──enables──> [freshness envelope covers Apple Health]
+CanonicalMuscleGroup enum (existing, backend/app/normalization/muscles.py)
+    └──required by──> Per-muscle rating schema (Section 1.2)
+                           └──required by──> MCP write tool (physique observation)
+                                                  └──required by──> Prior-observation retrieval (read-before-write)
+                                                  └──required by──> analytics/physique.py diff logic
+                                                                         └──required by──> Monthly report physique section
+                                                                         └──required by──> Cross-reference vs fitness_get_muscle_group_volume
 
-[export.xml backfill CLI]
-    └──requires──> [same normalizer + upsert path as the webhook]
-    └──requires──> [source-aware Hevy exclusion filter]   <-- HARD BLOCKER, not optional
+fitness_get_muscle_group_volume (existing, Phase 4)
+    └──required by──> Cross-reference feature (Section 4 differentiator)
 
-[Activity analytics (steps / active energy)]
-    └──requires──> [HAE ingestion]  AND  [local-day aggregation via rollup.py]
-    └──enhances──> [recomposition status]   (as CONTEXT, never a classifier input)
+_report_body_fields split (existing shared projection)
+    └──must be split before──> Monthly-only physique section can exist without also appearing weekly
 
-[Max-weight progression]
-    └──replaces──> [e1RM-keyed day-headline selection in progression.py]
-    └──requires──> [re-derived dead-band; the 2% e1RM tolerance does NOT transfer]
-    └──changes───> [get_exercise_trends]
-                       └──changes──> [recomposition.py aggregate_progression]
-                                          └──changes──> [fitness_get_recomposition_status output]
+Read-only guard amendment (narrowed, per Phase 12 precedent)
+    └──required by──> MCP write tool (physique observation)
 
-[Manual body-measurement entry]
-    └──requires──> [a write path outside MCP]  (the MCP write budget is spent on programs)
-    └──requires──> [_dedupe_by_day latent-bug fix]   <-- activated by the first manual row
-    └──unblocks──> [multi-metric trend + comparison]
-                       └──enables──> [waist-vs-weight divergence signal]
+RecompositionResult.disclaimer pattern (existing, recomposition.py)
+    └──pattern reused by──> Physique observation subjective-output disclaimer (required field)
 
-[Training programs as data]
-    └──requires──> [training_programs table + migration]
-    └──requires──> [threshold injection into classify_recomposition (keep it pure)]
-    └──requires──> [per-mode label matrix variants]      <-- the underestimated piece
-    └──requires──> [confirm-gated MCP write tool]
-    └──enables───> [program-scoped period comparison]
-
-[Weekly / monthly report tools]
-    └──requires──> [everything above]   <-- reports COMPOSE; they must be LAST
-    └──requires──> [an explicit token budget]
-
-[Ingest workouts from Apple Health] ──CONFLICTS──> [Hevy sync]
-     97% overlap by sourceName. Mutually exclusive; Hevy wins on fidelity.
-
-[Sleep-stage / HRV recovery analytics] ──CONFLICTS──> [reality]
-     0 records exist. No data path without an Apple Watch.
+body_measurements.py's independent is_stale/insufficient_data signals (existing pattern)
+    └──pattern reused by──> Not-Assessable / confounder-metadata design (Section 1.2, Section 3)
 ```
 
 ### Dependency Notes
 
-- **Reports depend on everything, so they sequence last.** A report built before the max-weight switch
-  reports the old strength metric; built before programs, it reports novice-bulk thresholds to a
-  cutting user. Building reports early guarantees rewriting them.
-- **Max-weight and programs both terminate in `recomposition.py`.** Max-weight changes the
-  `progression_signal` axis; programs change the `weight_bucket` axis. Landing both in one phase means
-  a verdict change with two simultaneous causes and no clean regression baseline. **Sequence them into
-  separate phases.**
-- **The Hevy exclusion filter blocks the backfill, not the webhook.** Going-forward HAE deliveries can
-  be scoped to Health Metrics only (no `workouts` array selected at all). The 191 MB historical file
-  has no such switch — the filter must exist in code before the first import runs.
-- **Manual entry activates a dormant `_dedupe_by_day` defect.** Fix it in the same phase that ships the
-  write path, not afterwards; the failure mode is a silently-suppressed weigh-in that produces a
-  plausible-looking wrong average.
+- **The rating schema must exist before the write tool can be built**, and the write tool must exist before there is more than one observation to diff — this is a strict phase-ordering chain, not parallelizable within itself.
+- **The prior-observation retrieval is not optional infrastructure** — per Section 1.2, it is the mechanism that makes an absolute, single-rater ordinal scale defensible at all. Building the write tool without it and adding it later would mean re-litigating whether the scale itself is even sound.
+- **The cross-reference feature depends only on already-shipped capability** (`fitness_get_muscle_group_volume`), so it carries no new research risk of its own — its only dependency is that physique observations exist to cross-reference.
+- **The monthly/weekly split depends on `_report_body_fields` being deliberately divided first**, per PROJECT.md's own note that it is currently one shared projection — this is a structural prerequisite, not a policy flag.
 
 ---
 
-## MVP Definition
+## MVP Definition (This Milestone)
 
-### Launch With (v2.0 core)
+### Launch With (v2.1)
 
-- [ ] HAE webhook receiver, shared-secret auth, rate-limited, idempotent upsert — the whole Apple Health thesis rests on it
-- [ ] Multi-shape metric normalizer + tolerant timestamp parser + units conversion — without these the payload cannot be read at all
-- [ ] Metric allowlist (`step_count`, `active_energy`, `walking_running_distance`, `flights_climbed`, `weight_body_mass`, `sleep_analysis` as `inBed` only)
-- [ ] `sync_state` + freshness coverage for `apple_health` — the existing envelope contract must not develop a hole
-- [ ] `export.xml` backfill CLI **with the `sourceName="Hevy"` exclusion filter** — one-shot, streaming, dry-runnable
-- [ ] Max-weight-primary progression, trend and plateau, e1RM retained as labelled secondary — the milestone's headline requirement
-- [ ] `training_programs` table + program-aware `recomposition.py` thresholds + confirm-gated write tool
-- [ ] Manual body-measurement write path + the `_dedupe_by_day` fix
-- [ ] Generic per-metric measurement trend/comparison across weight + circumference columns
-- [ ] `fitness_get_weekly_report` / `fitness_get_monthly_report` (one composer, two windows)
-- [ ] `docs/coaching-instructions.md` tightened toward concise answers, drift-guarded against the new tool registry
+- [ ] 5-level ordinal per-muscle rating (Section 1.2) with `Not Assessable` as a first-class value, on all 19 `CanonicalMuscleGroup` values
+- [ ] Three bounded whole-body free-text fields: leanness, conditioning, symmetry
+- [ ] Minimal confounder metadata: `photo_angles_present`, `pose_state`, `conditions_note`
+- [ ] Single-call, append-only MCP write tool, with prior-observation context returned/considered at write time
+- [ ] `analytics/physique.py` deterministic diff: improved/unchanged/regressed per muscle group, `None`-safe for `Not Assessable`
+- [ ] Cross-reference against `fitness_get_muscle_group_volume`
+- [ ] Monthly report physique section only, disclaimer field required and verbatim
+- [ ] Read-only guard narrowed to the new module, guard test updated per Phase 12 precedent
 
-### Add After Validation (v2.x)
+### Add After Validation (not this milestone, only if the above proves insufficient in real use)
 
-- [ ] Activity load (steps / active energy) as **context** in recomposition — trigger: 4+ weeks of clean daily HAE deliveries
-- [ ] Waist-vs-weight divergence signal — trigger: ≥8 waist measurements spanning ≥8 weeks
-- [ ] Program-scoped comparison ("this cut vs last cut") — trigger: two completed programs exist
-- [ ] Bilateral asymmetry reporting — trigger: user actually logs L/R measurements
-- [ ] Max-weight vs e1RM disagreement annotation — trigger: real disagreement observed on live data
+- [ ] Widening the free-text notes if 300 characters proves too tight in practice (a tuning decision, not a design one)
+- [ ] A `fitness_get_physique_history` read tool exposing raw per-observation history beyond what the monthly report surfaces, if the user wants to ask ad hoc questions between monthly reports
 
-### Future Consideration (v3+)
+### Explicitly Not Planned (see Anti-Features table for reasoning)
 
-- [ ] Sleep-stage and HRV recovery analytics — **blocked on hardware**, not on effort
-- [ ] Program-appropriate volume expectations — high complexity, needs its own research phase
-- [ ] Nutrition of any kind — explicitly Out of Scope; the `dietary_*` metrics in the export are a temptation to resist
-- [ ] Native iOS HealthKit app — superseded by HAE; only revisit on Apple Developer Program enrollment
+- [ ] Numeric body-fat-percentage estimation from photos
+- [ ] Composite whole-body physique score
+- [ ] Comparative-to-others or population-relative judgments of any kind
+- [ ] Weekly (or more frequent) physique check-ins
+- [ ] Per-muscle multi-axis (mass/symmetry/conditioning/separation) numeric scoring
+- [ ] Gamification (streaks, badges, score-that-goes-up framing)
+- [ ] Any photo storage or retention, temporary or otherwise
 
 ---
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
-|---------|------------|---------------------|----------|
-| HAE webhook + normalizer + idempotent upsert | HIGH | MEDIUM | P1 |
-| Max-weight-primary progression | HIGH | MEDIUM | P1 |
-| Training programs + confirm-gated switch tool | HIGH | MEDIUM | P1 |
-| `export.xml` backfill **with Hevy exclusion** | MEDIUM | MEDIUM | P1 |
-| Manual measurement entry + `_dedupe_by_day` fix | HIGH | MEDIUM | P1 |
-| Multi-metric measurement trend/comparison | HIGH | MEDIUM | P1 |
-| Weekly/monthly report tools | HIGH | MEDIUM | P1 (sequenced last) |
-| Coaching-instructions tightening | MEDIUM | LOW | P1 |
-| Activity (steps/energy) trends | MEDIUM | MEDIUM | P2 |
-| Activity as recomposition context | MEDIUM | LOW | P2 |
-| Waist-vs-weight divergence | HIGH | MEDIUM | P2 (data-gated) |
-| Program-scoped comparison | MEDIUM | MEDIUM | P2 |
-| Bilateral asymmetry | LOW | LOW | P3 |
-| Sleep `inBed` duration trend | LOW | LOW | P3 (data-gated; 21 months stale) |
-| Sleep stages / HRV / recovery score | — | — | **Cut — no data** |
-| Apple Health workout ingestion | — | — | **Cut — 97% duplicate** |
+|---|---|---|---|
+| Per-muscle 5-level rating + Not Assessable | HIGH | LOW | P1 |
+| Bounded whole-body qualitative notes | HIGH | LOW | P1 |
+| Confounder metadata fields | MEDIUM | LOW | P1 |
+| MCP write tool w/ prior-observation context | HIGH | MEDIUM | P1 |
+| `analytics/physique.py` diff logic | HIGH | LOW | P1 |
+| Cross-reference vs. muscle-group volume | HIGH | LOW–MEDIUM | P1 |
+| Monthly report integration | HIGH | MEDIUM | P1 |
+| Read-only guard amendment | HIGH (structural, not user-facing) | LOW | P1 |
+| Ad hoc physique-history read tool | MEDIUM | LOW–MEDIUM | P2 (only if monthly report proves insufficient) |
 
 ---
 
 ## Competitor Feature Analysis
 
-| Feature | Hevy | MacroFactor | Coaching platforms (TrueCoach / HubFit class) | BRETT's approach |
-|---------|------|-------------|-----------------------------------------------|------------------|
-| Strength progression metric | Switchable: Heaviest Weight, 1RM (true *or* projected), Best Set Volume, Session Volume, Total Reps. Set-record chart shows heaviest weight **per rep count**, not %1RM | n/a | e1RM, RPE-adjusted | **Max weight primary, e1RM secondary** — matches what the user already sees in Hevy, and `RepsAtWeightRecord` already implements Hevy's set-record concept |
-| Body-weight reporting | Raw + charted | **Weighted moving average trend weight**; all decisions keyed off trend, never scale | 7-day average in check-ins | Already correct: 7/14/30-day averages + 4-week smoothed rate, raw week delta surfaced but never classified against |
-| Periodic report | In-app stats screens | Weekly algorithmic check-in that adjusts targets | Structured weekly form, coach replies with adjustments + one focus | Structured MCP payload; **Claude writes the narrative**, backend ships only numbers |
-| Body measurements | 17 fields, syncs to Apple Health | Weight only | Free-text + photos | Same 17 fields **already in schema**; adds manual entry + per-metric trend with independent coverage floors |
-| Program modes | None | Goal-driven calorie targets | Coach sets phase manually | Three closed modes as data, per-mode thresholds, confirm-gated switch |
-| Data honesty | Shows what exists | Explicit trend-vs-scale distinction | Coach judgment | **The differentiator:** freshness + coverage envelope + `insufficient_data` on every response, and a required disclaimer on interpretive verdicts |
-
-BRETT's actual competitive position is not feature count — it is that every number carries its window,
-its coverage, and its freshness, so an LLM narrating it cannot confidently overstate a thin dataset.
-No consumer app does this because no consumer app has an LLM reading its output.
+| Feature | GainFrame | PeakBFF | LocalOne Gym Pics | BRETT's Approach |
+|---|---|---|---|---|
+| Photo storage | Stores/analyzes photos server-side (implied by CV scoring) | Private timeline, stores photos | On-device only, privacy-first | **None — zero image storage or retention, by design** |
+| Rating granularity | 4-level (Needs Work→Elite) per muscle area, ~12 areas | None (photo album + slider only) | None | 5-level per muscle group, all 19 canonical groups, plus explicit Not-Assessable |
+| Composite score | Yes, 1–100 with named tiers | No | No | **Explicitly excluded (anti-feature)** |
+| Numeric body-fat estimate | Yes (CV-derived) | Unclear/not primary feature | No | **Explicitly excluded (anti-feature)**; real measured `fat_percent` already exists via `fitness_get_body_measurement_trend` when available |
+| Cross-reference to real training data | No (no training-volume data available to these apps) | No | No | **Yes — the genuine differentiator**, via `fitness_get_muscle_group_volume` |
+| Rating methodology | Fresh CV inference each time (no stated anchoring to prior result) | N/A (no rating) | N/A | **Anchored to prior observation**, explicitly to reduce single-rater drift |
+| Cadence | Weekly check-ins (PeakBFF); unclear cadence (GainFrame) | Weekly | User-driven, unstructured | **Monthly only**, independently corroborated by the visible-change interval literature (Section 3) |
 
 ---
 
 ## Sources
 
-**Health Auto Export — HIGH confidence**
-- https://help.healthyapps.dev/en/health-auto-export/export-format/health-metrics/ — metric shapes, all four variants, `yyyy-MM-dd HH:mm:ss Z`, iOS 27 `source` omission (page dated 2026-08-23)
-- https://help.healthyapps.dev/en/health-auto-export/export-format/workouts/ — Workouts V1 vs V2, every optional field, route schema (2026-08-23)
-- https://help.healthyapps.dev/en/health-auto-export/export-format/ — top-level array list
-- https://help.healthyapps.dev/en/health-auto-export/automations/rest-api/ — POST-only, custom headers, the six automatic headers, Export Version, Date Range options, Summarize Data, Time Grouping, Batch Requests, Sync Cadence, unlock requirement, 30 s background budget, payload-size warning, Activity Log error strings (2026-08-23)
-- https://help.healthyapps.dev/en/health-auto-export/automations/ — best-effort background execution, iOS limiting factors
-- https://help.healthyapps.dev/en/health-auto-export/getting-started/supported-data/ — supported metric confirmation
-- `HealthyApps/health-auto-export-server` (vendor's own reference server) — `IngestData.ts`, `Metric.ts`, `Workout.ts`, `MetricName.ts`, `app.ts`, `middleware/auth.ts` read directly. Authoritative for exact field names, the 200 MB body limit, and the full metric-name enum
+**Bodybuilding judging criteria:**
+- [BarBend — How Bodybuilding is Judged](https://barbend.com/news/how-bodybuilding-is-judged/) — MEDIUM
+- [BarBend — How Bodybuilding Scoring Works](https://barbend.com/news/how-scoring-in-bodybuilding-works/) — MEDIUM
+- [NPC News Online — Official Bodybuilding Rules](https://npcnewsonline.com/official-bodybuilding-rules/) — MEDIUM
+- [tenuncuerpo10 — How IFBB judges score](https://www.tenuncuerpo10.com/en/2026/04/how-do-judges-score-at-ifbb-championships-learn-how-the-scoring-system-works/) — MEDIUM
 
-**Health Auto Export — MEDIUM confidence (independent corroboration)**
-- `meltforce/FreeReps` `server/specs/hae-rest-api.md` — independently documents the six automatic headers and `weight_body_mass`
-- `korosuke613/vitalbridge` README — independent metric-name table, confirms `weight_body_mass`, shows `vo2_max` / `walking_heart_rate_average` naming drift
-- `irvinlim/apple-health-ingester` `pkg/healthautoexport/types.go` — the five timestamp formats including the U+202F narrow-NBSP variants, and the aggregated/unaggregated sleep discrimination strategy
+**Visual/photo body-fat estimation accuracy:**
+- [PubMed — Bolonchuk et al., validity of visual estimation of percent body fat](https://pubmed.ncbi.nlm.nih.gov/1569858/) — MEDIUM (abstract-level access only during this research)
+- [Nature npj Digital Medicine — AI 2D-photo body fat estimation](https://www.nature.com/articles/s41746-024-01380-6) — MEDIUM
+- [Nature npj Digital Medicine — smartphone camera adiposity validation](https://www.nature.com/articles/s41746-022-00628-3) — MEDIUM
 
-**User's own data — HIGHEST confidence (primary evidence)**
-- `/Volumes/Samsung SSD 990 EVO Plus Media 1/Documents/GitHub/BRETT/export.xml` — 191,257,897 bytes, HealthKit Export Version 14, `ExportDate 2026-08-26 10:09:33 +0700`. All counts in this document (438,649 Records; 224 Workouts of which 218 `sourceName="Hevy"`; 79 BodyMass; 8 WaistCircumference; 2,411 SleepAnalysis all `InBed`, 2022-03-20→2024-11-30; 48,261 StepCount 2022-03-10→2026-08-26; 1,443 ActivitySummary; zero HeartRate/RestingHeartRate/HRV/VO2Max/AppleExerciseTime/BodyFatPercentage/LeanBodyMass/BMI) were produced by running `grep -c` against this file on 2026-09-02
+**Ordinal/Likert scale granularity and rater reliability:**
+- [ResearchGate — Optimal Number of Response Categories in Rating Scales](https://www.researchgate.net/publication/12546546_Optimal_Number_of_Response_Categories_in_Rating_Scales_Reliability_Validity_Discriminating_Power_and_Respondent_Preferences) — MEDIUM
+- [ScienceDirect — same study](https://www.sciencedirect.com/science/article/abs/pii/S0001691899000505) — MEDIUM
+- [ResearchGate — Effect of Number of Response Categories on Reliability and Validity](https://www.researchgate.net/publication/236979916_Effect_of_the_Number_of_Response_Categories_on_the_Reliability_and_Validity_of_Rating_Scales) — MEDIUM
+- [arXiv — Likert scales and measurement error vs. response categories](https://arxiv.org/pdf/2502.02846) — MEDIUM
 
-**BRETT codebase — HIGHEST confidence (read directly)**
-- `backend/app/analytics/bodyweight.py`, `recomposition.py`, `progression.py`, `metadata.py`, `schemas.py`
-- `backend/app/db/models/body.py`, `sync_state.py`, `user.py`
-- `backend/app/mcp/tools/` (13-tool registry)
+**Progress photo protocol / confounders:**
+- [SET FOR SET — How to Take Progress Pics](https://www.setforset.com/blogs/news/how-to-take-progress-pics) — MEDIUM
+- [Five Starr Physique — Progress Photo Guidelines](https://fivestarrphysique.com/progress-photo-guidelines/) — MEDIUM
+- [Gymnoteplus — How to Take Gym Progress Photos That Show Real Change](https://www.gymnoteplus.com/blog/how-to-take-progress-photos) — MEDIUM
+- [MacroFactor — Tips for Taking Good Progress Photos](https://help.macrofactorapp.com/en/articles/117-tips-for-taking-good-progress-photos) — MEDIUM
 
-**Strength metric convention — MEDIUM confidence**
-- https://help.hevyapp.com/hc/en-us/articles/35649367857175 and https://www.hevyapp.com/features/exercise-performance/ — Hevy's record types; set-record chart shows heaviest weight per rep count, not %1RM; true vs projected 1RM
-- Comparative app reviews (JEFIT, Strong, 1RM.fit, IronLedger) — e1RM is the market default because it enables percentage-based programming, which BRETT does not do
+**Posing / muscle-group visibility:**
+- [Garage Gym Reviews — 8 Mandatory Bodybuilding Poses](https://www.garagegymreviews.com/bodybuilding-poses) — MEDIUM
+- [StrengthLog — 8 Mandatory Bodybuilding Poses](https://www.strengthlog.com/bodybuilding-poses/) — MEDIUM
+- [NCBI StatPearls — Psoas Major (anatomical depth reference)](https://www.ncbi.nlm.nih.gov/books/NBK535418/) — HIGH (reference anatomy text)
 
-**Rate bands — MEDIUM confidence (sources genuinely disagree; the disagreement is reported above)**
-- https://www.thebodybuildingdietitians.com/blog/how-fast-should-you-bulk-or-cut-evidence-based-guidelines — cut 0.5–1 %/wk (0.25 lean, 1.5–2 high-BF); bulk 0.5–1 % **per month**
-- Eric Helms' published recommendations, secondary reporting (Legion, MesoStrength, Bony to Beastly) — bulk 0.25–0.5 %/wk novice, 0.1–0.2 %/wk intermediate, 0.05–0.1 %/wk advanced. **LOW-MEDIUM** — secondary sources, not the primary text
-- Recomp framing (RippedBody, RecompAI and similar) — flat weight, 5–15 % of maintenance, 1.6–2.2 g/kg protein, strength as leading indicator. **LOW-MEDIUM**
+**Longitudinal comparison / competitor apps:**
+- [GainFrame — Best Progress Photo Apps 2026](https://gainframe.app/blog/best-progress-photo-apps/) — MEDIUM (vendor content)
+- [GainFrame product site](https://gainframe.app/) — MEDIUM (vendor content)
+- [PeakBFF via GainFrame comparison](https://www.peakbff.com/blog/en/best-private-progress-photo-app) — LOW–MEDIUM (vendor/secondary)
+- [LocalOneLabs — Best Progress Photo Apps for iPhone](https://localonelabs.com/pages/blog/best-fitness-progress-photo-apps) — LOW–MEDIUM (vendor content)
 
-**Report structure — MEDIUM confidence**
-- HubFit, Gymkee, CheckinHQ, Coached check-in templates — the four-block structure and the adherence/obstacles/agency framing
-- https://help.macrofactorapp.com/en/articles/21-weight-trend and MacroFactor dashboard docs — trend weight as weighted moving average; every decision keyed off trend, never scale
+**Wellbeing / anti-feature justification:**
+- [The Renfrew Center — What is Body Checking? Body Dysmorphia Signs](https://renfrewcenter.com/what-is-body-checking-body-dysmorphia-signs/) — MEDIUM (clinical treatment center publication)
+- [PMC — Longer-term consequences of increased body checking in women at risk for eating disorders](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11671019/) — HIGH (peer-reviewed study)
 
-**Body measurement protocol — MEDIUM-HIGH confidence**
-- https://www.measurement-toolkit.org/anthropometry/objective-methods/simple-measures-circumference — WHO waist protocol, which circumferences proxy fat vs lean mass, tension-controlled tape
-- SiPhox / BodySpec / NHS trust guides — the standard six-site home protocol; consistency-over-precision
-
-**Report delivery mechanism — MEDIUM confidence**
-- https://code.claude.com/docs/en/scheduled-tasks and https://support.claude.com/en/articles/13854387 — Claude scheduled tasks exist, are persistent, and scheduled runs have MCP connector access. Confirms PROJECT.md's decision that no BRETT-side scheduler is needed
-
----
-
-## Gaps and Open Questions
-
-1. **`weight_body_mass` vs `weight_&_body_mass` is not settled by documentation.** Three sources say the
-   former, the vendor's own prose says the latter. **Resolvable in five minutes**: run one Manual
-   Export from the app to a request-bin and read the real key. Do this before writing the normalizer.
-2. **Which HAE metrics actually contain data on this device is unknown.** The `export.xml` evidence
-   shows what *historically* exists, but HAE reads live HealthKit — and Foodvisor is actively writing
-   `BodyMass` and `dietary_*`. The same Manual Export answers this.
-3. **The max-weight dead-band has no empirical basis yet.** The current 2% was derived from Epley noise
-   across a 5–12 rep spread. Max weight moves in plate increments. The correct band must be derived
-   from the live plate-increment distribution — likely a phase-research task.
-4. **Per-mode label-matrix design is under-specified.** `RecompositionStatus` has 7 members chosen for a
-   bulk. Whether cut/recomp need new members or only re-mapped rows is a real design decision, not an
-   implementation detail.
-5. **Where the manual-measurement write lives is undecided.** MCP is spending its one write on program
-   switching. An authenticated `/api/v1` endpoint and a CLI command are both viable and have different
-   security surfaces.
-6. **Cloud Run request-size limits vs HAE payload size unverified.** Vendor warns "several hundred
-   megabytes." Whether Batch Requests plus a tight metric allowlist keeps every delivery under the
-   platform limit needs measuring against a real export, not assuming.
+**Project-internal sources (read directly for this research):**
+- `.planning/PROJECT.md` — milestone scope, shipped-feature inventory, decided design shape
+- `backend/app/normalization/muscles.py` — the 19-value `CanonicalMuscleGroup` taxonomy
+- `backend/app/analytics/recomposition.py` — the `RecompositionResult.disclaimer` required-field pattern, and the project's existing precedent for refusing unreliable body-fat inputs
+- `backend/app/analytics/body_measurements.py` — the `is_stale`/`insufficient_data` independent-signal pattern, and the latest-vs-earliest comparison shape
+- `docs/coaching-instructions.md` — the coaching voice ("decision support, not a clinician") this feature's disclaimers and framing must match
 
 ---
-*Feature research for: personal fitness / body-recomposition data platform, v2.0 milestone*
-*Researched: 2026-09-02*
+*Feature research for: BRETT v2.1 Longitudinal Physique Analysis*
+*Researched: 2026-09-05*

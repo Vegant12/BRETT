@@ -1,737 +1,745 @@
-# Architecture Research
+# Architecture Research: v2.1 Longitudinal Physique Analysis
 
-**Domain:** Personal fitness data platform — extending a shipped FastAPI/PostgreSQL/MCP backend with inbound webhook ingestion, a metric shift, report composition, and a first write path
-**Researched:** 2026-09-02
-**Confidence:** HIGH on existing architecture and Apple Health data availability (read from source and from the user's own export); MEDIUM on the Health Auto Export wire contract (vendor docs are thin and version-split)
+**Domain:** Integrating a second MCP write path + a new analytics domain + a monthly-only report
+section into an already-shipped, heavily-guarded Python/FastAPI/SQLAlchemy/MCP backend (BRETT).
+**Researched:** 2026-09-05
+**Confidence:** HIGH — every claim below is grounded in code actually read (files and line
+numbers cited throughout), not in the milestone's prose description of itself.
 
----
-
-## Executive Summary
-
-Four of the five v2.0 capabilities fit the existing architecture without bending it. One does not, and one is riskier than it reads.
-
-**Fits cleanly:** Apple Health ingestion is a new `integrations/` package plus a new FastAPI route — the same provider-isolation shape `integrations/hevy/` already has, just with the arrow reversed (inbound POST instead of outbound poll). Report tools are largely a new response-shaping layer over analytics functions that already exist and already compose (`fitness_get_training_summary` is proof the pattern works). Manual body-measurement entry is a write into a table whose `source='manual'` column and precedence rule were both built in v1.0 and are dead code today.
-
-**Does not fit without deliberate change:** the confirm-gated write tool. `app/mcp/` read-only-ness is not a convention — it is enforced by a PostgreSQL `READ ONLY` transaction at runtime *and* by three static source-scanning tests that fail the fast suite on any write construct anywhere under `app/mcp/`. Adding one write tool means changing those guards, and the right change is a one-module allowlist (so "exactly one MCP module can write" stays machine-checked), not deletion.
-
-**Riskier than it reads:** the max-weight strength shift. The data plumbing is trivial — `best_set_per_day` already computes `best_weight_kg` for every session, so it is a second projection of an existing fold, no new query. The risk is in the thresholds. The 2%-per-session plateau band and the 0.5%-per-week trend band are *derived from each other* on purpose, so the two verdicts cannot contradict each other by construction. Estimated 1RM is a continuous value where a 2% dead-band is meaningful. Max weight moves in discrete plate increments — 2% of a 60 kg lift is 1.2 kg, below the smallest plate you can add. Both bands must be re-derived against discrete increments while preserving their shared derivation, with live-data validation like the original calibration got.
-
-**The finding that should reshape scope:** the user's Apple Health export contains **zero** heart-rate, HRV, VO2max, blood-oxygen or respiratory-rate records across 438,649 samples spanning 2022-03 to 2026-08. The types are absent entirely — there is no Apple Watch. Sleep is 2,411 rows of `InBed` only (no stages) and **stopped on 2024-11-30**. `appleExerciseTime` is 0 in all 1,443 ActivitySummary rows. And 218 of 221 Apple Health *workouts* originate from Hevy — data BRETT already owns at set-level detail. What Apple Health actually adds is steps, active/basal energy, walking distance and flights climbed, all current through 2026-08-26. "Recovery trends" has no data source and should be cut or explicitly deferred rather than built against nothing.
+This is not greenfield research. BRETT already has a strict, test-enforced architecture (read-only
+MCP boundary, analytics/MCP isolation, one write path). The job here is to find the EXACT points
+that architecture must be touched, and to recommend the ONE way to touch each of them that amends
+the existing guards deliberately rather than weakening them — per the milestone's own framing.
 
 ---
 
-## Existing Architecture (fixed — establishing the baseline the new work attaches to)
-
-### System Overview
+## 1. System Overview — where physique analysis lands
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│                    Google Cloud Run (1 service, --max=2, 512Mi)       │
-│                        --allow-unauthenticated, HTTP/1, :8080         │
-├───────────────────────────────────────────────────────────────────────┤
-│  RateLimitMiddleware   (pure ASGI, global token bucket 30/min,        │
-│                         exempt: /health, /.well-known/)               │
-│  CorrelationIdMiddleware                                              │
-├───────────────────────────────────────────────────────────────────────┤
-│  FastAPI router (matched first)     │  app.mount("/", mcp_app)        │
-│   └── GET /health                   │   └── POST /mcp                 │
-│                                     │   └── /.well-known/oauth-       │
-│                                     │        protected-resource/mcp   │
-│                                     │  WorkOS AuthKit RS256 JWT       │
-│                                     │  (aud pinned to Resource Ind.)  │
-├───────────────────────────────────────────────────────────────────────┤
-│  app/mcp/tools/*  — 13 tools, one shared READ_ONLY ToolAnnotations    │
-│                     read_only_session() → PG "READ ONLY" transaction  │
-├───────────────────────────────────────────────────────────────────────┤
-│  app/analytics/*  — pure, deterministic, Decimal-only, never writes   │
-│    volume  frequency  progression  records  comparison  bodyweight    │
-│    recomposition  rollup  estimates  metadata(freshness+coverage)     │
-├───────────────────────────────────────────────────────────────────────┤
-│  app/normalization/   app/db/repositories/   app/core/time            │
-├───────────────────────────────────────────────────────────────────────┤
-│  app/db/models/  →  Neon PostgreSQL (async, asyncpg)                  │
-└───────────────────────────────────────────────────────────────────────┘
-        ▲
-        │  Cloud Run Job (6-hourly) — python -m app.cli sync-hevy
-        │  app/integrations/hevy/  (outbound httpx2 → api.hevyapp.com)
+┌───────────────────────────────────────────────────────────────────────────┐
+│  Claude (vision + conversation)                                           │
+│  - looks at photos attached in-conversation (BRETT never sees them)       │
+│  - calls a READ tool FIRST for prior context (steered by docs, not forced)│
+│  - calls the WRITE tool ONCE with new ratings + bounded free-text notes   │
+└───────────────────────────────┬───────────────────────────────────────────┘
+                                 │ MCP (stateless HTTP, read_only_hint per tool)
+┌───────────────────────────────▼───────────────────────────────────────────┐
+│  app/mcp/tools/                                                           │
+│  ┌───────────────────────┐   ┌────────────────────────────────────────┐  │
+│  │ physique.py  (NEW)     │   │ reports.py  (MODIFIED)                 │  │
+│  │ - fitness_get_latest_  │   │ - _report_body_fields() gains a        │  │
+│  │   physique_observation │   │   monthly-only physique projection     │  │
+│  │   (READ_ONLY)           │   │ - fitness_get_monthly_report only      │  │
+│  │ - fitness_log_physique_ │   │                                        │  │
+│  │   observation           │   └────────────────────────────────────────┘  │
+│  │   (2nd write path,      │                                              │
+│  │   APPEND_ONLY_WRITE)    │   server.py (MODIFIED): registers the new    │
+│  └───────────┬─────────────┘   tool(s), a SECOND non-READ_ONLY            │
+│              │                 ToolAnnotations object                    │
+├──────────────┼─────────────────────────────────────────────────────────── │
+│  app/analytics/physique.py  (NEW)                                        │
+│  - get_physique_diff(): improved/unchanged/regressed per muscle          │
+│  - get_physique_training_correlation(): joins ratings x get_muscle_group_│
+│    volume by CanonicalMuscleGroup -- "underdeveloped AND undertrained"   │
+│  - imported by BOTH physique.py's read tool AND reports.py's monthly     │
+│    section -- one implementation, never two copies of the join           │
+├───────────────────────────────────────────────────────────────────────────┤
+│  app/db/repositories/physique.py  (NEW, mirrors programs.py)             │
+│  - insert_observation() -- the ONLY module allowed to INSERT into the    │
+│    two new tables                                                        │
+│  - get_latest_observation(), get_observation_history()                  │
+├───────────────────────────────────────────────────────────────────────────┤
+│  app/db/models/physique.py  (NEW) -- physique_observations +             │
+│  physique_ratings, migration 0007                                       │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Boundaries that are statically enforced (not conventions)
-
-These are asserted over committed source in the fast suite. Any v2.0 design that violates one fails on the commit that introduces it — which is exactly why they need naming up front.
-
-| Guard | File | What it forbids |
-|---|---|---|
-| `test_analytics_does_not_import_integrations` | `test_analytics_isolation.py` | `app/analytics/` importing `app.integrations` |
-| `test_analytics_does_not_import_mcp` | `test_analytics_isolation.py` | `app/analytics/` importing `app.mcp` |
-| `test_analytics_never_writes` | `test_analytics_isolation.py` | `session.commit/flush/add` or `insert/update/delete` imports in analytics |
-| `test_analytics_declares_no_float` | `test_analytics_isolation.py` | `float(`, `: float`, `-> float` in analytics |
-| `test_analytics_uses_no_raw_sql_text` | `test_analytics_isolation.py` | `text(` in analytics |
-| **`test_mcp_never_writes`** | `test_mcp_isolation.py` | Any write construct in **any** module under `app/mcp/` |
-| **`test_every_tool_module_guards_its_public_tools`** | `test_mcp_isolation.py` | Undecorated tools; asserts a **literal count of 12** |
-| `test_mcp_never_interpolates_an_exception` | `test_mcp_isolation.py` | `f"…{e}"` in anything MCP returns |
-| **`test_every_tool_is_annotated_read_only`** | `test_mcp_tool_schemas.py` | Any tool not carrying `READ_ONLY` |
-| `EXPECTED_TOOLS` frozenset | `test_mcp_tool_schemas.py` | The exact 13-name registry |
-| `test_hevy_schemas_are_not_imported_outside_the_package` | `test_hevy_isolation.py` | Hevy wire schemas leaking out of `integrations/hevy/` |
-| `test_httpx2_is_only_imported_inside_the_hevy_package` | `test_hevy_isolation.py` | HTTP client outside the provider package |
-| `test_db_does_not_import_integrations` | `test_hevy_isolation.py` | `app/db/` importing `app.integrations` |
-
-The three in bold are the ones capability 5 must change.
-
-### Reusable idioms the new work should copy rather than reinvent
-
-| Idiom | Where it lives | Why copy it |
-|---|---|---|
-| `pg_insert(...).on_conflict_do_update(constraint="uq_…")` bound **by name** | `integrations/hevy/body.py`, `db/repositories/sync_state.py` | A renamed constraint raises immediately instead of degrading into duplicate rows |
-| SAVEPOINT per row (`session.begin_nested()`) | `integrations/hevy/body.py` | One bad row aborts the whole transaction otherwise |
-| `format_sync_error` — class name only, never `str(exc)` | `db/repositories/sync_state.py` | `ValidationError.__str__` renders `input_value=…`, i.e. the health data |
-| `secrets.compare_digest` on **bytes**, never `str` | `mcp/auth.py` | A non-ASCII header byte makes the `str` overload raise `TypeError` → 500 with traceback instead of a silent 401 |
-| `local_day(ts, users.timezone)` — never the server's UTC date | `core/time.py`, used everywhere | At UTC+7, every instant 17:00–24:00Z belongs to the *next* local day |
-| Freshness + coverage envelope on every analytics response | `analytics/metadata.py` | DQ-01/DQ-02; a stale-source answer must announce itself |
-| `safe_tool(degraded=…)` on every MCP tool | `mcp/tools/_common.py` | `mcp 2.0.0` returns `str(exception)` to the model verbatim; asyncpg errors carry the DSN |
-| Response caps in one named block | `mcp/tools/_common.py` | Every cap is a *context* budget, retunable in one place |
+**What never appears in this diagram, on purpose:** an image, an upload endpoint, object storage,
+a vision call from the backend. The milestone's defining constraint (PROJECT.md, milestone
+"Shape decided at the gate") is structural here, not a policy note — there is no code path in this
+design that could receive image bytes even by accident, because no new endpoint of any kind is
+added outside `app/mcp/`.
 
 ---
 
-## Ground Truth: What Apple Health Actually Contains
+## 2. Question 1 — The second write path, file by file
 
-Measured directly from the user's `export.xml` (191 MB, `ExportDate 2026-08-26 10:09:33 +0700`, 438,649 `<Record>` elements) and its derived `records.csv` / `workouts.csv` / `activity_summary.csv`. This is not an assumption about what HealthKit *can* hold — it is what this person's phone has recorded.
+### 2.1 What actually enforces "exactly one write module" today
 
-| Signal | Samples | Range | Verdict for v2.0 |
-|---|---|---|---|
-| StepCount | 48,261 | 2022-03-10 → **2026-08-26** | **Build on this** |
-| ActiveEnergyBurned | 45,182 | 2022-09-13 → **2026-08-26** | **Build on this** (iPhone-estimated) |
-| BasalEnergyBurned | 84,260 | 2022-09-13 → 2026-08-26 | Available; pairs with active for TDEE context |
-| DistanceWalkingRunning | 48,125 | 2022-03-10 → 2026-08-26 | Available |
-| FlightsClimbed | 3,936 | 2022-04-12 → 2026-08-26 | Available |
-| Walking gait metrics (speed, step length, asymmetry, double-support) | 194,976 | current | **Noise for this domain** — 44% of all rows, zero coaching value |
-| HeadphoneAudioExposure | 10,077 | current | Irrelevant |
-| SleepAnalysis | 2,411 — **100% `InBed`**, source "Vegant's iPhone" | 2022-03-20 → **2024-11-30** | **Dead.** No stages, 21 months stale |
-| **HeartRate / RestingHeartRate / HRV SDNN / VO2Max / OxygenSaturation / RespiratoryRate** | **0 — type absent from the file entirely** | — | **Does not exist. No Apple Watch.** |
-| `appleExerciseTime` (ActivitySummary) | 0 in **all 1,443** rows | 2022-09-14 → 2026-08-26 | Zero. Rings need a Watch |
-| BodyMass | 79 rows across 6 apps — **52 from Hevy** | → 2025-05-27 | Mostly duplicates of `body_measurements`; adds no recency |
-| WaistCircumference | 8 | — | Too sparse to trend |
-| Workouts | 221 — **218 from Hevy**, 221 `TraditionalStrengthTraining` | — | **A lossy mirror of data BRETT already owns** |
-| Dietary (Foodvisor) | ~95 days | current-ish | Explicitly out of v2.0 scope |
+Two test modules matter, and they are **not** the ones a first pass suggests:
 
-**Three consequences the roadmap must absorb:**
+- `backend/tests/test_mcp_readonly.py` tests the RUNTIME control (`read_only_session`'s
+  `postgresql_readonly=True`, proven against a real Postgres). It says nothing about which module
+  is allowed to write — no allowlist logic lives there.
+- `backend/tests/test_mcp_isolation.py` is where the actual guard lives:
+  - `_WRITE_ALLOWLIST = frozenset({"program_switch.py"})` — line 79.
+  - `test_mcp_never_writes` (lines 138–171): for every module under `app/mcp/` **not** in
+    `_WRITE_ALLOWLIST`, asserts no `session.commit/flush/add/add_all` call
+    (`_SESSION_WRITE`, line 48); for **every** module regardless of allowlist status, asserts no
+    `from sqlalchemy import ... insert|update|delete` (`_WRITE_IMPORT`, line 49–51); then at
+    lines 166–171, `assert len(_WRITE_ALLOWLIST) == 1`.
+  - `test_the_write_allowlist_holds_exactly_one_module` (lines 174–184): re-asserts
+    `_WRITE_ALLOWLIST == frozenset({"program_switch.py"})` and `len(...) == 1`.
+  - `test_only_one_module_opens_a_writable_session` (lines 187–197): scans every `app/mcp/` module
+    except `_common.py` for the literal substring `"writable_session("` and asserts the set of
+    matches equals `{"program_switch.py"}`.
+  - `test_every_tool_module_guards_its_public_tools` (lines 262–310): asserts the walk finds
+    **exactly 19** `async def fitness_*` coroutines (line 305), each immediately preceded by
+    `@safe_tool(`.
 
-1. **"Recovery trends" has no input.** PROJECT.md's active requirement says "resting heart rate, HRV where available". The answer is *not available, and not available later either* without hardware. Either cut recovery from the health-analytics slice or scope it to "sleep duration if the user resumes recording", and say so.
-2. **Apple Health workouts must not enter training analytics.** 218/221 are Hevy re-exports. Ingesting them into anything `volume.py` or `frequency.py` reads would double-count every session. Store them with their `source` name preserved so Hevy-originated rows are excluded *by predicate*, not by hope.
-3. **The useful surface is activity, not physiology.** Steps + active energy + distance + flights, at daily grain, current through today. That is a real and useful input to a recomposition verdict (energy expenditure context beside the weight trend). It is not a sleep/recovery coach.
+A second, separate assumption lives in `backend/tests/test_mcp_tool_schemas.py`, and this is the
+one most likely to be missed because it was not in the files list under `test_mcp_isolation.py`'s
+name:
 
-### The Health Auto Export wire contract
+- `WRITE_TOOLS = frozenset({"fitness_switch_training_program"})` (line ~135).
+- `test_annotations_are_an_exact_partition` (lines ~142–199) asserts `len(WRITE_TOOLS) == 1`, that
+  `read_only_false == WRITE_TOOLS` (a correct partition, fine to extend), **and then loops over
+  every name in `read_only_false` asserting `destructiveHint is True` and `idempotentHint is
+  False` for ALL of them** (lines ~186–194). This is a **uniform-shape assumption**: it currently
+  hard-codes "every write tool looks like `program_switch`." It will break the moment a second
+  write tool ships with `destructive_hint=False`, which is exactly what this milestone specifies.
+- `test_tool_registry_is_exactly_the_twenty` (line 110) and `EXPECTED_TOOLS` (lines 37–ff.) also
+  need the new tool name(s) added and the count/name updated.
 
-| Fact | Detail | Confidence |
-|---|---|---|
-| Transport | HTTP POST to a user-configured URL, JSON or CSV | HIGH |
-| Auth | **Arbitrary custom headers**, incl. `Authorization: Bearer <token>` and `X-API-Key`. No HMAC signing, no built-in shared secret | HIGH (vendor docs) |
-| Envelope | `{"data": {"metrics": [], "workouts": [], "stateOfMind": [], "medications": [], "symptoms": [], "cycleTracking": [], "ecg": [], "heartRateNotifications": []}}` | HIGH |
-| Metric shape | `{"name": …, "units": …, "data": [{"date": …, "qty"\|"avg"/"min"/"max": …, "source": …}]}` | MEDIUM |
-| Workout shape | `id` (String, **stable**), `name`, `start`, `end`, `duration` (s), plus optional `{qty, units}` objects: `distance`, `activeEnergyBurned`, `intensity`, `heartRate*`, `elevationUp/Down`, `maxSpeed/avgSpeed`; time-series arrays `heartRateData`, `stepCount`, `route` | HIGH (vendor docs, Export Version 2) |
-| **Date format** | `yyyy-MM-dd HH:mm:ss Z` (e.g. `2024-02-06 14:30:00 -0800`) — **not ISO 8601**. A third-party implementation reports seeing *both* this and `2024-01-01T12:00:00+00:00` depending on version/path | MEDIUM — treat as two formats, parse both |
-| **Aggregation granularity** | **User-configurable, seconds → yearly** | MEDIUM-HIGH |
-| Batch Requests | Toggle; splits one export across multiple POSTs. JSON only, not CSV | HIGH |
-| Payload size | Vendor guidance: "ensure your backend is configured to handle payloads of possibly several hundred megabytes" | HIGH |
-| Retry / delivery semantics | **Undocumented.** Activity Log surfaces "HTTP failures, timeouts" | LOW → **assume at-least-once with overlapping windows** |
+### 2.2 Widening the guard to exactly two named modules, without weakening it
 
-**The date format matching is a gift.** `export.xml`, `records.csv` and the Health Auto Export JSON all use `yyyy-MM-dd HH:mm:ss Z` (`2025-04-08 19:54:16 +0700`). One parser serves both the webhook and the backfill. Do not write two.
+Per file, in order:
 
----
+1. **`backend/tests/test_mcp_isolation.py`**
+   - Line 79: `_WRITE_ALLOWLIST = frozenset({"program_switch.py", "physique.py"})`.
+   - Lines 166–171: bump `assert len(_WRITE_ALLOWLIST) == 1` → `== 2`, with the comment amended
+     to say "exactly TWO modules under app/mcp/ may write" — keep the assertion's shape (an exact
+     count on a named set), only its value changes. `_WRITE_IMPORT`'s ban stays absolute and
+     unconditional for both modules — this is the property that must never relax.
+   - Lines 174–184: rename `test_the_write_allowlist_holds_exactly_one_module` →
+     `test_the_write_allowlist_holds_exactly_two_modules`; update both assertions to the new
+     frozenset and `== 2`. The rename is itself an example of "amend deliberately" — the old name
+     would be a false claim about the invariant it tests.
+   - Lines 187–197: rename `test_only_one_module_opens_a_writable_session` →
+     `test_only_the_allowlisted_modules_open_a_writable_session`; assert
+     `opens_writable == {"program_switch.py", "physique.py"}`.
+   - Line 305: bump the literal tool count from 19 to whatever the final tool count is (20 if only
+     the write tool is added; 21 or 22 if the prior-observation read tool and/or the
+     cross-reference read tool are added as separate tools — see §5). Update the trailing
+     comment's running history in the same style already used there (Plan 12-04, 13-06, 13-09).
 
-## Recommended Architecture
+2. **`backend/tests/test_mcp_tool_schemas.py`**
+   - `EXPECTED_TOOLS`: add the new tool name(s).
+   - `test_tool_registry_is_exactly_the_twenty`: rename to reflect the new count (mirrors the
+     `test_mcp_isolation.py` rename above — the "twenty" in the name is a claim, not a label).
+   - `WRITE_TOOLS`: add the physique write tool's registered name;
+     `assert len(WRITE_TOOLS) == 1` → `== 2`.
+   - **The uniform-annotation loop must be restructured, not just extended.** Replace the blanket
+     `for name in read_only_false: assert destructiveHint is True, idempotentHint is False` with a
+     per-tool expected-annotations mapping:
+     ```python
+     EXPECTED_WRITE_ANNOTATIONS: dict[str, dict[str, bool]] = {
+         "fitness_switch_training_program": {"destructiveHint": True, "idempotentHint": False},
+         "fitness_log_physique_observation": {"destructiveHint": False, "idempotentHint": False},
+     }
+     ```
+     and assert each tool's dumped annotations match its own entry. This is the deliberate
+     amendment: the partition property ("every tool is read-only XOR in a named, reviewed
+     exception set") is preserved exactly; the *previously accidental* assumption that every
+     exception looks alike is what's being corrected, and correcting it is what this milestone's
+     "amend deliberately" instruction is for.
+   - Add a sibling to `test_the_write_tool_publishes_explicit_write_annotations` (T-12-07) for the
+     new tool, asserting its four flags explicitly by name, same pattern.
 
-### Target System Overview
+3. **`backend/app/mcp/tools/_common.py`** — no test changes, but `writable_session`'s docstring
+   (lines 174–195) says "Used by exactly one module" (line 189) and `read_only_session`'s sibling
+   framing — update the prose to "used by exactly the two allowlisted modules." No code change:
+   `writable_session` (lines 174–194) is already generic — it takes `ctx`, opens a plain (not
+   read-only) session, and does not commit. It needs zero modification to serve a second caller.
 
-```
-┌───────────────────────────────────────────────────────────────────────┐
-│                    Google Cloud Run (still ONE service)               │
-├───────────────────────────────────────────────────────────────────────┤
-│  RateLimitMiddleware                                                  │
-│    ├── /health, /.well-known/       → exempt        (unchanged)       │
-│    ├── /api/v1/ingest/*             → SEPARATE bucket   ★ MODIFIED    │
-│    └── everything else (/mcp)       → existing 30/min bucket          │
-│  CorrelationIdMiddleware                                              │
-├───────────────────────────────────────────────────────────────────────┤
-│  FastAPI router                     │  app.mount("/", mcp_app)        │
-│   ├── GET  /health                  │   └── POST /mcp                 │
-│   └── POST /api/v1/ingest/          │                                 │
-│           health-auto-export  ★ NEW │  13 read tools + 1 read + 1 WRITE│
-│           (Bearer shared secret)    │  READ_ONLY  |  ★ WRITE_CONFIRM  │
-├─────────────────────────────────────┴─────────────────────────────────┤
-│  app/integrations/                                                    │
-│    hevy/                    (outbound poll — unchanged)               │
-│    health_auto_export/  ★ NEW  (inbound push: schemas, normalize,     │
-│                                 ingest, auth, xml_backfill)           │
-├───────────────────────────────────────────────────────────────────────┤
-│  app/analytics/    volume  frequency  records  comparison  rollup     │
-│                    estimates  metadata          ← unchanged           │
-│                    progression      ★ MODIFIED  (max weight primary)  │
-│                    recomposition    ★ MODIFIED  (program thresholds)  │
-│                    bodyweight       ★ MODIFIED  (circumference trend) │
-│                    health.py    ★ NEW  (activity trends)              │
-│                    reports.py   ★ NEW  (closed-period composition)    │
-├───────────────────────────────────────────────────────────────────────┤
-│  app/db/models/   user  workout  exercise  body  sync_state           │
-│                   health.py   ★ NEW   program.py  ★ NEW               │
-├───────────────────────────────────────────────────────────────────────┤
-│  Neon PostgreSQL                                                      │
-│    workouts, workout_exercises, sets, exercise_templates,             │
-│    exercise_muscles, exercise_muscle_overrides, users,                │
-│    body_measurements, sync_state          (unchanged)                 │
-│    health_daily_metrics ★  health_workouts ★                          │
-│    training_programs ★     user_program_history ★                     │
-└───────────────────────────────────────────────────────────────────────┘
-        ▲                                    ▲
-        │ Cloud Run Job (6-hourly)           │ Health Auto Export (iOS)
-        │ sync-hevy      (unchanged)         │ POST on a schedule  ★ NEW
-        │
-        │ CLI one-shot: backfill-apple-health --path export.xml  ★ NEW
-        │ CLI: add-measurement / import-measurements             ★ NEW
-```
+4. **`backend/app/mcp/tools/physique.py`** (new module) — must follow `program_switch.py`'s
+   pattern exactly for the parts that are load-bearing:
+   - Import `writable_session`, `resolve_user_id`, `safe_tool` from `_common.py` (never
+     `read_only_session` — same "must not be reachable from this module" discipline
+     `program_switch.py`'s docstring states at lines 16–18).
+   - Must **not** import `insert`/`update`/`delete`/`sqlalchemy` directly (banned unconditionally
+     by `_WRITE_IMPORT` for every module). The actual `INSERT` statements live in
+     `app/db/repositories/physique.py`, mirroring `programs.py`'s `close_period_and_open_new`/
+     `issue_switch_token` pattern (`app/db/repositories/programs.py:19–24`'s own docstring states
+     this rule generally: "this is the ONE place under `app/` outside the integrations layer that
+     constructs a `program` write" — the physique milestone needs the equivalent sentence for its
+     own repository module).
+   - The commit is the LAST statement before return (PITFALLS #15's discipline, restated at
+     `program_switch.py:171–175` and `:235–239`) — for the SAME reason it matters for
+     `program_switch.py`: `safe_tool` degrades any exception to `UNKNOWN`/an "unclear" payload,
+     and an exception *after* a successful commit must never be reported in a way that invites a
+     retry that double-inserts an append-only row.
 
-### Component Responsibilities
+5. **`backend/app/mcp/server.py`** — the concrete gating difference the milestone specifies
+   (single-call, append-only, `destructive_hint=False`) requires a **second** `ToolAnnotations`
+   constant, not reuse of `WRITE_TOOL` (`server.py:278–283`, `read_only_hint=False,
+   destructive_hint=True, idempotent_hint=False, open_world_hint=False`):
+   ```python
+   # Distinct from WRITE_TOOL: this tool is NOT destructive (it appends a row to a longitudinal
+   # log; it never changes how anything else is classified) and it is NOT idempotent (calling it
+   # twice with the same arguments legitimately produces two rows -- two observations on the same
+   # day are a real, permitted case, not a duplicate to be suppressed).
+   APPEND_ONLY_WRITE_TOOL = ToolAnnotations(
+       read_only_hint=False,
+       destructive_hint=False,
+       idempotent_hint=False,
+       open_world_hint=False,
+   )
+   ```
+   Registered OUTSIDE the `_TOOLS` loop (server.py:258–259), in its own `mcp.add_tool(...)` block
+   immediately after the existing `WRITE_TOOL` registration (server.py:285–294) — same reasoning
+   already documented there: adding it to `_TOOLS` would hand it `READ_ONLY` and misrepresent a
+   tool that writes. Any new READ tool(s) (prior-observation, cross-reference) go **inside** the
+   `_TOOLS` tuple with the shared `READ_ONLY` annotation, exactly like every other read tool.
 
-| Component | New / Modified | Responsibility | Notes |
-|---|---|---|---|
-| `api/routes/health_ingest.py` | **NEW** | Terminate the webhook: verify shared secret, enforce a body-size cap, hand the parsed payload to the ingest service, return 202 | Must be registered **before** `app.mount("/", mcp_app)` — that mount is a catch-all |
-| `integrations/health_auto_export/auth.py` | **NEW** | Constant-time bearer compare on **bytes** | Copy `mcp/auth.py::StaticTokenVerifier` exactly; do not reuse the MCP `TokenVerifier` protocol |
-| `integrations/health_auto_export/schemas.py` | **NEW** | Pydantic wire models; both date formats | Must not be imported outside the package (mirror `test_hevy_isolation.py`'s guard) |
-| `integrations/health_auto_export/normalize.py` | **NEW** | Wire → canonical rows: unit conversion at the boundary, `local_day(ts, users.timezone)` | **Shared by webhook and backfill.** Two parsers = two shapes = a historical trend that disagrees with the ongoing one |
-| `integrations/health_auto_export/ingest.py` | **NEW** | Idempotent upsert + `sync_state` bookkeeping under `provider='apple_health'` | Copy `hevy/body.py`: SAVEPOINT per row, constraint-by-name conflict, counts-only logging |
-| `integrations/health_auto_export/xml_backfill.py` | **NEW** | Streaming `iterparse` over `export.xml`, filtered to the ~6 useful types, through the same normalizer | 438,649 elements at 512 MiB — `ElementTree.parse()` will OOM; `iterparse` + `elem.clear()` will not |
-| `db/models/health.py` | **NEW** | `health_daily_metrics`, `health_workouts` | See schema below |
-| `db/models/program.py` | **NEW** | `training_programs`, `user_program_history` | Append-only history, not a mutable column |
-| `db/repositories/programs.py` | **NEW** | Read active program; the one write | Never commits — caller owns the transaction (repo convention) |
-| `analytics/health.py` | **NEW** | Daily/weekly activity aggregates from `health_daily_metrics`; freshness envelope | Pure, Decimal-only, no `float`, no `text()` — the static guards apply |
-| `analytics/reports.py` | **NEW** | Closed-period composition over existing analytics functions | Owns no arithmetic; see capability 4 |
-| `analytics/progression.py` | **MODIFIED** | Max-weight-primary trend + plateau; e1RM retained as secondary | Highest-risk change in the milestone |
-| `analytics/recomposition.py` | **MODIFIED** | Thresholds become parameters read from the active program | Docstring already scopes this: "these five constants are the ones to revisit — and nothing else in the module" |
-| `analytics/bodyweight.py` | **MODIFIED** | Extend beyond weight to circumference/composition trends | `_dedupe_by_day`'s `manual`-wins rule already exists and is untested against real data |
-| `analytics/metadata.py` | **MODIFIED** | `build_freshness` must span two **providers**, not just resources | Today it takes one `provider` for all resources — a response reading both Hevy and Apple Health cannot express its own freshness |
-| `mcp/tools/_common.py` | **MODIFIED** | Add `writable_session` beside `read_only_session`; add report caps | **Do not weaken `read_only_session`** — 13 tools depend on it |
-| `mcp/tools/programs.py` | **NEW** | `fitness_get_active_program` (read) + `fitness_set_active_program` (write) | The **only** module in `app/mcp/` permitted to write |
-| `mcp/tools/reports.py` | **NEW** | `fitness_get_weekly_report`, `fitness_get_monthly_report` | Response shaping over `analytics/reports.py` |
-| `mcp/server.py` | **MODIFIED** | Add `WRITE_CONFIRM` annotations; register the write tool **outside** the `_TOOLS` loop | The loop's whole purpose is that read-only-ness is structurally true |
-| `middleware.py` | **MODIFIED** | Second bucket for `/api/v1/ingest/*` | Otherwise a batched HAE run consumes Claude's 30/min budget |
-| `config.py` | **MODIFIED** | `health_ingest_secret: SecretStr`, added to `_SECRET_FIELDS` | Layer 1 of the three-layer secret defence |
-| `cli.py` | **MODIFIED** | `backfill-apple-health`, `add-measurement` | Existing operator-CLI pattern; no new auth surface |
+### 2.3 Recommendation
 
----
+Widen `_WRITE_ALLOWLIST` to exactly `{"program_switch.py", "physique.py"}`, bump every count
+assertion by exactly one (never delete an assertion, only its literal), and — the part easy to
+miss — **fix `test_mcp_tool_schemas.py`'s uniform-write-annotation assumption into a per-tool
+mapping**, because the milestone's own design (non-destructive vs. destructive) breaks the current
+code's implicit "all write tools look like `program_switch`" premise. This is not optional
+cleanup; without it, `test_annotations_are_an_exact_partition` fails the moment the new tool is
+registered with truthful annotations.
 
-## Data Model
-
-### `health_daily_metrics` — day-grained, not sample-grained
-
-```sql
-CREATE TABLE health_daily_metrics (
-    id            UUID PRIMARY KEY,
-    user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    source        VARCHAR(32)  NOT NULL,   -- 'health_auto_export' | 'apple_health_export'
-    source_name   VARCHAR(64),             -- HAE's own `source` ("Vegant's iPhone", "Hevy")
-    metric        VARCHAR(64)  NOT NULL,   -- canonical: 'step_count', 'active_energy'…
-    local_day     DATE         NOT NULL,   -- computed at ingest from users.timezone
-    qty           NUMERIC(14,4),
-    avg_value     NUMERIC(14,4),
-    min_value     NUMERIC(14,4),
-    max_value     NUMERIC(14,4),
-    units         VARCHAR(16)  NOT NULL,   -- canonical internal unit after conversion
-    sample_count  INTEGER,
-    created_at    TIMESTAMPTZ NOT NULL,
-    updated_at    TIMESTAMPTZ NOT NULL,
-    CONSTRAINT uq_health_daily_metrics_user_source_metric_day
-        UNIQUE (user_id, source, metric, local_day)
-);
-CREATE INDEX ix_health_daily_metrics_user_metric_day
-    ON health_daily_metrics (user_id, metric, local_day);
-```
-
-**Why daily and not raw samples.** 438,649 raw rows for one user, of which 44% are walking gait micro-metrics with zero coaching value. Every analytics function in `app/analytics/` already thinks in local days and Monday-anchored weeks (`snap_local_week_range`, `local_week_spine`). Storing sub-daily samples buys nothing the analytics layer can use, costs a ~100× row count, and creates an overlapping-sample de-duplication problem across sources that day-grain sidesteps. Health Auto Export's aggregation setting (seconds → yearly) means the *device* can do this aggregation for free — configure it to daily and the payload shrinks by two orders of magnitude at the same time.
-
-**Why `local_day DATE` and not a timestamp.** Identical reasoning to `body_measurements.measured_on`, whose docstring already states it: a calendar date is not an instant, and inventing a time of day for a daily total is fabrication. Compute it at ingest with `core.time.local_day(ts, users.timezone)`, never from the server's UTC date — at UTC+7 that would misfile seven hours of every day.
-
-**Why `(user_id, source, metric, local_day)` and not `(user_id, metric, local_day)`.** Same shape as `uq_body_measurements_user_source_measured_on`. It lets the backfill (`apple_health_export`) and the ongoing feed (`health_auto_export`) coexist on the same day without either clobbering the other, and it makes the historical cutover a query-time precedence decision rather than a destructive migration. It also makes re-POSTing an overlapping window a no-op UPSERT, which is required given HAE's delivery semantics are undocumented.
-
-**Why `source_name` is separate from `source`.** HAE's per-datapoint `source` field is what distinguishes "Vegant's iPhone" from "Hevy" from "Foodvisor". The live export shows `ActiveEnergyBurned` arriving from four different apps. Without this column, excluding Hevy-originated energy from an activity total is impossible; with it, it is a `WHERE` clause. Note the export also shows two device names for the same phone ("Vegant's iPhone" and "V's iPhone") — a rename — so any source-based rule must tolerate that.
-
-### `health_workouts` — stored, but quarantined from training analytics
-
-```sql
-CREATE TABLE health_workouts (
-    id                  UUID PRIMARY KEY,
-    user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    source              VARCHAR(32) NOT NULL,
-    source_name         VARCHAR(64),          -- 'Hevy' for 218 of 221 live rows
-    external_id         VARCHAR(64) NOT NULL, -- HAE workouts carry a stable `id`
-    activity_type       VARCHAR(64) NOT NULL,
-    start_time          TIMESTAMPTZ NOT NULL,
-    end_time            TIMESTAMPTZ NOT NULL,
-    local_day           DATE NOT NULL,
-    duration_seconds    INTEGER,
-    distance_m          NUMERIC(12,3),
-    active_energy_kcal  NUMERIC(10,2),
-    created_at          TIMESTAMPTZ NOT NULL,
-    updated_at          TIMESTAMPTZ NOT NULL,
-    CONSTRAINT uq_health_workouts_user_source_external
-        UNIQUE (user_id, source, external_id)
-);
-```
-
-Route/GPS arrays are deliberately **not** stored: the user does 221 `TraditionalStrengthTraining` sessions and no outdoor cardio, so routes are pure payload weight. Excluding them also removes the single largest contributor to HAE payload size.
-
-**The quarantine rule, stated as a rule so it can be tested:** no module under `app/analytics/` that computes volume, frequency, progression, records or plateaus may read `health_workouts`. Hevy is the authority for training. `health_workouts` is a *coverage cross-check* ("Apple recorded a session on a day Hevy has none") and the home for genuinely non-Hevy activity. This deserves a static guard in the same style as `test_analytics_never_names_the_muscle_tables_directly`.
-
-### Relationship to `body_measurements` — do not add a third source
-
-`body_measurements` already has every circumference and composition column and a `source` discriminator. The temptation is to route Apple `BodyMass` into it as `source='apple_health'`. **Don't**, on three pieces of evidence:
-
-1. `bodyweight._dedupe_by_day` implements a **two-valued** precedence: `manual` wins, everything else is first-seen-by-`(measured_on, source)` ordering. Its docstring says the rule is "locked now so it cannot silently become a double-count the day manual entry ships". Adding a third source makes it three-valued and silently changes every historical average — the exact failure the docstring is guarding against.
-2. **52 of the 79** Apple `BodyMass` rows originate from Hevy. They would land on the same `measured_on` as rows already present with `source='hevy'`, and the unique constraint `(user_id, source, measured_on)` permits both. `_dedupe_by_day` would then pick one arbitrarily.
-3. Apple `BodyMass` stops at 2025-05-27. It adds no recency over the 125 body measurements the 6-hourly Hevy sync already imports.
-
-If a third source is ever genuinely wanted, the correct move is to make the precedence explicit — a named ordered tuple `SOURCE_PRECEDENCE = ("manual", "hevy", "apple_health")` with a test per pair — not to add a source and hope the existing rule copes.
-
-### `training_programs` + `user_program_history`
-
-```sql
-CREATE TABLE training_programs (
-    id      UUID PRIMARY KEY,
-    slug    VARCHAR(32) NOT NULL UNIQUE,     -- 'lean_bulk' | 'cut' | 'recomp'
-    title   VARCHAR(64) NOT NULL,
-    -- the five constants recomposition.py currently hardcodes
-    weight_gain_too_fast_pct_per_week  NUMERIC(5,3) NOT NULL,
-    weight_loss_too_fast_pct_per_week  NUMERIC(5,3) NOT NULL,
-    weight_stable_band_pct_per_week    NUMERIC(5,3) NOT NULL,
-    recomp_progression_net_band        NUMERIC(5,3) NOT NULL,
-    recomp_min_classified_exercises    INTEGER      NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE user_program_history (
-    id          UUID PRIMARY KEY,
-    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    program_id  UUID NOT NULL REFERENCES training_programs(id),
-    started_at  TIMESTAMPTZ NOT NULL,
-    ended_at    TIMESTAMPTZ,                 -- NULL = active
-    created_at  TIMESTAMPTZ NOT NULL,
-    updated_at  TIMESTAMPTZ NOT NULL
-);
-CREATE UNIQUE INDEX uq_user_program_history_one_active
-    ON user_program_history (user_id) WHERE ended_at IS NULL;
-```
-
-**Append-only history, not a `users.active_program_id` column.** Three reasons, and the third is the strongest:
-
-1. It makes `destructive_hint=False` on the write tool *truthful*. A mutable column loses the previous value; an append-only history destroys nothing.
-2. It gives "you switched to Cut three weeks ago" for free.
-3. **The recomposition verdict genuinely needs it.** `get_recomposition_status` classifies a smoothed four-week weight rate against program thresholds. If the user switched programs eight days ago, that rate spans two programs and judging it against the new one is a wrong judgement delivered confidently. The history table is what lets the verdict say "your program changed mid-window" instead of guessing. The partial unique index enforces "at most one active" at the database, not in application code.
-
-Seed the three programs in the migration, alongside `0002_seed_default_user.py`'s precedent.
+**Rejected alternative:** reusing `program_switch.py`'s two-call token pattern for physique's
+write tool. Rejected because the milestone explicitly specifies single-call, and because the token
+pattern exists to force a *human* confirmation before an *irreversible, classification-changing*
+state transition — properties physique logging does not have (see §4).
 
 ---
 
-## Capability-by-Capability Integration
+## 3. Question 2 — The monthly-only report split
 
-### 1 & 2. Apple Health ingestion + schema
+### 3.1 The existing precedent, already shipped
 
-**Data flow — ongoing (new, inbound):**
-
-```
-Health Auto Export (iOS, background, user-set interval)
-    │  POST https://brett-…run.app/api/v1/ingest/health-auto-export
-    │  Authorization: Bearer <HEALTH_INGEST_SECRET>
-    │  {"data": {"metrics": [...], "workouts": [...]}}
-    ▼
-RateLimitMiddleware  (dedicated /ingest bucket)  ★
-    ▼
-CorrelationIdMiddleware
-    ▼
-api/routes/health_ingest.py
-    ├─ body-size cap → 413 before parse           ★ prevents OOM at 512Mi
-    ├─ secrets.compare_digest(bytes)  → 401 silent, nothing logged
-    ▼
-integrations/health_auto_export/schemas.py   Pydantic wire model
-    ▼
-integrations/health_auto_export/normalize.py
-    ├─ parse "yyyy-MM-dd HH:mm:ss Z"  AND  ISO-8601-with-T
-    ├─ units → kg / m / kcal / s / cm  (boundary conversion only)
-    ├─ metric name → canonical vocabulary
-    └─ local_day(ts, users.timezone)
-    ▼
-integrations/health_auto_export/ingest.py
-    ├─ SAVEPOINT per row
-    ├─ pg_insert(...).on_conflict_do_update(constraint="uq_health_daily_metrics_…")
-    └─ sync_state: provider='apple_health', resource='health_metrics' | 'health_workouts'
-    ▼
-health_daily_metrics · health_workouts        →  202 Accepted {counts only}
-```
-
-**Data flow — backfill (new, one-shot, offline):**
-
-```
-export.xml  (191 MB, 438,649 <Record>, ExportDate 2026-08-26)
-    │  PYTHONPATH=backend uv run python -m app.cli backfill-apple-health --path export.xml
-    ▼
-xml.etree.ElementTree.iterparse(…, events=("end",))   +  elem.clear()  after each
-    │  filter to: StepCount, ActiveEnergyBurned, BasalEnergyBurned,
-    │             DistanceWalkingRunning, FlightsClimbed, SleepAnalysis
-    │  (skip the 194,976 walking-gait rows and 10,077 audio-exposure rows)
-    ▼
-THE SAME normalize.py  →  THE SAME ingest upsert  →  THE SAME tables
-    source='apple_health_export'
-```
-
-Running the backfill through the ingest normalizer is the load-bearing decision. Two parsers producing two shapes for the same metric is how the historical trend and the ongoing trend end up disagreeing — and nothing would surface it, because both would look plausible. It is also the cheapest correctness test the normalizer will ever get: 4.5 years of real data against a fresh parser.
-
-**Auth.** Health Auto Export supports arbitrary custom headers, so `Authorization: Bearer <secret>` works and is the right choice. It is the same shape as the `MCP_AUTH_MODE=static` path that already exists and is already proven for the Claude Code CLI, so the rotation runbook (`docs/runbook-secret-rotation.md`) extends rather than needing invention. Do **not** put the token in the URL — same prohibition as the MCP one, plus it lands in Cloud Run access logs. Do **not** try to put the webhook behind WorkOS OAuth: a background iOS app has no browser and no consent flow available to it.
-
-**The size problem is real and has a specific ceiling.** Cloud Run rejects HTTP/1 requests above **32 MiB**, and the service runs at `--memory=512Mi`. HAE's own guidance says payloads can reach "several hundred megabytes". A 32 MiB JSON body parsed into Python objects expands roughly 5–10× in memory — an OOM kill, which on Cloud Run looks like a 503 with no application log line. Mitigations in priority order:
-
-1. **Configure HAE aggregation to daily.** A year of step data goes from ~48k samples to ~365 points. This is a device-side setting and costs nothing.
-2. **Select only the needed metrics** in the automation — exclude walking gait, audio exposure, and workout routes.
-3. **Enable HAE Batch Requests** so one export splits across several POSTs.
-4. **Cap the body server-side and return 413** before parsing. An explicit 413 is a diagnosable failure; an OOM kill is not.
-5. Do **not** reach for `--use-http2` as the primary fix. It lifts the 32 MiB cap, at which point the 512 MiB memory ceiling becomes the binding constraint and the failure mode gets worse.
-
-**Rate limiting needs a carve-out.** The current limiter is one global token bucket at 30/min with 30 burst, exempting only `/health` and `/.well-known/`. With Batch Requests on, a single HAE export can fire a burst of POSTs — which would consume the same budget Claude's connector uses and surface as a mid-conversation 429, the exact failure the current generous limits were tuned to avoid. Give `/api/v1/ingest/*` its own bucket. Do **not** exempt it: it is publicly reachable on an `--allow-unauthenticated` service.
-
-**Freshness envelope needs a signature change.** `analytics/metadata.build_freshness(session, *, user_id, resources, provider=PROVIDER_HEVY)` takes **one** provider for all requested resources. A recomposition verdict that reads Hevy workouts *and* Apple Health activity cannot express its own freshness under that signature. Change it to take `(provider, resource)` pairs, and add `FRESHNESS_RESOURCES_HEALTH`. This is small but it is on the critical path for every health-aware analytics response — do it in the ingest phase, not later.
-
-**Manual body-measurement entry** is a separate, much smaller write path. `body_measurements.source='manual'` and `bodyweight._dedupe_by_day`'s manual-wins precedence were both built in v1.0 and have zero rows behind them. The options:
-
-| Option | Cost | Verdict |
-|---|---|---|
-| CLI (`python -m app.cli add-measurement` + a bulk CSV import) | Lowest — no new auth surface, fits the existing operator-CLI pattern | **Recommended** |
-| Authenticated FastAPI route | Requires inventing a non-MCP authenticated API surface with no client for it | Defer |
-| A second MCP write tool | Explicitly out of scope: "Write/delete MCP tools beyond the one confirm-gated program-switch tool" | **Excluded** |
-
-### 3. Max-weight-lifted as primary strength signal
-
-**What is already there.** `progression.best_set_per_day` folds `qualifying_set_rows` into one `SessionBest` per `(template, local_day)` and populates `best_weight_kg` on **every** entry — including the 16.8% of exercise-sessions (376 of 2,239 on live data) that have no e1RM-qualifying set at all. The max-weight series therefore needs **no new query and no new fold**. It is a second projection of a map that is already built.
-
-`records.py` already has `PersonalRecordType.MAX_WEIGHT`, ungated.
-
-**What changes, precisely:**
-
-| Function | Change |
-|---|---|
-| `weekly_e1rm_points` | Add a sibling `weekly_max_weight_points` — same signature, `y` = week's max `best_weight_kg` instead of max `best_e1rm_kg` |
-| `classify_trend` | Take the points and the band as arguments; run OLS unchanged |
-| `get_exercise_trends` | Classify off max-weight; report the e1RM rate as a new **secondary** field on `ExerciseTrend`, not a replacement |
-| `scan_plateau` | Parameterize the series value (`best_weight_kg` vs `best_e1rm_kg`) |
-| `get_plateaus` | Seed `historical_best` from max weight |
-| `mcp/tools/schemas.py`, `mcp/tools/progression.py` | Carry both signals |
-| `recomposition.py` | **No structural change** — it consumes verdicts, not values |
-| `estimates.py`, `records.py`, `volume.py`, `frequency.py`, `comparison.py`, `rollup.py` | **Unchanged** |
-
-**Two calibration hazards that are the actual work.**
-
-*Hazard 1 — the shared band derivation breaks under discrete increments.* `TREND_STABLE_BAND_PERCENT_PER_WEEK = 0.5` is documented as **derived**: `PLATEAU_IMPROVEMENT_TOLERANCE (2%) ÷ MIN_TREND_WEEKS (4) = 0.5%/week`, and the comment says why — "sharing one underlying number means PROG-02 and PROG-03 cannot contradict each other by construction". Estimated 1RM is continuous (Epley maps 60×10 → 80.000 and 70×5 → 81.667), so a 2% band is a real dead-band. **Max weight is quantized to plate and stack increments.** 2% of a 60 kg lift is 1.2 kg — smaller than the smallest plate that can be added. The band is therefore either inert (no session ever clears it) or trivially cleared by a single increment. Both bands must be re-derived against discrete increments, *and the re-derivation must preserve the shared relationship* or the trend verdict and the plateau verdict will start contradicting each other on the same exercise. This deserves its own plan with live-data validation, exactly as D-18's original calibration got ("9 improving / 9 stable / 10 declining across 28 classified exercises — the band lands between real clusters rather than splitting one").
-
-*Hazard 2 — D-07a's skip semantics evaporate.* Under e1RM, 16.8% of sessions have `best_e1rm_kg is None` and `scan_plateau` skips them entirely — they neither extend nor break a streak. Under max weight, `best_weight_kg` is populated for essentially every set-based session, so **every** session enters the streak. Consequences: streak session-counts rise, `PLATEAU_MIN_QUALIFYING_SESSIONS = 4` was calibrated against the *sparser* e1RM population, and `_plateau_confidence`'s 4-5/6-9/10+ buckets shift upward. Note also that 48 live non-warm-up sets carry a genuine `Decimal("0.000")` weight (bodyweight exercises with no added load) — those must not read as "no data" *or* as a legitimate ceiling. `_NO_WEIGHT_RANK = Decimal(-1)` already anticipates this for ranking; the plateau scanner needs the same care.
-
-*Downstream, and this is a build-order dependency:* `recomposition.aggregate_progression` consumes the PROG-02 verdict distribution. Change the classifier and that distribution shifts, which shifts `RECOMP_PROGRESSION_NET_BAND`'s meaning and therefore the recomposition status. Re-validate against live data; do not redesign.
-
-### 4. Weekly/monthly report tools
-
-**Verdict: ~80% response-shaping, ~20% genuinely new analytics.** The 20% is specific and worth naming.
-
-Already exists and composes directly — `get_weekly_volume`, `get_muscle_group_volume`, `get_training_frequency`, `get_recomposition_status`, `get_body_weight_trend`, `get_exercise_trends`, `get_plateaus`, `get_personal_records`, `compare_periods`. And `fitness_get_training_summary` is already a composition tool doing exactly this shape at a 4-week default: four analytics calls in one read-only transaction, projected down to fit a 16 KB budget. A weekly report is largely that at `weeks=1` plus PRs plus a period comparison.
-
-**The genuinely new part: closed-period anchoring.** Every existing entry point is anchored on the user's local *today*. `get_body_weight_trend`, `get_recomposition_status` and `get_plateaus` take **no start date at all**, and their docstrings argue against one — "a caller-supplied end date would let a stale anchor produce a confident-looking rate from a window that has since been superseded". But a weekly report delivered Monday morning is about the *completed* week Mon–Sun, not the trailing seven days. `comparison.py` (CMP-01) is the only existing function taking two explicit periods and is the right precedent.
-
-This forces one decision that should be made in the phase context, not in a plan:
-
-| Option | Cost | Honesty |
-|---|---|---|
-| **(a)** Report closed-period volume/frequency/PRs, and carry the *anchored-on-today* recomposition verdict beside them, clearly labelled | Cheap; no signature changes | Honest, and arguably more useful — "where you stand now" is what a coach wants |
-| **(b)** Give `get_body_weight_trend` and `get_recomposition_status` an optional `anchor_day` | A real change to two functions whose docstrings currently forbid it, plus new tests for the stale-anchor failure mode | Also honest, but pays for a capability nothing else needs |
-
-**Recommend (a).**
-
-**Two constraints inherited from `summary.py`, both measured rather than assumed:**
-
-- *Budget.* `fitness_get_training_summary` measures ~9.5 KB on the wire at its 4-week default against a 16 KB budget, and it **deliberately excludes** PRs, plateaus, the per-week × per-muscle grid, and per-exercise frequency purely for size. A report that adds PRs + plateaus + measurements + a period comparison will exceed that. New `MAX_REPORT_*` caps belong in `_common.py`'s existing per-tool budget block, and the report's size must be **measured**, not estimated.
-- *Cost.* The summary already issues ~7 aggregate queries and is documented as "the most expensive call in the phase" against Claude's 30 s per-call budget — `get_recomposition_status` alone internally runs three analytics functions. A report is strictly more, plus a program lookup. Measure it; a slow scheduled report that times out is indistinguishable from a broken connector.
-
-**Scheduled delivery needs nothing server-side.** Verified: a Claude scheduled task is a fresh session issuing ordinary MCP tool calls. No push channel, no callback registration, no server-side scheduler. The existing 6-hourly Cloud Run Job stays a *data* sync and gains no reporting role.
-
-**But there is a documented client-side reliability risk.** `anthropics/claude-code#43397` (closed as a duplicate of `#35899`; see also `#36327`, `#40835`, `#40669`) reports that scheduled-task sessions complete the MCP handshake — a server operator's logs show `initialize`, `notifications/initialized` and `tools/list` all succeeding with valid schemas returned — but the tool schemas are **never injected into the agent's tool registry**, so the agent concludes no tools exist and stops. A single user message into the same session makes them appear instantly. Community workaround: begin the scheduled prompt with an instruction to delegate to a subagent ("DO NOT DO ANY WORK. ASSIGN THIS TASK TO AN AGENT."), which initializes MCP tools correctly. **Server-side implication: none.** Operational implication: the report tools must be verified from a real scheduled task and not only from an interactive session, and `docs/coaching-instructions.md` may need to carry the subagent preamble.
-
-**Program-awareness is a build-order dependency.** A report that says "you are on target for your Lean Bulk" needs the program to exist as data. Build programs first, or ship the reports against today's hardcoded thresholds and change them again.
-
-### 5. The confirm-gated write tool
-
-**Data flow:**
-
-```
-Claude: "switch me to Cut"
-    │
-    ├─ CALL 1  fitness_set_active_program(program="cut")
-    │     read_only_session   ← structurally read-only, same as all 13 tools
-    │       current program, when it started, which thresholds change
-    │     → { confirmation_required: true, current: …, proposed: …, changes: [...] }
-    │       NOTHING IS WRITTEN
-    │
-    └─ CALL 2  fitness_set_active_program(program="cut", confirm=true)
-          writable_session — ONE transaction
-            UPDATE user_program_history SET ended_at = now()
-                   WHERE user_id = :u AND ended_at IS NULL
-            INSERT INTO user_program_history (…, started_at = now())
-          COMMIT
-          → { switched: true, from: "lean_bulk", to: "cut", effective_from: … }
-```
-
-**Annotation.** The `_TOOLS` loop applies one shared `READ_ONLY` object to twelve tools precisely so read-only-ness is *structurally* true rather than twelve chances to forget a flag. The write tool must be registered **outside** that loop — the same way `fitness_ping` already is — with its own object:
+`backend/app/mcp/tools/schemas.py:484–572` already solves almost this exact problem, one layer up
+the stack, for `narrative`:
 
 ```python
-WRITE_CONFIRM = ToolAnnotations(
-    read_only_hint=False,    # it writes
-    destructive_hint=False,  # append-only history; nothing is destroyed
-    idempotent_hint=True,    # switching to the program you are already on is a no-op
-    open_world_hint=False,   # closed domain, like every other tool here
+class _ReportBody(_McpModel):      # everything BOTH periods share
+    ...
+class WeeklyReportResponse(_ReportBody):
+    """Deliberately has NO `narrative` field."""
+class MonthlyReportResponse(_ReportBody):
+    """`narrative` is D-14 ... `None` exactly when `data_available` is False."""
+    narrative: str | None
+```
+
+This is the wire-layer precedent for "same sections, one extra field, monthly only." The physique
+section should follow it exactly at the wire layer. The open design question is the ANALYTICS
+layer, where — unlike the wire layer — there is currently only **one** `ReportResult`
+(`app/analytics/schemas.py:1002–1053`) composed by **one** `compose_report()`
+(`app/analytics/reports.py:104–210`) for both periods.
+
+### 3.2 Evaluating the three options
+
+**Option B — separate monthly-only extension model** (e.g., `MonthlyReportResult(ReportResult)`).
+Rejected. `compose_report()`'s signature returns one declared type; a subclass would force either
+two composer functions (fragmenting the "one composer, two windows" property `reports.py`'s
+docstring states as the whole point of the module, lines 1–34) or a runtime `isinstance` dance at
+every call site including `test_analytics_reports.py`'s single `_report()` fixture builder. It
+buys nothing an Optional field doesn't, at the cost of duplicating the composer.
+
+**Option C — a conditional branch inside `compose_report`.** This isn't really a distinct third
+option — some conditional has to exist regardless of where the field lives, since something must
+decide not to run physique queries for `WEEKLY`. Read as its own recommendation, it's underspecified
+(a branch producing *what*, stored *where*?) — folded into Option A below.
+
+**Option A — Optional field on `ReportResult`, populated only when `period is MONTHLY` (recommended).**
+Add `physique: PhysiqueSection | None` to `ReportResult`, populated inside `compose_report()`:
+
+```python
+physique = (
+    await get_physique_report_section(session, user_id=user_id, weeks=REPORT_PLATEAU_LOOKBACK_WEEKS)
+    if period is ReportPeriod.MONTHLY
+    else None
 )
 ```
 
-Verified against `mcp 2.0.0`'s `ToolAnnotations`: the spec defaults are `destructive_hint=True` and `open_world_hint=True`, so **leaving them unset advertises a destructive open-world tool**. Set all four explicitly, exactly as `READ_ONLY` does. Note `destructive_hint=False` is only truthful under the append-only history design — if the switch mutates a column in place and loses the prior value, the honest annotation is `True`, which is a further argument for the history table.
+This is a one-line branch inside the existing composer — no new function signature, no subclass,
+and it matches `RecompositionResult`'s own precedent for "sometimes-null, explained by an adjacent
+fact rather than a second flag": `previous_program`/`program_switched_on` are `None` exactly when
+`program_switch_in_window` is `False` (`schemas.py:960–969`) — here, `physique` is `None` exactly
+when `report.period` (already a field on the same model) is `WEEKLY`. No new boolean is needed;
+the explanation is already on the object.
 
-**Static guards must change — this is why it is a phase, not a task.** Three tests currently make a write tool impossible:
+**The one thing this option must get right:** `physique` being `None` must mean **only** "this is
+a weekly report." It must never also mean "the call failed" (that's `ReportResult` not existing at
+all — degradation happens entirely at the MCP layer, see §3.3) or "the user has no observations
+yet" (that must be a fact **inside** `PhysiqueSection`, e.g. `has_observations: bool`, mirroring
+`BodyMeasurementTrendResult`'s own `coverage.insufficient_data` pattern rather than nulling the
+whole section — the same discipline `body_measurements.py:89–103`'s `staleness()` uses to keep
+"no reading" and "stale reading" as two independent, nameable facts instead of one overloaded
+`None`).
 
-| Guard | Correct change | Wrong change |
-|---|---|---|
-| `test_mcp_never_writes` — `_SESSION_WRITE` / `_WRITE_IMPORT` regexes over **every** module under `app/mcp/` | **Explicit single-module allowlist** (`app/mcp/tools/programs.py`), so "exactly one MCP module can write" stays machine-checked — which *is* the PROJECT.md constraint | Deleting or relaxing the regex |
-| `test_every_tool_module_guards_its_public_tools` — asserts a **literal count of 12** | Bump the literal; the comment already explains the literal is the point | Making the count dynamic |
-| `test_every_tool_is_annotated_read_only` + `EXPECTED_TOOLS` frozenset | "Every tool except the named write tool"; add the new names to `EXPECTED_TOOLS` | Dropping the assertion |
+### 3.3 The wire layer
 
-**`read_only_session` must not be weakened.** Add a `writable_session` sibling in `_common.py`. Thirteen tools depend on the PostgreSQL `READ ONLY` transaction being the *actual* control — `test_mcp_readonly.py` drives a real write through a tool session and asserts `ReadOnlySQLTransactionError`, precisely because annotations "should not be relied upon for security enforcement". Also verified there: the `postgresql_readonly` option does **not** leak back into the pooled connection, so a writable session in the same process is safe.
+Mirror `narrative` exactly: add `physique: PhysiqueReportSection | None` to `MonthlyReportResponse`
+only (`app/mcp/tools/schemas.py:562–572`), never to `_ReportBody`, never to `WeeklyReportResponse`.
+`_degraded_body_fields()` (`app/mcp/tools/reports.py:152–192`) needs **no new key** for the shared
+dict — it already omits `narrative` and lets `_degraded_monthly()` (line 199–200) append
+`narrative=None` on top. Do the identical thing: `_degraded_monthly()` becomes
+`MonthlyReportResponse(**_degraded_body_fields(), narrative=None, physique=None)`. This preserves
+the existing "every `_ReportBody` field, emptied rather than partially filled" contract
+(docstring, lines 152–158) without touching `_ReportBody` at all.
 
-**`required_scopes` — the code already flags this moment.** `mcp/server.py`'s `AuthSettings(required_scopes=None)` carries the comment: *"Revisit when the first write tool ships."* It also names the cost: a required scope would force re-consent on the connector that already works, and `AuthSettings.required_scopes` applies to the **whole server**, so it would gate the thirteen read tools too. **Recommend keeping `required_scopes=None`.** For a single-user server the two-call confirm *is* the control, and a scope the server never varies its behaviour on is a claim, not a control — which is the argument the existing comment already makes.
+### 3.4 `build_narrative`'s determinism contract
 
-**Two-call vs elicitation — verified, and stick with two-call.** `mcp 2.0.0` ships a genuine alternative: `Elicit` + `Annotated[ElicitationResult[T], Resolve(fn)]`, matched against `AcceptedElicitation` / `DeclinedElicitation` / `CancelledElicitation`. It produces a real *client-rendered* confirmation rather than a modelled one. Three reasons to keep the two-call design anyway:
+`build_narrative` (`app/analytics/reports.py:238–452`) is called **only** from
+`fitness_get_monthly_report` (`app/mcp/tools/reports.py:216–243`) — never from the weekly tool —
+so it will always receive a `ReportResult` whose `physique` field is populated (barring the
+"no observations yet" case handled inside the section, §3.2). Add one new block, following the
+exact idiom every other section already uses (StrEnum via `.value`, `Decimal` via `str()`,
+`dt.date` via `.isoformat()`, a null figure as an explicit word never a bare `0`) — see §4 for what
+that block may and may not contain.
 
-1. Elicitation requires the **client** to advertise the capability. Claude's custom-connector support for it is unverified, and BRETT is a resource server talking to a client it does not control.
-2. `Resolve`-injected parameters are **hidden from the tool's input schema**, so a client that silently lacks the capability gives no signal at discovery — it fails at call time, mid-conversation.
-3. The two-call contract is enforced **server-side**, so it works identically on the Claude Desktop/Web/mobile connector *and* the Claude Code CLI static-bearer path, which is a rollback route that must keep working.
+### 3.5 What `test_analytics_reports.py` constrains
 
-Record elicitation as the known upgrade path once client support is confirmed.
+- `_report()` and its per-section helpers (module-level, hand-built `ReportResult` fixtures) will
+  need a `_physique()` helper alongside `_recomposition()` etc., following the same
+  fixed-arbitrary-date convention (`dt.date.fromisoformat(...)`, never the positional constructor —
+  module docstring, lines 10–14).
+  `test_the_narrative_contains_no_recommendation_language` and
+  `test_every_number_in_the_narrative_is_already_in_the_structured_fields` (lines 684–718) must be
+  run with a fixture that reaches the physique branch, exactly as they are currently built to
+  reach "every branch" (records present, a plateau present, a program switch present — see the
+  docstring at line 686).
+- `test_the_weekly_window_agrees_with_the_mcp_layers_week_window`-style anti-drift tests are not
+  directly implicated (physique carries no window of its own beyond the observation's own date),
+  but a **new** assertion is worth adding here: that `WeeklyReportResponse` genuinely has no
+  `physique` attribute at all (a `hasattr`/model-field-set check), the same structural guarantee
+  `WeeklyReportResponse`'s own docstring claims for `narrative` today by omission alone.
 
-**Transaction boundary.** Two statements, one transaction, one commit. Do **not** call analytics inside the write transaction — the "here's what this changes" preview that call 1 returns is a *read* and belongs in `read_only_session`. That keeps call 1 structurally read-only and makes call 2 the only path in the entire MCP layer that can write.
+### Recommendation
+
+**Option A: an Optional `physique` field on `ReportResult`, populated by a one-line period
+conditional inside `compose_report()`, mirrored at the wire layer by adding `physique` to
+`MonthlyReportResponse` only** — exactly the pattern already shipped for `narrative`. Reject the
+separate-model option as unnecessary duplication of the composer; treat "conditional inside
+compose_report" not as a competing option but as the correct implementation detail of Option A.
 
 ---
 
-## Suggested Build Order
+## 4. Question 3 — `build_narrative`'s determinism contract and physique's ordinal/textual ratings
 
-### Dependency graph
+### 4.1 The two load-bearing tests, precisely
 
+`backend/tests/test_analytics_reports.py`:
+- `_BANNED_NARRATIVE_TOKENS` (lines 101–110): `"should", "recommend", "suggest", "consider",
+  "advise", "deload", "aim for", "you need", "try "` (trailing space deliberate). Checked via
+  `token not in build_narrative(report).lower()` for every token (lines 684–697).
+- The numeric-provenance check (lines 700–718): every match of `_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")`
+  (line 118) found in `build_narrative(report)`'s output must already be a substring of
+  `report.model_dump_json()`.
+
+### 4.2 What an ordinal, StrEnum-rendered rating does to each check
+
+**The banned-token scan is blind to fabricated words, not just recommendation words.** It only
+matches its ten fixed literal tokens. A muscle-group rating rendered via `.value` (e.g.
+`report.physique.ratings[i].rating.value`) is a bare enum word with no digits — it simply never
+touches `_NUMBER_RE`, exactly like `recomposition.status.value` and `progression.verdict.value`
+already do not (lines 436–439 render these the same way today with no special-casing). Ordinal
+ratings are **not a new risk category for the numeric check** — they are outside its domain
+entirely, the same way every other StrEnum field in this report already is.
+
+**The numeric-provenance check has a real loophole once free text enters the model.** If a
+`leanness_notes`/`conditioning_notes`/`symmetry_notes` string field is added to `PhysiqueSection`
+and ANY part of `build_narrative` prints it, two things happen simultaneously:
+1. The note is Claude's own prose, generated in-conversation, not backend-computed. Its content is
+   outside this codebase's control by construction (the milestone's own framing: "Claude is the
+   analyst, BRETT is the ledger").
+2. `report.model_dump_json()` will trivially contain the note's text VERBATIM, because the note
+   is a field on the serialized model. So any number the note happens to contain (e.g. "abs look
+   maybe 10% leaner") would pass the provenance check — not because the number was validated as
+   backend-computed, but because the note field's own presence in the JSON dump makes anything
+   inside it "provable." **The check would report green while the property it exists to enforce is
+   silently defeated.**
+3. The banned-token scan is a fixed, closed list of ten strings. It was written to catch this
+   *codebase's* recommendation language, not to police arbitrary third-party prose. A model could
+   write "you should get a check-up" in a symmetry note (medical, off-topic, not even a training
+   recommendation) and neither test would catch it, because neither test is designed to validate
+   free text — they are designed to validate a small, fixed, deterministic template.
+
+### 4.3 What the physique narrative section may and may not say
+
+**May say** (all sourced from already-computed, already-typed fields on `report.physique`,
+following the identical rendering discipline every other section uses):
+- Each rated muscle group's canonical name and rating word (`CanonicalMuscleGroup.value`,
+  `PhysiqueRating.value`) — words, never invented labels.
+- The diff verdict per muscle (improved / unchanged / regressed), also a StrEnum `.value`.
+- The cross-reference flag/label ("underdeveloped and undertrained"), rendered from a stored
+  boolean or StrEnum field on the cross-reference result — never computed inline in
+  `build_narrative` (see §5).
+- Any **precomputed aggregate count** that is itself a field on the physique analytics result
+  (e.g. `improved_count`, `regressed_count`) — never a `sum()`/`len()` performed inline inside
+  `build_narrative` over a list, even though that arithmetic is trivial. The rule
+  `build_narrative`'s own docstring states ("introduces nothing... never a new computation") does
+  not carve out an exception for simple arithmetic; the counting must happen in
+  `analytics/physique.py`, where it is unit-testable against known fixtures, exactly like every
+  other figure in this report.
+- The observation date, via `.isoformat()`.
+
+**May not say:**
+- **Claude's free-text notes, verbatim or in any paraphrased form, anywhere in `build_narrative`'s
+  output.** This is the recommendation, not a caveat: the determinism/banned-token/numeric-
+  provenance contract is a property of code this project controls and tests against fixed
+  fixtures; it cannot be honestly extended to cover prose this project does not generate and
+  cannot re-validate on every future banned-word list update. The notes remain fully available to
+  Claude — they travel to the model as **structured JSON fields** on the tool/report response
+  (`leanness_notes: str | None` etc.), so Claude can read and relay them in its own conversational
+  answer — they are simply never re-emitted inside BRETT's own deterministic markdown, the same
+  way `disclaimer` is the one field allowed to travel verbatim specifically *because* it is a
+  fixed backend-authored constant (`RecompositionResult`'s docstring, `schemas.py:939–944`) —
+  Claude's free text has no equivalent "fixed constant" property and must not be given the same
+  verbatim-travel treatment.
+- Any newly-derived ratio, percentage, or count not already a named field.
+- Any of the ten banned tokens, in any section — unchanged, and now doubly relevant since the
+  cross-reference finding ("underdeveloped AND undertrained") is one accidental word choice away
+  from reading as a recommendation ("you should train X more") if phrased loosely. Render it as an
+  observation ("chest: underdeveloped rating, also below-median direct volume this window"),
+  never as advice.
+
+### 4.4 A gap worth naming for the roadmapper
+
+Neither existing test can catch a **fabricated rating word** (e.g., a typo'd or hand-coded label
+that doesn't match `report.physique`'s real value) the way the numeric check catches a fabricated
+number, precisely because `_NUMBER_RE` only looks at digits. Recommend adding one new assertion
+alongside the existing two: every physique rating/verdict token rendered in the narrative must
+match the corresponding `.value` read directly off `report.physique`'s own fields (a structural
+equality check, not a regex over the whole string) — the word-level equivalent of the
+numeric-provenance test, scoped to the one new section that introduces ordinal/textual content.
+
+---
+
+## 5. Question 4 — Prior-observation-as-context
+
+### 5.1 Why `program_switch.py`'s two-call token does not transfer
+
+The token exists to solve one specific problem: **a bare boolean confirmation is not a real gate**
+because the model can set it `true` on the first call (`program_switch.py:9–14`, PITFALLS #13).
+The token forces a *human* to see a warning and *decide* before an *irreversible,
+classification-changing* state transition — the impersonation risk is that Claude switches the
+active program in one shot with no human ever confirming a real intent.
+
+Physique observation has neither property:
+- The milestone explicitly scopes the write tool as **single-call, append-only** (PROJECT.md,
+  "Target features" bullet). A token-relay pattern requires a first no-op call by construction —
+  contradicting "single-call" as a design constraint, not merely as an efficiency preference.
+- The write is **not destructive** (§2.2's annotation choice: `destructive_hint=False`). A wrong
+  or drifted rating is one row in a longitudinal series, correctable by the next observation — not
+  a threshold change that silently reclassifies twelve weeks of past recomposition verdicts the
+  way a program switch does (`program.py` module docstring, lines 1–8, is explicit that THIS is
+  the harm a mutable value would cause).
+- The risk being mitigated ("drift" — Claude rating progressively looser over successive
+  observations with no memory of its own prior scale) is a **data-quality** problem, not a
+  **security/consent** problem. A cryptographic single-use nonce is the right tool for "did a human
+  really agree to this," not for "does the model have the context it needs to be consistent with
+  itself."
+
+### 5.2 The shape that actually solves drift
+
+Nothing can force an MCP client to call tool A before tool B — the question's own framing is
+correct, and `program_switch.py`'s token doesn't get around this either: it forces order **between
+two calls of the same tool**, not between two *different* tools. There is no mechanism in the MCP
+spec (nor in this SDK) for a server to require tool X was called before tool Y is even reachable,
+short of not registering Y until X has run in this session — which stateless HTTP transport rules
+out entirely (`server.py`'s own module docstring: "Stateless request/response; protocol-level
+sessions removed").
+
+Given that hard limit, the practical, honestly-scoped design is a **dedicated read tool**,
+documented as the required precursor two ways at once:
+
+1. **A purpose-built read tool**, e.g. `fitness_get_latest_physique_observation`, following
+   `programs.py`'s exact shape (`app/mcp/tools/programs.py:38–67`,
+   `fitness_get_training_program`) — takes no arguments, reads the single most recent observation
+   (all rated muscle groups + their ratings + the observed_on date), registered `READ_ONLY` inside
+   `_TOOLS` like every other read tool.
+2. **Steered, not forced, at two documentation surfaces that already exist and are already
+   drift-guarded:**
+   - The write tool's own description string (the text `server.py` passes to `mcp.add_tool(...)`,
+     e.g. "Call `fitness_get_latest_physique_observation` first so ratings are relative to the
+     last observation, not absolute" — the same style `fitness_switch_training_program`'s
+     description already uses to steer multi-step behavior, `server.py:288–291`).
+   - `docs/coaching-instructions.md`, which PROJECT.md records is "drift-guarded against the live
+     tool registry" (Phase 7/13 validated bullets) — this is where the actual behavioral contract
+     for the model lives today (`fitness_switch_training_program is the only tool that writes; it
+     needs two calls..." is already an instruction there per `server.py`'s `_INSTRUCTIONS`
+     constant, lines ~85–98). Add the equivalent sentence for physique's read-before-write
+     sequencing.
+
+3. **Optional secondary confirmation, after the fact, at no extra call cost:** because
+   `writable_session` opens a plain (non-read-only) session, the write tool's OWN handler can, in
+   the same transaction, query the observation it just inserted alongside the prior one and return
+   both (or the already-computed diff, if `analytics/physique.py`'s diff function is called here
+   too) in its response — so the user/Claude gets an immediate "here's what changed since last
+   time" echo. This is a nice confirmation UX; it is explicitly **not** the drift mitigation, since
+   by the time this tool is called Claude has already produced its rating. It answers a different
+   question ("was this recorded correctly") not the one drift mitigation is about ("did Claude
+   have the right anchor before rating").
+
+### Recommendation
+
+**A dedicated, purpose-built read tool (`fitness_get_latest_physique_observation`), documented as
+the required precursor in both the write tool's own description and
+`docs/coaching-instructions.md`.** This is a soft, documentation-level guarantee, not a
+cryptographic one — and that asymmetry with `program_switch.py` is correct, not a compromise: the
+token pattern is proportionate to an irreversible, classification-changing, single-user-confirmed
+action; physique logging is an append-only data point where the cost of an occasional
+drift-affected rating is low and self-correcting on the next observation. Applying the token
+pattern here would be over-engineering relative to the actual risk, and would violate the
+milestone's own "single-call" scoping to boot.
+
+**Rejected alternative:** returning prior context as a field on the *write* tool's own response.
+Rejected because by the time the write tool is called, Claude has already produced the rating in
+its arguments — a prior-observation field on that response arrives too late to inform the rating
+it's meant to calibrate; it can only ever serve the secondary "confirm what was recorded" purpose
+in §5.2.3, which is not what "rates relative to it" requires.
+
+---
+
+## 6. Question 5 — The cross-reference ("underdeveloped AND undertrained")
+
+### 6.1 The project's own precedent for exactly this shape
+
+`RecompositionResult` already pairs two independently-computed signals from two different
+analytics domains (body-weight trend + training progression) inside ONE composed result, and
+`mcp/tools/reports.py`'s own comment states the reason explicitly (lines 121–122): *"Reported
+BESIDE the status, not folded into it... a real disagreement between the label and the signal is
+exactly what Claude needs to see."* `get_recomposition_status` (composed in its own module,
+`analytics/recomposition.py`, not bolted onto `bodyweight.py` or `progression.py`) is the direct
+precedent: cross-domain composition is analytics' job, done once, in a module named for the
+composed concept, not left to the caller to join.
+
+The same reasoning applies here. "Is the underdeveloped muscle also the undertrained one?" is a
+**deterministic join over two already-computed structured datasets** (stored ratings +
+`get_muscle_group_volume`'s output) keyed on the shared 19-value `CanonicalMuscleGroup` taxonomy —
+it requires no vision, no subjective judgment, and no new "recommendation." It is data composition,
+not coaching advice, and the D-03 "no recommendation language" rule (which the report's own
+docstring is careful to scope to *language*, not to *data joins* — "This is composed DATA. Claude
+synthesizes the recommendation from it," `schemas.py:1010–1013`) does not forbid it.
+
+### 6.2 Where it should NOT live
+
+**Not left to Claude to correlate across two tool responses.** The project's own anti-pattern
+language (`ReportResult`'s docstring cites "ARCHITECTURE.md's Anti-Pattern #9 ('report tools as a
+fourth copy of the analytics arithmetic')") is about backend code re-deriving numbers, but the
+underlying value — one deterministic, tested implementation of a fact, reused everywhere it's
+needed — argues just as strongly against making the MODEL re-derive a join every time by
+eyeballing two JSON blobs. A join over 19 rows is exactly the kind of "arithmetic" this project
+consistently keeps server-side and unit-tested (see `roll_up_muscles`, `app/mcp/tools/volume.py:81–101`,
+for the parallel case of folding per-week-per-muscle data into one deterministic 19-row structure
+"so the 19-row invariant is unit-testable with no container behind it").
+
+**Not a bespoke join buried inside `reports.py`.** `reports.py`'s own docstring is explicit that
+it "owns no arithmetic... each number was computed by a function under `app/analytics/` that
+already has its own tests" (lines 1–9). A physique×volume join computed inline in `compose_report`
+would be exactly the "fourth copy of the analytics arithmetic" its own Anti-Pattern #9 warns
+against, since a future physique-specific MCP tool would need the identical join and would either
+duplicate it or reach back into `reports.py` for it (an inversion of the dependency direction the
+whole codebase enforces one way).
+
+### 6.3 Recommendation
+
+**A new composed function inside `analytics/physique.py` itself** —
+`get_physique_training_correlation(session, *, user_id, weeks)` — that internally calls
+`get_muscle_group_volume` (`analytics/volume.py`) and the latest stored ratings (via
+`db/repositories/physique.py`), joins them by `CanonicalMuscleGroup`, and returns a structured
+list carrying, per muscle group: the rating, the diff verdict, the volume/undertrained signal, and
+a boolean/label for "underdeveloped and undertrained." This keeps `physique.py` the single home
+for everything physique-domain (diff analytics + the cross-reference), matches
+`recomposition.py`'s precedent of a dedicated module for a cross-domain composition, and is
+importable by BOTH a new physique read tool (any time) and `reports.py`'s monthly-only section
+(reusing the same function, never re-deriving it) — the identical "one implementation, imported
+twice" discipline `_report_body_fields()` and `roll_up_muscles` already demonstrate elsewhere in
+this codebase.
+
+**Rejected alternative:** exposing raw ratings and raw volume as two separate fields and letting
+Claude eyeball the correlation. Rejected because it reintroduces exactly the risk the project's own
+`RecompositionResult` design already solved once (a disagreement between two signals is precisely
+the thing worth computing explicitly, not hoping the reader notices) and produces two different
+"is this muscle undertrained" answers if the report's own thresholds for "undertrained" (from
+`get_muscle_group_volume`/`roll_up_muscles`) and Claude's ad hoc reading of the JSON ever diverge.
+
+---
+
+## 7. Question 6 — Data model and build order
+
+### 7.1 The two existing precedents, and which one applies
+
+| | `body_measurements` (`db/models/body.py`) | `health_daily_metrics` (`db/models/health.py`) |
+|---|---|---|
+| Shape | WIDE: one row per `(user, source, measured_on)`, all 17 metrics as columns | NARROW: one row per `(user, source, metric, source_name, local_day)` |
+| Why wide/narrow | Hevy's API "returns one object per calendar date carrying all 17 metrics" in one call — the source is atomic per day (`body.py:7–11`) | Multiple apps write different subsets of metrics on the same day, and coverage is inherently partial per source (`health.py:1–34`) |
+| Taxonomy changes | A new metric = a new column = a migration | A new metric = a new string value = no migration |
+
+Physique observations are structurally like `health_daily_metrics`, not `body_measurements`:
+**coverage is inherently partial.** A given photo set may show the front but not the back, so a
+single observation may rate 12 of 19 muscle groups, not all 19 — the same "not everything arrives
+together" property that made `health_daily_metrics` narrow rather than wide. A 19-column wide row
+would need 19 nullable columns and would not extend cleanly if the canonical taxonomy ever grows
+(muscles.py's own comment on `CanonicalMuscleGroup`, lines 23–25, already flags that changing the
+enum "costs a data migration of `exercise_muscles`" — a wide physique table would inherit the same
+fragility for no benefit, since every other muscle-group-shaped result in this codebase, e.g.
+`MuscleGroupVolume`, `MuscleGroupFrequency`, `roll_up_muscles`'s output, is already a **list of
+narrow rows**, one per group).
+
+### 7.2 Recommended table shape
+
+**Two tables**, migration `0007` (next after `0006_user_program_history.py`):
+
+```python
+class PhysiqueObservation(Base, TimestampMixin):
+    """One point-in-time observation session (one set of photos, one sitting)."""
+    __tablename__ = "physique_observations"
+
+    id: Mapped[uuid.UUID]
+    user_id: Mapped[uuid.UUID]              # FK -> users.id, CASCADE
+    observed_on: Mapped[dt.date]            # local day (D-13 discipline), like ProgramPeriod.started_on
+    leanness_notes: Mapped[str | None]      # bounded String(N), Claude-authored, never re-emitted in build_narrative
+    conditioning_notes: Mapped[str | None]
+    symmetry_notes: Mapped[str | None]
+    # No `ended_on`: this is a point-in-time snapshot like BodyMeasurement, not an
+    # effective-dated interval like ProgramPeriod -- nothing here is ever "closed."
+
+class PhysiqueRating(Base, TimestampMixin):
+    """One muscle group's rating within one observation. Narrow, like HealthDailyMetric."""
+    __tablename__ = "physique_ratings"
+
+    id: Mapped[uuid.UUID]
+    observation_id: Mapped[uuid.UUID]       # FK -> physique_observations.id, CASCADE
+    user_id: Mapped[uuid.UUID]              # DENORMALIZED, see below
+    muscle_group: Mapped[str]               # CanonicalMuscleGroup.value, String(16) -- string, never a native ENUM,
+                                             # matching ProgramPeriod.program's own convention
+    rating: Mapped[str]                     # ordinal PhysiqueRating(StrEnum).value, String(16)
+
+    __table_args__ = (
+        UniqueConstraint("observation_id", "muscle_group", ...),   # one rating per group per observation
+        Index(..., "user_id", "muscle_group", "observed_on-via-join"...),
+    )
 ```
-  ┌─ Health tables + normalizer + webhook ─┐
-  │              (1)                        │
-  │               ↓                         │
-  │        export.xml backfill              │
-  │              (2)                        │
-  └───────────────┬─────────────────────────┘
-                  │
-   Max-weight strength signal (3)  ── independent of 1 & 2 ──┐
-                  │                                          │
-                  ↓                                          │
-        Training programs (4)                                │
-        · schema + seed                                      │
-        · program-aware recomposition thresholds             │
-        · read tool                                          │
-        · confirm-gated WRITE tool + static-guard changes     │
-                  │                                          │
-                  ↓                                          ↓
-        ┌───────────────────────────────────────────────────────┐
-        │  Health analytics + period-anchored reports (5)       │
-        │  needs: health data (1,2) + settled strength verdict   │
-        │         (3) + programs for program-aware reports (4)   │
-        └───────────────────────────────────────────────────────┘
-```
 
-### Recommended sequence
+**`user_id` is deliberately denormalized onto `physique_ratings`**, not reached only via a join to
+the header table. This mirrors `health_daily_metrics` keeping `user_id` on the same granular row
+rather than requiring a join for every query — both the diff function (`get_physique_diff`) and
+the cross-reference join (`get_physique_training_correlation`, §6.3) need to filter/aggregate
+directly on `physique_ratings` by `(user_id, muscle_group)` across many observations; forcing a
+join to the header table for every such query for a fact that never changes per observation is
+pure overhead with no integrity benefit (the FK to `physique_observations.id` already pins the
+row to one observation and one user via that observation).
 
-| # | Phase | Why here | Ends when |
-|---|---|---|---|
-| **1** | **Apple Health ingest foundation** — `health_daily_metrics` + `health_workouts` + migration; `integrations/health_auto_export/` (schemas, normalize, ingest, auth); the FastAPI route; `sync_state` extension for `provider='apple_health'`; `build_freshness` multi-provider signature; rate-limit carve-out; body-size cap; secret + deploy wiring | Longest external lead time — the phone must be configured and then data accumulates while later phases run. It also *defines the canonical metric shape* everything downstream reads | Real data from the phone lands in `health_daily_metrics`, verified in production |
-| **2** | **Historical backfill** — `backfill-apple-health` CLI, streaming `iterparse`, filtered to the ~6 useful types, through the **same** normalizer | Separate from 1 so the live webhook is proven before a 438k-element import runs. It is also the cheapest correctness test the normalizer will get: 4.5 years of real data | 2022-03 → 2026-08 present in the tables, no duplicate days against the webhook feed |
-| **3** | **Max-weight strength signal** — `progression.py` max-weight primary, band re-derivation with live-data validation, e1RM demoted to secondary, `recomposition.py` re-validated | Highest-risk analytics work; **no new I/O and no schema dependency**. Must land before reports, because it changes what `fitness_get_training_summary` and `fitness_get_recomposition_status` return | Trend + plateau verdicts re-validated against live data with a stated distribution, both bands re-derived and still sharing one number |
-| **4** | **Training programs** — schema + seed; `recomposition.py` thresholds become program parameters; `fitness_get_active_program`; the confirm-gated write tool; the three static-guard changes | Must precede reports if reports are to be program-aware. Groups the write-path risk into one phase | A program switch round-trips through Claude with a real confirmation step, and "exactly one MCP module can write" is still machine-checked |
-| **5** | **Health analytics + reports + coaching style** — `analytics/health.py`; health inputs into recomposition; `analytics/reports.py` closed-period composition; `fitness_get_weekly_report` / `fitness_get_monthly_report`; tighten `docs/coaching-instructions.md` | Composes everything above. Last by construction | A real Claude scheduled task delivers a report from real data, verified as a *scheduled* run and not only interactively |
+Rating values belong in a new ordinal `StrEnum` (call it `PhysiqueDevelopmentRating` or similar —
+exact member names are a requirements decision, not an architecture one), stored as a plain string
+column exactly like `TrainingProgram`/`ProgramPeriod.program` — **never** a native Postgres `ENUM`
+type, matching the codebase's uniform convention of "Python StrEnum + `String(N)` column" seen in
+every model touched during this research (`program.py`, `body.py`, `health.py`). Free-text notes
+must be genuinely bounded (`String(N)`, not `Text`) per the milestone's own "bounded free-text"
+requirement — this is a schema-level enforcement of that bound, not merely a convention.
 
-**Floaters** — schedule where cheapest, no hard dependencies:
-- **Manual body-measurement entry + bulk CSV import** (CLI). Natural fit with phase 4 (body/program data-model thinking) or phase 1 (already touching the CLI). `_dedupe_by_day`'s manual precedence already exists, so this is small — but it is the first time that rule sees real data, so it needs its own tests.
-- **Circumference/composition trend analytics** (`bodyweight.py` beyond weight-only). Independent of the health tables. Note the data is thin: `fat_percent` and `lean_mass_kg` are 0 of 123 live rows, `waist_cm` is 15 of 123 with a three-month gap. The `DQ-02` coverage floors (`MEASURED_DAY_FLOORS`) will need per-metric equivalents, or most windows will honestly return `insufficient_data`.
+No third table is needed for either the prior-observation read tool or the cross-reference: both
+are pure queries over these two tables (plus, for the cross-reference, a join against the existing
+`exercise_muscles`/volume machinery) — no new storage.
 
-### The one ordering argument worth surfacing
+### 7.3 Build order, with real dependencies
 
-**Phase 3 could move to first.** It touches no I/O, has no external dependency, and directly sharpens the Core Value path that already works in production. Doing the pure-analytics change while the schema is still stable is the lower-risk sequencing. The argument against is that Apple Health has the longest lead time and starting it early lets data accumulate. **Recommend 1 → 2 → 3 → 4 → 5, but treat 3 as movable** — if phase 1 stalls on a Health Auto Export configuration problem, phase 3 is the right thing to run instead of waiting.
+**0. Pre-deploy migration safety, first, before any physique code.** PROJECT.md's own Active
+requirements rank this "Highest-value fix carried into the next milestone," and it is a genuine
+dependency, not just a priority call: this milestone adds its own new migration (`0007`), and
+shipping it with the exact same unguarded `scripts/deploy-cloud-run.sh` that has already let
+production run behind deployed code three times this year (Phase 8's `0004` vs `0005`, the Phase 9
+operator `DATABASE_URL` mistake, the Phase 13 `0005` vs `0006` `UndefinedTableError`) would very
+plausibly reproduce the exact same failure a fourth time, this time on a milestone whose entire
+point is a new table. Concretely: `scripts/deploy-cloud-run.sh` (read in full — lines 1–58) runs
+`gcloud run deploy` with **no migration step of any kind** — there is no `--pre-deploy-command` or
+equivalent invocation of `alembic upgrade head` anywhere in the script today. Add either a
+pre-deploy hook that runs `alembic upgrade head` against `DATABASE_URL` before the `gcloud run
+deploy` call, or an enforced `alembic current` vs `alembic heads` pre-flight that aborts the script
+on mismatch (`backend/tests/test_cloud_run_deploy.py` already establishes the pattern of asserting
+facts about this script statically — a new test there should assert the migration step exists,
+the same way `_REQUIRED_FLAGS` currently guards `gcloud`'s own flags, lines 54–64). This must land
+and be proven (a real deploy exercising it) before phase 3 below ships its own migration to
+production.
 
----
+1. **Data model + migration** (`db/models/physique.py`, `migrations/versions/0007_...py`) —
+   foundational; nothing below can be built against real rows without it.
 
-## Anti-Patterns
+2. **Repository layer** (`db/repositories/physique.py`) — mirrors `programs.py`'s shape: one
+   `insert_observation(session, *, user_id, observed_on, ratings, notes)` write function (the
+   ONLY place that constructs the two tables' `insert()` statements), plus
+   `get_latest_observation(session, *, user_id)` and `get_observation_history(session, *, user_id,
+   limit)` read functions. Depends on step 1's models existing.
 
-**1. Storing raw Apple Health samples.**
-*The mistake:* mirror HealthKit's sample grain into `health_samples`.
-*Why wrong:* 438,649 rows for one user, 44% of them walking gait micro-metrics with zero coaching value. Every consumer in `app/analytics/` aggregates to local days anyway, so the extra grain is pure cost plus a cross-source de-duplication problem.
-*Instead:* day-grained `health_daily_metrics`, and configure HAE's aggregation setting to daily so the device does the work.
+3. **Analytics layer** (`analytics/physique.py`) — `get_physique_diff()` (improved / unchanged /
+   regressed per muscle, comparing the two most recent observations' ratings) and
+   `get_physique_training_correlation()` (§6.3's cross-reference, importing
+   `analytics/volume.py::get_muscle_group_volume`). Both read-only, both provable against
+   `test_analytics_isolation.py`'s existing static guards with zero new exemptions needed (no
+   `app.mcp` import, no session write, no raw SQL text, no `float`). Depends on step 2's read
+   functions.
 
-**2. Feeding Apple Health workouts into training analytics.**
-*The mistake:* treat `health_workouts` as another training source.
-*Why wrong:* 218 of 221 live Apple workouts originate from Hevy. Every session would be counted twice, and the numbers would look plausible.
-*Instead:* Hevy is the authority for training. `health_workouts` is a coverage cross-check and the home for non-Hevy activity. Add a static guard in the style of `test_analytics_never_names_the_muscle_tables_directly`.
+4. **Widen the MCP write/annotation guards** (§2.2, all three test files) — done as its own
+   reviewable step, deliberately separated from the tool code it enables, mirroring how Phase 12
+   treated the original guard narrowing as a first-class, individually-reviewed change rather than
+   a side effect of adding `program_switch.py`.
 
-**3. Adding `apple_health` as a third `body_measurements.source`.**
-*The mistake:* it looks free — the column exists.
-*Why wrong:* `_dedupe_by_day` is two-valued (`manual` wins) and its docstring says it is "locked now so it cannot silently become a double-count". 52 of 79 Apple `BodyMass` rows are Hevy re-exports landing on the same `measured_on`, and the data stops in May 2025 anyway.
-*Instead:* leave `body_measurements` to Hevy + manual. If a third source is ever needed, make the precedence an explicit ordered tuple with a test per pair.
+5. **MCP tools** (`mcp/tools/physique.py`): the write tool
+   (`fitness_log_physique_observation`, `writable_session`, calling step 2's insert function) and
+   the read tool(s) (`fitness_get_latest_physique_observation` for §5's precursor;
+   optionally a second read tool exposing step 3's diff/cross-reference, or fold both into one
+   `fitness_get_physique_progress` read tool — a genuinely open naming/count question for the
+   roadmapper, not an architecture one). Register in `server.py` with the new
+   `APPEND_ONLY_WRITE_TOOL` annotation for the write tool and `READ_ONLY` for the read tool(s).
+   Depends on steps 3 and 4.
 
-**4. Building recovery analytics on RHR/HRV.**
-*The mistake:* PROJECT.md says "resting heart rate, HRV where available", so build the code path.
-*Why wrong:* zero samples across 4.5 years — the HealthKit types are absent from the export entirely. There is no Apple Watch. Sleep is `InBed`-only and stopped 2024-11-30.
-*Instead:* scope health analytics to activity (steps, active/basal energy, distance, flights) and say explicitly that recovery is deferred pending hardware.
+6. **Monthly report integration** (§3): `ReportResult.physique` field + `compose_report()`'s
+   period conditional (`analytics/reports.py`), `build_narrative`'s new "## Physique" section
+   under §4's constraints, `MonthlyReportResponse.physique` field mirroring `narrative`
+   (`mcp/tools/schemas.py`), `_degraded_body_fields()`/`_degraded_monthly()` updated
+   (`mcp/tools/reports.py`). Depends on step 3 (needs the analytics functions to call) — does
+   **not** strictly depend on step 5 (the report can call `analytics/physique.py` directly without
+   the standalone MCP tools existing yet), but building step 5 first gives real, testable
+   observation data to compose the report against rather than only hand-built fixtures.
 
-**5. Deleting the read-only static guards to land the write tool.**
-*The mistake:* `test_mcp_never_writes` blocks the commit, so relax the regex.
-*Why wrong:* it converts a machine-checked constraint into a code-review convention, and "MCP is read-only except one narrow tool" is a stated PROJECT.md constraint.
-*Instead:* an explicit single-module allowlist, so the constraint stays enforced *and* self-documents which module is the exception.
+7. **`docs/coaching-instructions.md` update** — required in the same phase as step 5, since
+   PROJECT.md records this document as drift-guarded against the live tool registry; the new
+   tool names must appear, and this is where §5.2's "call the read tool first" steering text
+   actually lives for the model to see it.
 
-**6. Putting the webhook behind the MCP OAuth flow.**
-*The mistake:* one auth mechanism for the whole service.
-*Why wrong:* Health Auto Export is a background iOS app. It has no browser, no consent flow, and can only attach static headers.
-*Instead:* a separate shared-secret bearer on the ingest route, using the same constant-time-bytes comparison as `StaticTokenVerifier`.
+8. **Production deploy of migration `0007`**, exercised through step 0's now-fixed pre-deploy
+   mechanism — the first real-world proof that the mechanism built in step 0 actually prevents the
+   failure mode it was built for, closing the loop PROJECT.md names explicitly.
 
-**7. A token in the webhook URL query string.**
-*Why wrong:* same prohibition as the MCP one, plus it lands in Cloud Run request logs and in the HAE app's own activity log.
-*Instead:* the `Authorization` header, which HAE explicitly supports.
-
-**8. Sharing the MCP rate-limit bucket with the webhook.**
-*Why wrong:* one global 30/min bucket. A batched HAE export fires a burst, and Claude gets a 429 mid-conversation — the exact failure the current generous limits were tuned to avoid.
-*Instead:* a dedicated bucket for `/api/v1/ingest/*`. Not an exemption — the service is `--allow-unauthenticated`.
-
-**9. Making report tools a fourth copy of the analytics arithmetic.**
-*Why wrong:* the codebase's most repeated rule is "one computation, two consumers" — `get_exercise_trends` is deliberately public rather than private to `recomposition.py` for exactly this reason. A report with its own volume sum is how the report and the summary end up disagreeing about the same week.
-*Instead:* `analytics/reports.py` owns composition and windowing, never arithmetic. `summary.py` is the model to copy.
-
-**10. Re-deriving max weight in a second place.**
-*Why wrong:* `best_set_per_day` already computes `best_weight_kg` per `(template, local_day)` with a stated tie-break. A second "best set" rule is how the progression series and the plateau verdict end up disagreeing about the same day — the failure `best_set_per_day`'s docstring is explicitly written to prevent.
-*Instead:* a second *projection* of the same fold.
-
-**11. Removing estimated 1RM.**
-*Why wrong:* it is the only signal that distinguishes progression-by-adding-reps from a stall — 60 kg × 10 and 70 kg × 5 are the same max weight and different strength. PROJECT.md says secondary, not removed.
-*Instead:* demote it to a reported field beside the max-weight verdict.
-
-**12. Mutating an `active_program` column in place.**
-*Why wrong:* it makes `destructive_hint=False` a lie, loses "when did I switch", and leaves the recomposition verdict unable to notice that its four-week window straddles two programs.
-*Instead:* append-only `user_program_history` with a partial unique index enforcing at most one active row.
-
----
-
-## Scaling Considerations
-
-This is a single-user personal platform. Framing scaling by user count would be theatre — the real limits are row counts, payload sizes and a per-tool-call latency budget.
-
-| Dimension | Today | After v2.0 | First thing that breaks |
-|---|---|---|---|
-| Workout sets | ~8k | ~8k + growth | Nothing. Core aggregate measured at ~50 ms |
-| `body_measurements` | 125 rows | +manual entries | Nothing |
-| `health_daily_metrics` | 0 | ~6 metrics × ~1,630 days × 2 sources ≈ **20k rows** | Nothing. Trivial for PostgreSQL |
-| `health_workouts` | 0 | ~221 + growth | Nothing |
-| Webhook payload | — | **32 MiB HTTP/1 hard cap; 512 MiB container** | **This is the real limit.** Daily aggregation + metric selection + batching keeps it in the low hundreds of KB |
-| Backfill peak memory | — | 438,649 elements at 512 MiB | `ElementTree.parse()` OOMs. `iterparse` + `elem.clear()` does not |
-| MCP tool latency | `fitness_get_training_summary` ≈ 7 aggregates, "most expensive call in the phase" | Reports are strictly more | **Claude's 30 s per-call budget.** Measure the report tool; do not assume |
-| MCP response size | Summary ≈ 9.5 KB on the wire vs a 16 KB budget | Reports carry more | Context budget, not bandwidth. New `MAX_REPORT_*` caps required |
-| Rate limit | 30/min global, ×2 instances | Webhook competes with Claude | Mid-conversation 429. Fixed by a separate bucket |
-
-**Priority order if something has to be optimized:** (1) webhook payload size — it is a hard cap with an ugly failure mode; (2) report tool latency against the 30 s budget; (3) report response size against the context budget. Everything else has headroom measured in orders of magnitude.
-
----
-
-## Integration Points
-
-### External services
-
-| Service | Pattern | Gotchas |
-|---|---|---|
-| **Health Auto Export** (iOS) | Inbound POST, JSON, user-configured interval, `Authorization: Bearer` custom header | Date format is `yyyy-MM-dd HH:mm:ss Z`, **not** ISO 8601 — and at least one third-party implementation reports seeing both. Retry/delivery semantics undocumented → **assume at-least-once with overlapping windows** and make every write an idempotent UPSERT. Payloads can reach "several hundred MB" per vendor guidance. Aggregation granularity is configurable seconds→yearly — **set it to daily**. Batch Requests is JSON-only |
-| **Apple Health `export.xml`** | One-shot offline file | 191 MB / 438,649 `<Record>` elements. Naive `.parse()` OOMs at 512 MiB. Naive comma-splitting of the derived CSV also breaks — the `device` column contains embedded commas. Same date format as HAE, so one parser serves both |
-| **Claude connector** (Desktop/Web/mobile) | WorkOS AuthKit OAuth 2.1, RS256 JWT, `aud` pinned to the Resource Indicator | Unchanged. `required_scopes=None` should stay — it is server-wide and would force re-consent |
-| **Claude scheduled tasks** | Fresh session issuing ordinary tool calls. **Nothing server-side** | `anthropics/claude-code#43397` / `#35899`: handshake succeeds (`initialize`, `tools/list` all logged server-side) but tool schemas are never injected into the agent's registry, so it reports no tools. Workaround: prompt the task to delegate to a subagent. **Verify reports from a real scheduled run, not only interactively** |
-| **Google Cloud Run** | 1 service, `--allow-unauthenticated`, HTTP/1, `--memory=512Mi`, `--timeout=300`, `--max=2` | 32 MiB request cap. `--use-http2` lifts it but makes memory the binding constraint — prefer smaller payloads |
-| **Google Secret Manager** | `--set-secrets` in `scripts/deploy-cloud-run.sh` | Add `HEALTH_INGEST_SECRET`. A name bound in both `--set-secrets` and `--env-vars-file` is rejected by Cloud Run |
-| **Hevy API** | Outbound poll, 6-hourly Cloud Run Job | Unchanged. Remains the **authority for training data** — Apple Health workouts do not compete with it |
-
-### Internal boundaries
-
-| Boundary | Direction | Notes |
-|---|---|---|
-| `api/routes/health_ingest` → `integrations/health_auto_export/` | Direct call | Route owns HTTP concerns only. Wire schemas must not escape the package |
-| `integrations/health_auto_export/` → `db/models/health` | Direct | Mirrors `hevy/body.py` → `db/models/body`. `db/` must not import `integrations` (statically enforced) |
-| `cli.backfill-apple-health` → the **same** normalizer + ingest | Direct | Non-negotiable. Two parsers = two shapes = disagreeing trends |
-| `analytics/health.py` → `db/models/health` | Direct read | Must obey all analytics guards: no `float`, no `text()`, no writes, no `app.integrations` import, no `app.mcp` import |
-| `analytics/reports.py` → other `analytics/*` | Direct call | Composition only. Precedent: `recomposition.py` calls `bodyweight` + `progression` + `volume` and owns no arithmetic |
-| `analytics/recomposition.py` → `db/repositories/programs` | Direct read | New dependency. Thresholds become parameters; `_LABEL_MATRIX` stays program-independent |
-| `mcp/tools/programs.py` → `db/repositories/programs` | Direct write | **The only** write path in `app/mcp/`. Allowlisted in `test_mcp_never_writes` |
-| `mcp/tools/reports.py` → `analytics/reports.py` | Direct | Same shape as every existing tool |
-| `analytics/metadata.build_freshness` | **Signature change** | Must span `(provider, resource)` pairs, not one provider for all resources |
-| `middleware.RateLimitMiddleware` | **Path-aware** | Third branch: exempt / ingest bucket / default bucket |
-
-### One design decision to make explicitly, not by default
-
-`recomposition._MATRIX_ROWS` maps `(weight_bucket, progression_signal) → RecompositionStatus` across 24 combinations, and its docstring says the seven-member enum is a fixed contract: *"there is no eighth, and adding one would change the contract Phase 6 codes against."* But the matrix encodes lean-bulk assumptions in its *labels*: `TOO_FAST_GAIN` yields `WEIGHT_GAIN_TOO_FAST` for all four signals because a fast gain is a safety signal *during a bulk*; `LOSING` + positive signal yields `LIKELY_RECOMP_PROGRESSING`. Under a **Cut**, gaining at all is off-program and `LIKELY_FAT_LOSS` is on-program rather than incidental.
-
-**Recommend: keep the enum and the matrix program-independent; move only the thresholds.** The enum is what `docs/coaching-instructions.md` is written against, and a per-program matrix triples the tested surface (72 combinations) for a nuance the thresholds already carry — under a Cut, `LOSING` simply becomes the expected bucket rather than a different label. But make this call deliberately in the phase context, because it is the difference between a one-day change and a three-day one.
-
----
-
-## Confidence Assessment
-
-| Area | Confidence | Basis |
-|---|---|---|
-| Existing architecture, boundaries, static guards | **HIGH** | Read from committed source: `main.py`, `mcp/server.py`, `mcp/auth.py`, `mcp/context.py`, `mcp/tools/_common.py`, `mcp/tools/summary.py`, `mcp/tools/body.py`, `analytics/{progression,recomposition,bodyweight,metadata}.py`, `db/models/*`, `integrations/hevy/{sync,body}.py`, `middleware.py`, `config.py`, and the isolation/read-only test suites |
-| Apple Health data availability | **HIGH** | Measured directly from the user's `export.xml` (438,649 `<Record>` elements) and its derived CSVs. The heart-rate absence was verified against the raw XML, not only the CSV |
-| Installed stack versions | **HIGH** | `importlib.metadata` against the project venv: `mcp 2.0.0`, `mcp-types 2.0.0`, `fastapi 0.141.1`, `starlette 1.6.0`, `sqlalchemy 2.0.52`, `pydantic 2.13.4`, `httpx2 2.12.0`, `asyncpg 0.31.0` |
-| `MCPServer.add_tool` per-tool annotations | **HIGH** | `inspect.signature` against the installed SDK |
-| MCP `ToolAnnotations` semantics + defaults | **HIGH** | Context7 `/websites/py_sdk_modelcontextprotocol_io_v2` (verbatim class source) + the MCP blog's annotations post |
-| Elicitation exists in `mcp 2.0.0` | **HIGH** | Context7 returned a complete working `Elicit` / `Resolve` / `AcceptedElicitation` example |
-| **Claude connector elicitation support** | **LOW** | Not found in Anthropic's connector docs. This is why the two-call design is recommended |
-| Health Auto Export auth (custom headers, Bearer) | **HIGH** | Vendor help centre, two independent pages |
-| HAE payload schema (envelope, workouts) | **MEDIUM-HIGH** | Vendor help centre. The workouts page is detailed; the metrics page 404'd and was reconstructed from search excerpts + a third-party implementation |
-| HAE date format | **MEDIUM** | Vendor docs say `yyyy-MM-dd HH:mm:ss Z`; a third-party implementer reports seeing both that and ISO-8601-with-T. **Parse both** |
-| HAE retry/delivery semantics | **LOW** | Undocumented. Design for at-least-once regardless |
-| Cloud Run 32 MiB HTTP/1 request cap | **HIGH** | Multiple independent sources incl. the Cloud Run FAQ |
-| Scheduled tasks need nothing server-side | **HIGH** | Anthropic docs + the GitHub issue's own server-side protocol logs |
-| Scheduled-task MCP registry bug | **MEDIUM-HIGH** | `anthropics/claude-code#43397` with server-log evidence from an independent reporter, plus four linked duplicates; closed as a duplicate of `#35899`, resolution status unclear |
-| Band re-derivation under discrete increments | **MEDIUM** | The *problem* is HIGH confidence (read from the derivation comment and the data). The *right new values* are unknown until validated against live data — flagged as needing its own plan |
-
-## Open Questions for the Roadmap
-
-1. **Does Health Auto Export re-send overlapping windows?** Undocumented. Assume yes and make every write an idempotent UPSERT — but a single observed run in phase 1 settles it and may allow a cheaper cursor.
-2. **Which HAE Export Version does the installed app emit?** V1 and V2 differ in workout shape and possibly date format. Capture one real payload verbatim as a test fixture before writing the parser.
-3. **Closed-period reports: option (a) or (b)?** Whether `get_body_weight_trend` / `get_recomposition_status` grow an optional `anchor_day`. Recommend (a); decide in the phase context.
-4. **Program-dependent label matrix or program-independent?** Recommend independent; decide explicitly.
-5. **What are the re-derived max-weight bands?** Requires the same live-data calibration D-18 got. Cannot be answered on paper.
-6. **Does the user intend to resume sleep tracking?** Sleep stopped 2024-11-30. If not, cut sleep from the health-analytics slice entirely rather than shipping a tool that always returns `insufficient_data`.
-7. **Is the Apple Health backfill worth its cost given the overlap?** The genuinely new signal is activity (steps/energy/distance/flights) from 2022. Weight and workouts are largely Hevy duplicates. Confirm the activity history is actually wanted before spending a phase on a 438k-element import.
+**Dependency summary:** 0 blocks 8 only (but should be done first regardless, as standing debt
+independent of this feature) → 1 blocks 2 → 2 blocks 3 → {3, 4} block 5 → 3 blocks 6 → {5} should
+precede 6 for testing convenience but does not strictly gate it → 7 ships alongside 5 → 8 requires
+0 and 1 both complete.
 
 ---
 
 ## Sources
 
-- Project source, read directly (`backend/app/**`, `backend/tests/test_*_isolation.py`, `test_mcp_readonly.py`, `test_mcp_tool_schemas.py`, `deploy/cloud-run.env.yaml`, `scripts/deploy-cloud-run.sh`) — **HIGH**
-- The user's own `export.xml` (191 MB, ExportDate 2026-08-26), `records.csv`, `workouts.csv`, `activity_summary.csv`, analysed with `grep` and a real CSV parser — **HIGH**
-- Installed venv introspection: `importlib.metadata` versions + `inspect.signature(MCPServer.add_tool)` — **HIGH**
-- Context7 `/websites/py_sdk_modelcontextprotocol_io_v2` — `ToolAnnotations` class source, elicitation `Resolve`/`Elicit` example — **HIGH**
-- https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/ — annotation semantics, cautious defaults, confirmation patterns — **HIGH**
-- https://help.healthyapps.dev/en/health-auto-export/automations/rest-api/ — custom headers, `Authorization: Bearer`, batch requests, payload-size warning — **HIGH**
-- https://help.healthyapps.dev/en/health-auto-export/export-format/ — top-level envelope, `yyyy-MM-dd HH:mm:ss Z` date format — **HIGH**
-- https://help.healthyapps.dev/en/health-auto-export/export-format/workouts/ — workout field list, units, `id` stability — **HIGH**
-- https://github.com/Lybron/health-auto-export — repo + wiki pointer (JSON-format wiki page has been moved to the help centre) — **MEDIUM**
-- https://ladvien.com/syncing-apple-health-kit-data-postgres/ — third-party FastAPI + PostgreSQL implementation; daily-aggregate observation, date-format inconsistency, payload-size experience — **MEDIUM**
-- https://github.com/anthropics/claude-code/issues/43397 (+ linked `#35899`, `#36327`, `#40835`, `#40669`) — scheduled-task MCP tool-registry bug, with independent server-side protocol logs and the subagent workaround — **MEDIUM-HIGH**
-- https://support.claude.com/en/articles/13854387-schedule-recurring-tasks-in-claude-cowork — scheduled tasks are fresh sessions with connector access; nothing server-side — **HIGH**
-- https://github.com/ahmetb/cloud-run-faq + corroborating issue threads — 32 MiB HTTP/1 request limit, HTTP/2 workaround — **HIGH**
+All findings above are grounded in the following files, read in full or in the cited sections —
+no external documentation was needed for this research; the questions are entirely about this
+repository's own established conventions:
 
----
-*Architecture research for: BRETT v2.0 — Apple Health, Strength Tracking & Coaching Programs*
-*Researched: 2026-09-02*
+- `.planning/PROJECT.md` — milestone scope, shipped history, the exact three-times-behind-schema
+  incidents cited in §7.3 — **HIGH** (primary source document, authored by/for this project)
+- `backend/app/analytics/reports.py`, `backend/app/mcp/tools/reports.py` — `compose_report`,
+  `build_narrative`, `_report_body_fields`, `_degraded_body_fields` — **HIGH** (read in full)
+- `backend/app/mcp/tools/program_switch.py`, `backend/app/db/repositories/programs.py`,
+  `backend/app/db/models/program.py` — the only existing write path, read in full — **HIGH**
+- `backend/app/mcp/tools/_common.py`, `backend/app/mcp/server.py` — `read_only_session`,
+  `writable_session`, `safe_tool`, tool registration and annotation objects, read in full — **HIGH**
+- `backend/tests/test_mcp_isolation.py`, `backend/tests/test_mcp_readonly.py`,
+  `backend/tests/test_analytics_isolation.py`, `backend/tests/test_mcp_tool_schemas.py`,
+  `backend/tests/test_analytics_reports.py`, `backend/tests/test_migrations.py`,
+  `backend/tests/test_cloud_run_deploy.py` — every guard cited by name and line number was read
+  directly, not inferred — **HIGH**
+- `backend/app/analytics/schemas.py`, `backend/app/normalization/muscles.py` — `ReportResult`,
+  `RecompositionResult`, `CanonicalMuscleGroup` (the 19-value taxonomy), `BodyMeasurementTrendResult`
+  — **HIGH**
+- `backend/app/analytics/body_measurements.py`, `backend/app/db/models/body.py`,
+  `backend/app/db/models/health.py` — the wide-vs-narrow precedent analyzed in §7.1 — **HIGH**
+- `scripts/deploy-cloud-run.sh` — read in full; confirmed no migration step exists today — **HIGH**
+- `backend/migrations/versions/` directory listing — confirmed `0006_user_program_history.py` is
+  head, so the new migration is `0007` — **HIGH**
