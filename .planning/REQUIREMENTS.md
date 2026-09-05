@@ -13,7 +13,7 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 - [x] **HEALTH-07**: The webhook receiver authenticates inbound requests via a shared-secret bearer token (or equivalent header-based scheme), rejecting unauthenticated or mis-authenticated payloads
 - [x] **HEALTH-08**: Sync excludes Apple Health workouts and body-mass records that originate from Hevy's own HealthKit write-back, preventing double-counting of data BRETT already holds at higher fidelity
 - [x] **HEALTH-09**: Sync is idempotent — reprocessing an overlapping export window does not create duplicate records
-- [ ] **HEALTH-10**: A one-time historical backfill imports the user's existing `export.xml` Apple Health export, applying the same Hevy-exclusion filter as ongoing sync
+- [x] **HEALTH-10**: A one-time historical backfill imports the user's existing `export.xml` Apple Health export, applying the same Hevy-exclusion filter as ongoing sync
 - [x] **HEALTH-11**: Apple Health data freshness (`last_synced_at`) is surfaced through the same freshness/coverage envelope Hevy data already uses (DQ-01/DQ-02)
 
 ### Activity Analytics
@@ -49,12 +49,12 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 - [ ] ~~**BODY-03**: User can manually record a body measurement (weight and/or any circumference/composition field) through a write path, stored with `source='manual'`~~ **DROPPED 2026-09-03** (Phase 11 discuss-phase). The user's real workflow is Hevy-only — measurements are logged in the Hevy app and already sync automatically; no manual-entry need exists. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md`.
 - [ ] ~~**BODY-04**: Manual and Hevy-sourced measurements on the same day merge by field rather than one source overwriting the other's data — fixes `bodyweight.py`'s `_dedupe_by_day` all-or-nothing precedence before manual entry can trigger it~~ **DROPPED 2026-09-03**, same session — BODY-04 only exists to fix a bug that manual entry (BODY-03) would trigger. With BODY-03 dropped, `_dedupe_by_day`'s row-grain precedence stays dormant (zero manual rows will ever exist), exactly as it is today. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md`.
-- [ ] **BODY-05**: System calculates trend/comparison analytics across circumference and composition measurements, not weight-only as today. **Design note (2026-09-03):** does NOT reuse the body-weight-trend's rolling-average shape — coverage is too thin (waist 15/123 live days, fat%/lean-mass 0/123) for that design to ever return a real answer. Instead: latest reading vs. earliest reading in a 90-day window, with staleness flagged separately from insufficient data. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md`.
+- [x] **BODY-05**: System calculates trend/comparison analytics across circumference and composition measurements, not weight-only as today. **Design note (2026-09-03):** does NOT reuse the body-weight-trend's rolling-average shape — coverage is too thin (waist 15/123 live days, fat%/lean-mass 0/123) for that design to ever return a real answer. Instead: latest reading vs. earliest reading in a 90-day window, with staleness flagged separately from insufficient data. See `.planning/phases/11-body-measurement-history/11-CONTEXT.md`.
 
 ### Training Programs
 
 - [x] **GOAL-01**: User's active training program (Lean Bulk, Cut, or Recomp) is stored as data, not a hardcoded constant
-- [ ] **GOAL-02**: Recomposition status thresholds and recommendations adapt to the active program (e.g., healthy weight-trend bands differ between a cut and a bulk)
+- [x] **GOAL-02**: Recomposition status thresholds and recommendations adapt to the active program (e.g., healthy weight-trend bands differ between a cut and a bulk)
 - [x] **GOAL-03**: A confirm-gated MCP write tool allows switching the active program by name — a first call without a valid confirmation token returns a warning plus a one-time token; only a second call echoing that exact token performs the switch (a bare `confirm: bool` is rejected as insufficient, since the model could set it `true` on the first call)
 - [x] **GOAL-04**: All MCP tools other than the program-switch tool remain read-only; the existing read-only guard test suite is extended to allow exactly this one exception, not relaxed generally
 
@@ -101,7 +101,7 @@ Which phases cover which requirements. Populated during roadmap creation.
 | HEALTH-07 | Phase 8 | Complete |
 | HEALTH-08 | Phase 8 | Complete |
 | HEALTH-09 | Phase 8 | Complete |
-| HEALTH-10 | Phase 9 | Pending |
+| HEALTH-10 | Phase 9 | Complete |
 | HEALTH-11 | Phase 8 | Complete |
 | HEALTH-12 | Phase 13 | Complete |
 | NUTR-02 | Phase 8 | Complete |
@@ -118,9 +118,9 @@ Which phases cover which requirements. Populated during roadmap creation.
 | RPT-03 | Phase 13 | Complete |
 | ~~BODY-03~~ | Phase 11 | **Dropped 2026-09-03** |
 | ~~BODY-04~~ | Phase 11 | **Dropped 2026-09-03** |
-| BODY-05 | Phase 11 | Pending |
+| BODY-05 | Phase 11 | Complete |
 | GOAL-01 | Phase 12 | Complete |
-| GOAL-02 | Phase 12 | Pending |
+| GOAL-02 | Phase 12 | Complete |
 | GOAL-03 | Phase 12 | Complete |
 | GOAL-04 | Phase 12 | Complete |
 | COACH-02 | Phase 13 | Complete |

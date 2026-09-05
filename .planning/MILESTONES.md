@@ -1,5 +1,37 @@
 # Milestones
 
+## v2.0 Apple Health, Strength Tracking & Coaching Programs (Shipped: 2026-09-05)
+
+**Phases completed:** 6 phases, 34 plans, 81 tasks
+**Timeline:** 2026-09-02 → 2026-09-05 (4 days)
+**Git range:** `b1d3eef` (v1.0 tag) → `2eb6fd6` (evolve PROJECT.md after Phase 13) — 220 commits; `backend/` +19,056/-204 across 77 files (~52.3k LOC total); 925 test functions; MCP registry grew 13 → 20 tools
+
+**Delivered:** BRETT stopped being Hevy-only. Apple Health activity and nutrition now flow in continuously from the user's phone with 4.5 years of history behind them; the training program is real, switchable, effective-dated data that shifts recomposition thresholds; and a single tool call returns a complete weekly or monthly report — proven from a real Claude scheduled task rather than assumed.
+
+**Key accomplishments:**
+
+- **Apple Health & nutrition ingest (Phase 8):** A Health Auto Export webhook receiver landing 12 metrics — steps, active/basal energy, distance, flights, calories and six macros — authenticated by a `SecretStr` credential checked before a byte of body is read, capped at 10 MiB pre-parse, and given its own rate-limit bucket that cannot drain `/mcp`'s. `source_name` sits inside the 5-column natural key so Hevy's HealthKit write-back stays a separately-excludable row instead of being silently summed into the iPhone's total. Verified live from the user's phone, with a repeat run proving idempotency (23 rows unchanged).
+- **Historical backfill (Phase 9):** 8,077 rows spanning 2022-03-10 → 2026-08-26 imported once from the real 191 MB `export.xml`, streamed with `iterparse` inside an 800 MB ceiling and pushed through Phase 8's *unchanged* normalizer and upsert — one code path, so historical and ongoing trends cannot drift. A required `--dry-run`/`--write` choice made a forgotten flag an argparse error rather than an unrehearsed production write.
+- **Max-weight strength signal (Phase 10):** `PlateauResult.last_max_weight_kg` added as a labelled display-only field so Claude can cite the literal last weight lifted, with estimated-1RM still driving every verdict unchanged. Notable mostly for what it *didn't* become — the phase was rescoped mid-flight from "max weight replaces e1RM as classifier" down to one field, after investigation showed `ExerciseTrend` is never exposed through any MCP tool at all.
+- **Body measurement history (Phase 11):** One generic function covering all 16 non-weight measurement columns via a closed `BodyMeasurementMetric` enum, using a latest-vs-earliest 90-day comparison rather than copying the body-weight rolling average — because at 15/123 measured days for waist and 0/123 for body fat, the rolling-average design would have returned `insufficient_data` almost universally. Staleness and insufficient data are reported as two independently-gated facts.
+- **Training programs & the one write tool (Phase 12):** Append-only `user_program_history` with PostgreSQL enforcing "at most one open period" via a partial unique index, three per-program threshold tables replacing five hardcoded Lean Bulk constants (76 label-matrix cells), and BRETT's only MCP write path — a two-call, server-issued-token confirmation a model cannot short-circuit by setting `confirm: true`. The read-only guard was *narrowed* to exactly one named module, never relaxed, with the test suite asserting a second write tool cannot pass by being skipped.
+- **Reports & coaching style (Phase 13):** `fitness_get_weekly_report` and `fitness_get_monthly_report` compose nine already-tested analytics functions with no new arithmetic, alongside activity/nutrition trend tools and a cross-exercise PR scan that costs one query instead of a per-exercise loop. RPT-03's central risk — that Claude scheduled sessions never receive tool schemas — was retired the right way: spiked *first* with `fitness_ping` before the report tools existed, then re-proven against the real report tool at the end. Both PASSed.
+
+**Known deferred items at close:** 8 (see below and STATE.md Blockers/Concerns)
+
+**Known gaps at close:**
+
+- No formal `/gsd-audit-milestone` was run before this close (skipped by explicit user choice at the pre-flight gate — the same choice made at v1.0). Substituted with direct code verification of the three requirements whose traceability rows read `Pending`: HEALTH-10 (`integrations/health_auto_export/backfill.py` + `backfill-apple-health` CLI verb), BODY-05 (`analytics/body_measurements.py` + the registered `fitness_get_body_measurement_trend` tool), and GOAL-02 (`_THRESHOLDS` keyed on `TrainingProgram` in `analytics/recomposition.py`). All three confirmed implemented before archiving.
+- **REQUIREMENTS.md traceability drift, second milestone running.** Three requirements were marked `Pending` despite being complete and production-verified; reconciled to 26/26 as part of this close. This is the identical failure mode logged at v1.0 close and it recurred, which suggests the per-phase workflow does not reliably update the traceability table. Worth a structural fix rather than a third manual reconciliation.
+- **`gsd-tools.cjs audit-open` is still broken** (`ReferenceError: output is not defined` — a bare `output()` at gsd-tools.cjs:784/786 that should be `core.output()`). Reported as a deferred item at v1.0 close, never fixed upstream, so the automated pre-close artifact audit could not run for a second consecutive milestone. Global `~/.claude/get-shit-done/` install bug, not a BRETT issue.
+- **The deploy migration gap bit three times this milestone.** `scripts/deploy-cloud-run.sh` has no migration step, and production was found behind deployed code in Phase 8 (`0004` vs `0005`), during the Phase 9 operator run (wrong `DATABASE_URL` showing a stale before-state), and again in the Phase 13 spike (`0005` vs `0006`, surfacing as `UndefinedTableError: relation "user_program_history" does not exist`). Each was fixed live. The structural fix — a pre-deploy migration step or an enforced `alembic current` vs `alembic heads` pre-flight — is **still not done** and should be the first thing v2.1 addresses.
+- **D-06's production nutrition-coverage re-query never happened** — blocked by the sandbox command classifier on `gcloud secrets versions access`. `MEASURED_DAY_FLOORS` (3/7, 5/14, 10/30) was reused unchanged for nutrition trend floors as a documented fallback. This does **not** close with Phase 13 and still needs a human-operator re-query.
+- **`sample_count` semantics diverge** between the backfill (raw sample count, >1 for 91.7% of rows) and the webhook (always 1), making a falling `sample_count` on a backfilled day a false positive for the Pitfall N-2 batch-split detector. Documented in `docs/health-auto-export-setup.md` §7; no overlapping day existed to exercise it (zero overlap confirmed).
+- **Hevy's real rate limits remain undocumented** (carried unresolved from v1.0) — the retry policy is still unverified against an actual limit rather than confirmed unnecessary.
+- **`Gymverse` (2 records) and `Zing` (1 record) active-energy rows were deliberately ingested** — a decision, not an oversight. HEALTH-08 names Hevy specifically and its rationale ("BRETT already holds this data at higher fidelity") is false of these two, whose workouts BRETT does not hold at all.
+
+---
+
 ## v1.0 MVP (Shipped: 2026-09-02)
 
 **Phases completed:** 7 phases, 65 plans, 151 tasks
@@ -18,6 +50,7 @@
 - **Production hardening (Phase 7):** Live token-bucket rate limiting (proven against a real 429 flood), a real Neon PITR backup/restore drill (byte-identical across all 9 tables), a real `MCP_AUTH_SECRET` rotation with zero connector disruption, 6-hourly production Hevy sync (327 workouts/463 templates/125 body measurements), 687 green tests, and the coaching-instructions document that turned the data layer into an actual working coach.
 
 **Known gaps at close:**
+
 - No formal `/gsd-audit-milestone` was run before this close (skipped by explicit user choice — see pre-flight gate). Substituted with a targeted spot-check of 8 requirements whose REQUIREMENTS.md checkboxes/traceability rows were stale (HEVY-01/02/05/06/07/08/09, NORM-02) — all 8 confirmed implemented directly against code before archiving.
 - `gsd-tools.cjs audit-open` (and `--json`) is broken in this GSD install (`ReferenceError: output is not defined` — a bare `output()` call at gsd-tools.cjs:784/786 that should be `core.output()`). The pre-close automated artifact audit could not run as a result. This is a tooling bug in the global `~/.claude/get-shit-done/` install, not a BRETT project issue.
 - REQUIREMENTS.md's traceability table and checkboxes had drifted out of sync with actual progress since 2026-08-30 (only updated through Phase 4); reconciled to reflect all 39/39 v1 requirements complete as part of this milestone close.

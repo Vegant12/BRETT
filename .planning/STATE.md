@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Apple Health, Strength Tracking & Coaching Programs
-status: executing
-stopped_at: Phase 13 context gathered
-last_updated: "2026-09-05T04:39:27.278Z"
+status: shipped
+stopped_at: v2.0 milestone complete
+last_updated: "2026-09-05T05:10:00.000Z"
 last_activity: 2026-09-05
 progress:
   total_phases: 6
@@ -18,95 +18,79 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-02)
+See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 13 — health-analytics-reports-coaching-style
+**Current focus:** None — v2.0 shipped. Next step is `/gsd-new-milestone` to scope the next version.
 
 ## Current Position
 
-Phase: 13
-Plan: Not started
-Status: Executing Phase 13
-Last activity: 2026-09-05
+Milestone: v2.0 — **SHIPPED 2026-09-05**
+Phase: none active
+Status: Awaiting next milestone definition
 
-Progress: [██████████] 100% (v2.0) — 8 of 8 plans complete
+Progress: [██████████] 100% (v2.0) — 34 of 34 plans complete across 6 phases
+
+Two milestones shipped to date: v1.0 (7 phases, 65 plans) and v2.0 (6 phases, 34 plans).
 
 ## Performance Metrics
 
-**Velocity (v1.0, for reference):**
+| Milestone | Phases | Plans | Tasks | Timeline | Commits |
+|-----------|--------|-------|-------|----------|---------|
+| v1.0 MVP | 7 | 65 | 151 | 2026-08-23 → 2026-09-01 (10 days) | — |
+| v2.0 Apple Health & Coaching | 6 | 34 | 81 | 2026-09-02 → 2026-09-05 (4 days) | 220 |
 
-- Total plans completed: 86 (v1.0 milestone, all phases)
-- Average duration: —
-- Total execution time: —
-
-**By Phase (v1.0):**
-
-| Phase | Plans | Total | Avg/Plan |
-|-------|-------|-------|----------|
-| 01-07 | 65 | - | - |
-| 08 | 8 | - | - |
-| 11 | 3 | - | - |
-| 13 | 10 | - | - |
-
-**Recent Trend:**
-
-- Last 5 plans: —
-- Trend: —
-
-*Updated after each plan completion*
+**Codebase at v2.0 close:** ~52.3k LOC in `backend/`, 925 test functions, 20 MCP tools.
 
 ## Accumulated Context
 
 ### Decisions
 
-Full decision log lives in PROJECT.md Key Decisions table. v2.0 decisions pending validation:
-
-- Apple Health ingestion = Health Auto Export webhook receiver, not a native iOS app
-- Strength progression signal = estimated-1RM keeps classifying (unchanged); max-weight-lifted added as a labelled display-only field (rescoped 2026-09-03, was originally max-weight-primary/e1RM-secondary — see PROJECT.md Key Decisions)
-- Reports = on-demand MCP tools driven by Claude's own scheduled-tasks feature
-- Training programs = real data + confirm-gated two-call write tool (server-issued token, not `confirm: bool`)
-- Apple Health workouts and Hevy-sourced body-mass rows excluded from ingestion
-- Sleep/recovery cut from v2.0 — zero records in 4.5 years of real export data
-- Phase 13 reports use closed-period anchoring (D-01): Monday–Sunday for the weekly report,
-  calendar month for the monthly one, with the existing anchored-on-today recomposition verdict
-  carried alongside and clearly labelled as a different anchor from the closed-period figures.
-  Future phases touching report windows or recomposition anchoring should read this pairing as
-  intentional, not a bug.
-
-- Phase 13 "PR highlights" (D-02) resolved as a real, purpose-built cross-exercise scan —
-  `get_recent_records` added to `backend/app/analytics/records.py` — rather than an approximation
-  reusing `get_plateaus`' `historical_best_kg`/`recent_performance_kg` fields. Future phases
-  needing a cross-exercise PR summary should reuse `get_recent_records`, not re-derive one from
-  plateau data.
+Full decision log lives in PROJECT.md Key Decisions table. All v2.0 decisions were
+validated at milestone close — no decision remains in "Pending" state.
 
 ### Pending Todos
 
 [From .planning/todos/pending/ — ideas captured during sessions]
 
-None yet.
+None.
 
 ### Blockers/Concerns
 
-[Issues that affect future work]
+Resolved items were cleared at the v2.0 milestone close. Open items only:
 
-- **Open (carried from v1.0):** Hevy's real rate limits remain undocumented — the existing retry policy is unverified against a real limit, not confirmed unnecessary.
-- **Open (carried from v1.0):** MCP Python SDK had a breaking `FastMCP` → `MCPServer` rework mid-project; re-read SDK docs at the start of any phase touching `app/mcp/` (applies to Phases 12 and 13).
-- **Resolved 2026-09-05 (Phase 13, plan 13-10):** Phase 13 risk — Claude scheduled-task sessions may never load MCP tool schemas — is discharged. Two independent spikes both PASSed against the real BRETT connector: Spike 1 (`fitness_ping`, plan 13-01) and Spike 2 (`fitness_get_weekly_report`, plan 13-10). Full evidence, including two discarded-but-informative intervening failures (a stale deployed revision, a database-migration lag), is recorded in `.planning/phases/13-health-analytics-reports-coaching-style/13-SPIKE-RESULT.md`. `docs/coaching-instructions.md` records the positive result in one line per D-13's PASS branch; the subagent-delegation workaround was NOT added, since it was never needed.
-- **Resolved 2026-09-03 (Phase 10 discuss-phase):** the dead-band re-derivation question is moot — Phase 10 was rescoped so max weight is a display-only field and e1RM keeps classifying trend/plateau, unchanged. No live-data calibration needed. **New open item:** Phase 12's roadmap entry says "Depends on: Phase 10 (recomposition thresholds settle once, not twice)" — that assumed Phase 10 would recalibrate `RECOMP_PROGRESSION_NET_BAND`, which it no longer does. Re-examine whether that dependency still holds when Phase 12 is discussed.
-- **Phase 8 open question:** `weight_body_mass` vs `weight_&_body_mass` metric-name spelling is unsettled across sources; capture one real Health Auto Export payload before writing the normalizer.
-- **Deploy prerequisite for Phase 8:** Cloud Run `--memory=512Mi` is too small for JSON ingest (measured peak ~235 MB on a 10 MB body). Raise to 1Gi and add a body-size cap before the first real device sync.
-- **Resolved 2026-09-03:** Phase 8 plan 08-08 Task 3 completed. A real Health Auto Export run landed all 12 metrics live; a repeat run proved idempotency (23 rows / 23 samples unchanged). HEALTH-06 and NUTR-02 are now complete. RESEARCH Assumption A1 closed as **MOOT** (not confirmed, not refuted): the user's native Health app confirms Hevy is not currently writing `active_energy` to HealthKit at all, despite a Hevy workout existing on the exported day — consistent with D-01's note that Hevy's body-mass write-back "stops in May 2025", suggesting Hevy stopped writing to HealthKit generally around then. `_HEVY_SOURCE_ALIASES` was left unchanged (no live spelling was observed to add); the exclusion predicate remains necessary for Phase 9's `export.xml` historical backfill, which covers the pre-2025 period when Hevy demonstrably did write to HealthKit. **New open item:** if Hevy ever resumes HealthKit write-back, the exclusion predicate's string-matching is still formally unverified against a live payload — worth a periodic check, not urgent.
-- **New (2026-09-03):** During Task 3, the live production database was found one migration behind deployed code (`alembic current` == `0004`, code needed `0005` for `health_daily_metrics`) — `scripts/deploy-cloud-run.sh` has no migration step, and this is the **second** occurrence of the exact failure mode already documented in `docs/runbook-sync-schedule.md`. Fixed live with the user's confirmation (`alembic upgrade head` against production). Recommend a structural fix (pre-deploy migration step, or an enforced `alembic current` vs `alembic heads` pre-flight check) before Phase 9 deploys its own migration and repeats this a third time.
-- **Resolved 2026-09-03:** `docs/health-auto-export-setup.md` originally described the Daily-aggregation setting as an "Aggregation interval" dropdown; the user's HAE build (9.1.1) actually exposes it as a boolean **"Aggregate Data"** toggle, discovered when the doc's wrong wording sent them looking for a setting that doesn't exist. Corrected throughout the doc (§1, §3, §6, §7, §9) in the same session.
-- **Resolved 2026-09-03:** RESEARCH Assumption **A2** (backfill/webhook day overlap) — confirmed zero overlapping days against production: the `export.xml` history ends 2026-08-26 and the live webhook feed begins 2026-09-02. Success criterion #3 ("no metric-day holds two rows for the same `source_name`") is therefore proven in production vacuously, not by an actual overlap; the overlapping-day case itself is proven mechanically by `backend/tests/test_backfill_idempotency.py`'s container tests.
-- **Resolved 2026-09-03:** RESEARCH Assumption **A3** (device not renamed between research and the run) — confirmed: the production duplicate-metric-day query returned zero rows, the observable form of the backfill and webhook agreeing on `source_name` for the same device. `test_source_name_matches_device_capture` now pins it, so a future rename fails the fast suite instead of silently producing two rows per metric-day.
-- **Open (accepted, documented):** `sample_count` semantics diverge between the backfill (raw sample count, >1 for 91.7% of rows) and the webhook (always 1). A falling `sample_count` on a backfilled day is a false positive for the Pitfall N-2 batch-split detector. Documented in `docs/health-auto-export-setup.md` §7. No day existed to actually exercise it during the production run (zero overlap, per A2), so it remains open rather than closed.
-- **Open (decision, not an oversight):** `Gymverse` (2 records) and `Zing` (1 record) also wrote `ActiveEnergyBurned` into HealthKit and were **deliberately ingested**. HEALTH-08 names Hevy specifically, and its rationale — "BRETT already holds this data at higher fidelity" — is true of Hevy and false of these two, whose workouts BRETT does not hold at all. Widening `_HEVY_SOURCE_ALIASES` would have broken the constant's documented meaning and its Phase 8 tests.
-- **New (2026-09-03):** During the plan 09-07 production run, the post-write verification queries were first run against the wrong `DATABASE_URL` (not the Neon connection string bound to the deployed service, held in Google Secret Manager as `brett-database-url`) and showed a stale before-state even though the `--write` command itself had logged success. This is the **third** occurrence this milestone of an operator's shell pointing somewhere other than the intended production target (the first two were the `alembic current`/`heads` migration-gap incidents above and in `docs/runbook-sync-schedule.md`). Resolved by retrieving the confirmed value with `gcloud secrets versions access latest --secret="brett-database-url"` and re-running the full sequence; the write is idempotent by natural key, so repeating it cost nothing. The structural fix — a pre-deploy migration step in `scripts/deploy-cloud-run.sh`, or a documented single source of truth for the production `DATABASE_URL` that the operator retrieves the same way every time — is still not done.
-- **Resolved 2026-09-03:** Phase 9 (historical Apple Health backfill, HEALTH-10) executed and production-verified. 8,077 rows of Apple Health activity and nutrition history (2022-03-10 → 2026-08-26) landed in production alongside the live webhook feed; all four ROADMAP success criteria confirmed against the real database. See `docs/health-auto-export-setup.md` §9's "2026-09-03 — historical backfill, production run" entry for the full record.
-- **New (2026-09-04, Phase 13 plan 13-02):** D-06's nutrition/activity coverage re-query (13-RESEARCH.md Pitfall 3) could not run — `gcloud secrets versions access latest --secret="brett-database-url"` was blocked by the sandbox's command classifier (same block class the original research session hit). Fallback applied: `MEASURED_DAY_FLOORS` (3/7, 5/14, 10/30) reused unchanged for nutrition trend floors, pending a human-operator re-query. See `docs/health-auto-export-setup.md` §11. **Still open** — no re-query has happened since; this does not close silently with Phase 13's completion.
-- **Resolved 2026-09-05 (Phase 13 plan 13-10, Spike 2):** during the RPT-03 scheduled-task spike, the production database was found one Alembic migration behind deployed code (`alembic current` == `0005`, code needed `0006` for `user_program_history`, the Phase 12 training-programs table) — `asyncpg.exceptions.UndefinedTableError: relation "user_program_history" does not exist` inside `get_recomposition_status` → `get_periods_overlapping`. This is the **third** occurrence of the exact failure mode already documented twice above (`scripts/deploy-cloud-run.sh` has no migration step). Fixed live with the user's confirmation (`alembic upgrade head` against production; `alembic current` == `0006 (head)` afterward). Recommend, again, a structural fix — a pre-deploy migration step in `scripts/deploy-cloud-run.sh`, or an enforced `alembic current` vs `alembic heads` pre-flight check — before this happens a fourth time.
+- **Open (highest priority, 3 occurrences in v2.0):** `scripts/deploy-cloud-run.sh` has no
+  migration step, so production repeatedly runs a schema behind the deployed code. It happened
+  in Phase 8 (`alembic current` == `0004`, code needed `0005`), during the Phase 9 operator run
+  (shell pointed at the wrong `DATABASE_URL`, showing a stale before-state), and again in the
+  Phase 13 spike (`0005` vs `0006` → `UndefinedTableError: relation "user_program_history" does
+  not exist`). Each was fixed live with the user's confirmation. The structural fix — a
+  pre-deploy migration step, or an enforced `alembic current` vs `alembic heads` pre-flight,
+  plus a documented single source of truth for the production `DATABASE_URL`
+  (`gcloud secrets versions access latest --secret="brett-database-url"`) — is **still not done**
+  and should lead the next milestone.
+- **Open (carried from v1.0):** Hevy's real rate limits remain undocumented — the existing retry
+  policy is unverified against a real limit, not confirmed unnecessary.
+- **Open (carried from v1.0):** MCP Python SDK had a breaking `FastMCP` → `MCPServer` rework
+  mid-project; re-read SDK docs at the start of any phase touching `app/mcp/`.
+- **Open (from Phase 13, does not close with the milestone):** D-06's production
+  nutrition/activity coverage re-query never ran — `gcloud secrets versions access` was blocked
+  by the sandbox's command classifier. `MEASURED_DAY_FLOORS` (3/7, 5/14, 10/30) is reused for
+  nutrition trend floors as a documented UNMEASURED fallback. See
+  `docs/health-auto-export-setup.md` §11. Needs a human-operator re-query.
+- **Open (accepted, documented):** `sample_count` semantics diverge between the backfill (raw
+  sample count, >1 for 91.7% of rows) and the webhook (always 1), so a falling `sample_count` on
+  a backfilled day is a false positive for the Pitfall N-2 batch-split detector. Documented in
+  `docs/health-auto-export-setup.md` §7. No overlapping day existed to exercise it (zero overlap
+  confirmed: export ends 2026-08-26, webhook begins 2026-09-02), so it stays open.
+- **Open (low urgency):** the Hevy-source exclusion predicate's string matching is formally
+  unverified against a live payload — Hevy stopped writing to HealthKit for this user around
+  May 2025, so nothing live matched it during Phase 8. It remains load-bearing for historical
+  data and would matter again if Hevy resumes write-back. Worth a periodic check.
+- **Open (decision, not an oversight):** `Gymverse` (2 records) and `Zing` (1 record) also wrote
+  `ActiveEnergyBurned` into HealthKit and were **deliberately ingested**. HEALTH-08 names Hevy
+  specifically, and its rationale — "BRETT already holds this data at higher fidelity" — is true
+  of Hevy and false of these two, whose workouts BRETT does not hold at all.
 
 ## Deferred Items
 
@@ -117,8 +101,18 @@ Items acknowledged and deferred at v1.0 milestone close on 2026-09-02:
 | audit | No formal `/gsd-audit-milestone` run before v1.0 close | Substituted with a targeted spot-check of 8 stale requirements; user chose to proceed |
 | tooling | `gsd-tools.cjs audit-open`/`--json` broken (`ReferenceError: output is not defined`) | Global GSD install bug, not a BRETT issue — worth reporting upstream |
 
+Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
+
+| Category | Item | Status |
+|----------|------|--------|
+| audit | No formal `/gsd-audit-milestone` run before v2.0 close | Skipped by explicit user choice at the pre-flight gate, same as v1.0. Substituted with direct code verification of HEALTH-10, BODY-05 and GOAL-02 — the three requirements whose traceability rows read `Pending` — all three confirmed implemented before archiving |
+| tooling | `gsd-tools.cjs audit-open` still broken, second milestone running | Reported at v1.0 close, never fixed upstream. Bare `output()` at gsd-tools.cjs:784/786 that should be `core.output()`. Automated pre-close artifact audit could not run again |
+| process | REQUIREMENTS.md traceability drift, second milestone running | Three requirements marked `Pending` despite being complete and production-verified; reconciled to 26/26 at close. Identical failure mode to v1.0 — suggests the per-phase workflow does not reliably update the traceability table. Worth a structural fix over a third manual reconciliation |
+| ops | Deploy migration gap, 3 occurrences | Carried into next milestone as candidate scope — see Blockers/Concerns above and PROJECT.md Requirements → Active |
+| data | D-06 nutrition-coverage re-query | Blocked by sandbox command classifier; documented UNMEASURED fallback in use |
+
 ## Session Continuity
 
-Last session: 2026-09-04T06:06:09.828Z
-Stopped at: Phase 13 context gathered
-Resume: phase verification (goal-backward check against ROADMAP success criteria)
+Last session: 2026-09-05
+Stopped at: v2.0 milestone complete — archived, tagged, PROJECT.md evolved
+Resume: `/gsd-new-milestone` to scope the next version
