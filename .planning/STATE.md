@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.0
-milestone_name: Apple Health, Strength Tracking & Coaching Programs
-status: shipped
-stopped_at: v2.0 milestone complete
-last_updated: "2026-09-05T05:10:00.000Z"
+milestone: v2.1
+milestone_name: Longitudinal Physique Analysis
+status: planning
+stopped_at: defining requirements
+last_updated: "2026-09-05T12:30:00.000Z"
 last_activity: 2026-09-05
 progress:
-  total_phases: 6
-  completed_phases: 6
-  total_plans: 34
-  completed_plans: 34
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -21,17 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** None — v2.0 shipped. Next step is `/gsd-new-milestone` to scope the next version.
+**Current focus:** v2.1 Longitudinal Physique Analysis — Claude analyses progress photos attached in-conversation and BRETT persists structured, per-muscle-group observations it can diff over time and compose into the monthly report. BRETT never receives or stores an image.
 
 ## Current Position
 
-Milestone: v2.0 — **SHIPPED 2026-09-05**
-Phase: none active
-Status: Awaiting next milestone definition
+Milestone: v2.1 Longitudinal Physique Analysis
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-09-05 — Milestone v2.1 started
 
-Progress: [██████████] 100% (v2.0) — 34 of 34 plans complete across 6 phases
+Progress: [──────────] 0% — roadmap not yet created
 
 Two milestones shipped to date: v1.0 (7 phases, 65 plans) and v2.0 (6 phases, 34 plans).
+Phase numbering continues from v2.0's last phase (13), so v2.1 begins at Phase 14.
 
 ## Performance Metrics
 
@@ -57,7 +60,9 @@ None.
 
 ### Blockers/Concerns
 
-Resolved items were cleared at the v2.0 milestone close. Open items only:
+Resolved items were cleared at the v2.0 milestone close. Open items only. **The deploy
+migration gap below is now in v2.1 scope** rather than carried debt — see PROJECT.md
+Requirements → Active:
 
 - **Open (highest priority, 3 occurrences in v2.0):** `scripts/deploy-cloud-run.sh` has no
   migration step, so production repeatedly runs a schema behind the deployed code. It happened
@@ -114,5 +119,20 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 ## Session Continuity
 
 Last session: 2026-09-05
-Stopped at: v2.0 milestone complete — archived, tagged, PROJECT.md evolved
-Resume: `/gsd-new-milestone` to scope the next version
+Stopped at: v2.1 milestone opened — goals gathered, PROJECT.md and STATE.md updated; requirements
+and roadmap not yet written
+Resume: continue `/gsd-new-milestone` (research → requirements → roadmap), then
+`/gsd-discuss-phase 14`
+
+### v2.1 milestone-gate decisions (made before research, carry into requirements)
+
+| Decision | Choice |
+|----------|--------|
+| Where vision analysis happens | Claude, in-conversation, via MCP — not a server-side vision API. Keeps `app/analytics/` deterministic |
+| Photo storage | **None.** Photos are never uploaded to or stored by BRETT; only structured observations persist |
+| Photo ingest path | Attached directly in the Claude conversation — no upload endpoint, no new public surface |
+| Observation schema | Per-muscle-group development ratings on the existing 19-value canonical taxonomy + bounded free-text notes |
+| Write gating | Single call, append-only, `destructive_hint=False` — not the two-call token ceremony `program_switch.py` uses, because appending a dated row destroys nothing |
+| Rating-drift mitigation | Prior observation returned as context at analysis time so ratings are relative, not absolute |
+| Report integration | Monthly report only; weekly deliberately excluded, which requires splitting the shared `_report_body_fields` projection |
+| Carried debt in scope | Pre-deploy migration step only. D-06 nutrition re-query and Hevy rate-limit verification stay deferred |
