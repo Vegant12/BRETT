@@ -223,4 +223,21 @@ async def fitness_get_monthly_report(ctx: Context[AppContext]) -> MonthlyReportR
         report = await compose_report(session, user_id=user, period=ReportPeriod.MONTHLY)
     # OUTSIDE the `async with`: `build_narrative` is pure and synchronous, and holding a
     # transaction open across string formatting would be a transaction held for no reason.
-    return MonthlyReportResponse(**_report_body_fields(report), narrative=build_narrative(report))
+    body_fields = _report_body_fields(report)
+    # `build_narrative` must narrate the SAME capped/filtered highlight lists the structured
+    # fields above carry, never the raw `report`. Passing the uncapped report here would let the
+    # narrative -- the one field `docs/coaching-instructions.md` tells Claude to quote directly --
+    # silently outgrow the MAX_REPORT_PR_HIGHLIGHTS/MAX_REPORT_PLATEAU_HIGHLIGHTS caps the JSON
+    # fields above already enforce, for a user who PRs or stalls on more exercises in a month than
+    # the fixed test fixture does.
+    capped_report = report.model_copy(
+        update={
+            "pr_highlights": report.pr_highlights.model_copy(
+                update={"records": body_fields["pr_highlights"]}
+            ),
+            "plateau_highlights": report.plateau_highlights.model_copy(
+                update={"exercises": body_fields["plateau_highlights"]}
+            ),
+        }
+    )
+    return MonthlyReportResponse(**body_fields, narrative=build_narrative(capped_report))

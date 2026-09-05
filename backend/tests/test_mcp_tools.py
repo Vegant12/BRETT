@@ -1401,3 +1401,46 @@ async def test_report_highlights_carry_their_truncation_counts(
     assert payload["plateau_highlights_total"] == plateau_count, (
         "plateau_highlights_total must count PLATEAUED exercises, not the number scanned"
     )
+
+
+@pytest.mark.integration
+async def test_monthly_narrative_respects_the_same_plateau_cap_as_the_structured_field(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """WR-01 regression: the narrative must narrate the CAPPED list, never the raw one.
+
+    Before the fix, ``fitness_get_monthly_report``'s ``narrative`` field listed every plateaued
+    exercise while ``plateau_highlights`` (the structured field beside it) capped at
+    ``MAX_REPORT_PLATEAU_HIGHLIGHTS`` -- an inconsistent response, and an unbounded one for the
+    single field ``docs/coaching-instructions.md`` tells Claude to quote directly.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    plateau_count = MAX_REPORT_PLATEAU_HIGHLIGHTS + 1
+    await _seed_plateaued_exercises(committed_history, plateau_count)
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_monthly_report", {})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["data_available"] is True
+    assert len(payload["plateau_highlights"]) == MAX_REPORT_PLATEAU_HIGHLIGHTS
+    assert payload["plateau_highlights_total"] == plateau_count
+
+    narrative = payload["narrative"]
+    assert isinstance(narrative, str)
+    # Each plateaued exercise built by `_seed_plateaued_exercises` gets its own uniquely-titled
+    # line ("MCP Plateau Exercise 00", "01", ...). Counting how many of THOSE titles the narrative
+    # mentions is a direct check on how many plateau rows it actually narrated.
+    mentioned = sum(
+        1 for index in range(plateau_count) if f"MCP Plateau Exercise {index:02d}" in narrative
+    )
+    assert mentioned == MAX_REPORT_PLATEAU_HIGHLIGHTS, (
+        f"narrative must list exactly the capped {MAX_REPORT_PLATEAU_HIGHLIGHTS} plateaued "
+        f"exercises, not all {plateau_count} scanned -- got {mentioned}"
+    )
