@@ -43,7 +43,7 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 - [ ] **RPT-01**: A new MCP tool composes a weekly report — training volume, strength progression, weight/measurement changes, nutrition summary, trends, and actionable recommendations — for a given week
 - [ ] **RPT-02**: A new MCP tool composes a monthly report with the same coverage, normalized appropriately for the longer window
-- [ ] **RPT-03**: Report tools are verified against a real Claude scheduled-task run; if scheduled sessions cannot load MCP tools (a documented, unresolved risk), reports remain fully functional on-demand and that limitation is documented in `docs/coaching-instructions.md` rather than silently assumed to work
+- [x] **RPT-03**: Report tools are verified against a real Claude scheduled-task run; if scheduled sessions cannot load MCP tools (a documented, unresolved risk), reports remain fully functional on-demand and that limitation is documented in `docs/coaching-instructions.md` rather than silently assumed to work
 
 ### Body Measurements
 
@@ -60,8 +60,8 @@ Requirements for the v2.0 milestone. Each maps to roadmap phases. REQ-ID numberi
 
 ### Coaching Response Style
 
-- [ ] **COACH-02**: `docs/coaching-instructions.md` is revised to further emphasize concise, simple answers that still cite real figures, extending the guidance already present
-- [ ] **COACH-03**: `docs/coaching-instructions.md` documents the v2.0 tools (Apple Health activity data, max-weight strength progression, reports, measurement history, program switching), consistent with the existing tool-registry drift-guard test
+- [x] **COACH-02**: `docs/coaching-instructions.md` is revised to further emphasize concise, simple answers that still cite real figures, extending the guidance already present
+- [x] **COACH-03**: `docs/coaching-instructions.md` documents the v2.0 tools (Apple Health activity data, max-weight strength progression, reports, measurement history, program switching), consistent with the existing tool-registry drift-guard test
 
 ## v2 Requirements (Deferred Beyond v2.0)
 
@@ -115,7 +115,7 @@ Which phases cover which requirements. Populated during roadmap creation.
 | STR-04 | Phase 10 | Complete |
 | RPT-01 | Phase 13 | Pending |
 | RPT-02 | Phase 13 | Pending |
-| RPT-03 | Phase 13 | Pending |
+| RPT-03 | Phase 13 | Complete |
 | ~~BODY-03~~ | Phase 11 | **Dropped 2026-09-03** |
 | ~~BODY-04~~ | Phase 11 | **Dropped 2026-09-03** |
 | BODY-05 | Phase 11 | Pending |
@@ -123,8 +123,8 @@ Which phases cover which requirements. Populated during roadmap creation.
 | GOAL-02 | Phase 12 | Pending |
 | GOAL-03 | Phase 12 | Complete |
 | GOAL-04 | Phase 12 | Complete |
-| COACH-02 | Phase 13 | Pending |
-| COACH-03 | Phase 13 | Pending |
+| COACH-02 | Phase 13 | Complete |
+| COACH-03 | Phase 13 | Complete |
 
 **Coverage:**
 - v2.0 requirements: 28 total (26 active, 2 dropped — BODY-03/BODY-04, Phase 11 discuss-phase, 2026-09-03)
