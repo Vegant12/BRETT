@@ -56,6 +56,10 @@ from app.mcp.tools.progression import (
     fitness_get_plateaus,
 )
 from app.mcp.tools.records import fitness_get_personal_records
+from app.mcp.tools.reports import (
+    fitness_get_monthly_report,
+    fitness_get_weekly_report,
+)
 from app.mcp.tools.summary import fitness_get_training_summary
 from app.mcp.tools.volume import (
     fitness_get_muscle_group_volume,
@@ -180,6 +184,17 @@ _TOOLS: tuple[tuple[Callable[..., Any], str], ...] = (
         fitness_get_training_summary,
         "Composed training picture in one call: weekly volume, per-muscle work and "
         "frequency, progression verdict and recomposition status.",
+    ),
+    (
+        fitness_get_weekly_report,
+        "This week's complete picture in one call: Monday-to-today volume and per-muscle work, "
+        "records set, stalled lifts, measurements, nutrition, activity, program and "
+        "recomposition status.",
+    ),
+    (
+        fitness_get_monthly_report,
+        "This calendar month's complete picture: the same sections as the weekly report, plus a "
+        "markdown narrative of the same figures.",
     ),
     (
         fitness_get_weekly_volume,

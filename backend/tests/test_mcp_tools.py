@@ -24,12 +24,12 @@ code in an MCP tool result to carry the bad news, so the tool must still report
 protocol-level error with an SDK-generated message -- which is exactly the
 uncontrolled string this project refuses to let near a driver exception.
 
-**From Phase 6 on, this module covers EIGHTEEN tools, not one** (MCP-02, MCP-06).
+**From Phase 6 on, this module covers TWENTY tools, not one** (MCP-02, MCP-06).
 MCP-02's claim is behavioural -- "Claude can call tools covering eleven analytics
 areas" -- so a schema test cannot discharge it. Every registered tool therefore
 gets at least one case here that asserts a real structured answer against seeded
-data, and the dead-database leak test is parametrized over all eighteen rather
-than proving one tool's ``except`` branch and assuming the other seventeen.
+data, and the dead-database leak test is parametrized over all twenty rather
+than proving one tool's ``except`` branch and assuming the other nineteen.
 
 **``committed_history`` is the fixture to use here, NEVER ``golden_workout``.**
 ``golden_workout`` flushes and rolls back, which is correct for the analytics
@@ -54,6 +54,7 @@ from app.core.time import utc_now
 from app.db.models.program import ProgramPeriod
 from app.db.repositories.programs import get_active_period
 from app.db.repositories.sync_state import PROVIDER_HEVY, SYNC_RESOURCES, complete_sync
+from app.mcp.tools._common import MAX_REPORT_PLATEAU_HIGHLIGHTS
 from app.normalization.muscles import CanonicalMuscleGroup, MuscleRole
 from tests.conftest import DEFAULT_USER_ID, GoldenBuilder, GoldenExercise, GoldenSet
 
@@ -88,7 +89,7 @@ LEAK_MARKERS = (
 # Fixed literals rather than clock-relative dates because nothing here depends on "now"; only the
 # ordering and the span do.
 #
-# Exported rather than private: `test_secret_redaction.py` drives the same eighteen calls against
+# Exported rather than private: `test_secret_redaction.py` drives the same twenty calls against
 # a HEALTHY database, and two copies of "the minimal call for every tool" is one copy that stops
 # covering a tool the day a signature changes.
 MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
@@ -96,6 +97,8 @@ MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
     "fitness_get_recent_workouts": {},
     "fitness_get_workout": {"workout_id": "whatever"},
     "fitness_get_training_summary": {},
+    "fitness_get_weekly_report": {},
+    "fitness_get_monthly_report": {},
     "fitness_get_weekly_volume": {},
     "fitness_get_muscle_group_volume": {},
     "fitness_get_training_frequency": {},
@@ -370,11 +373,11 @@ async def test_every_tool_degradation_leaks_nothing(client: TestClient) -> None:
     standing in that path.
 
     Every registered tool is exercised, not just ``fitness_ping``. The guard is applied
-    per-function, so proving one ``except`` branch runs proves nothing about the other seventeen;
-    the equality assertion below makes "all eighteen" structural, so a nineteenth tool registered
+    per-function, so proving one ``except`` branch runs proves nothing about the other nineteen;
+    the equality assertion below makes "all twenty" structural, so a twenty-first tool registered
     without an entry in ``MINIMAL_TOOL_ARGUMENTS`` fails here rather than being silently skipped.
 
-    One swap for all eighteen, and failures are COLLECTED rather than asserted in the loop: a bare
+    One swap for all twenty, and failures are COLLECTED rather than asserted in the loop: a bare
     ``assert`` on the first tool would hide every tool after it, and the interesting fact is which
     tools leak, not that one does.
 
@@ -490,7 +493,7 @@ async def test_ping_output_schema_requires_both_fields(client: TestClient) -> No
     async with Client(mcp) as mcp_client:
         tools = (await mcp_client.list_tools()).tools
 
-    # Indexed BY NAME, never positionally. With eighteen tools registered, positional indexing
+    # Indexed BY NAME, never positionally. With twenty tools registered, positional indexing
     # asserts against whichever tool the SDK happens to list first -- a green test about the
     # wrong tool, and nothing in the failure message would say so.
     ping = {tool.name: tool for tool in tools}["fitness_ping"]
@@ -1243,3 +1246,158 @@ async def test_training_summary_composes_four_analytics(
     )
     assert payload["progression_verdict"] is not None
     assert payload["sessions_per_week"] is not None
+
+
+# ---------------------------------------------------------------------------
+# RPT-01/RPT-02: the composed weekly and monthly reports.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_plateaued_exercises(builder: GoldenBuilder, count: int) -> None:
+    """``count`` distinct exercises, each flat at one load for four sessions spanning 21 days.
+
+    ``PLATEAU_MIN_QUALIFYING_SESSIONS`` (4) and ``PLATEAU_MIN_ELAPSED_DAYS`` (21) are both met
+    exactly: four weekly sessions at an identical weight never break the streak (no session's
+    e1RM exceeds the running best), and the first-to-last span is exactly three weeks. All land
+    inside the report's own ``REPORT_PLATEAU_LOOKBACK_WEEKS`` (12) lookback.
+    """
+    anchor = _reference_anchor()
+    for index in range(count):
+        external_id = f"MCP-PLATEAU-{index:02d}"
+        title = f"MCP Plateau Exercise {index:02d}"
+        await builder.template(
+            external_id=external_id,
+            exercise_type="weight_reps",
+            title=title,
+            muscles=((CanonicalMuscleGroup.CHEST, MuscleRole.DIRECT),),
+        )
+        for weeks_back in (3, 2, 1, 0):
+            await builder.workout(
+                start_time=anchor - dt.timedelta(weeks=weeks_back),
+                title=f"MCP Plateau Session {index:02d}-{weeks_back}",
+                exercises=(
+                    GoldenExercise(
+                        template_external_id=external_id,
+                        title=title,
+                        sets=(GoldenSet(weight_kg=Decimal("100.000"), reps=5),),
+                    ),
+                ),
+            )
+
+
+@pytest.mark.integration
+async def test_weekly_report_composes_every_section(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """RPT-01: one call carries training, strength, body, nutrition, activity and program
+    context, all over the SAME Monday-to-today window."""
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    anchor = await _seed_reference_history(committed_history, session)
+    anchor_day = anchor.date()
+    for offset in range(3):
+        day = anchor_day - dt.timedelta(days=offset)
+        await committed_history.health_metric(
+            metric="step_count", local_day=day, value=Decimal("9000")
+        )
+        await committed_history.health_metric(
+            metric="dietary_energy", local_day=day, value=Decimal("2200")
+        )
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_weekly_report", {})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["data_available"] is True
+    assert payload["period"] == "weekly"
+    window_start = dt.date.fromisoformat(payload["window_start"])
+    window_end = dt.date.fromisoformat(payload["window_end"])
+    assert window_start == window_end - dt.timedelta(days=window_end.weekday()), (
+        "RPT-01: the weekly window must start on Monday of the CURRENT week, not an arbitrary "
+        "seven days back"
+    )
+    assert len(payload["muscles"]) == CANONICAL_MUSCLE_GROUP_COUNT
+    assert payload["volume_by_week"], "no weekly volume: the training section loses its trend"
+    assert payload["recomposition_disclaimer"], (
+        "T-06-09: the disclaimer is dropped exactly here if it is dropped anywhere"
+    )
+    assert payload["activity"] is not None
+    assert payload["nutrition"] is not None
+    assert set(payload["freshness"]["resources"]) == {
+        "workouts",
+        "exercise_templates",
+        "body_measurements",
+        "activity",
+        "nutrition",
+    }, "the report's freshness envelope must be the five-resource bundle, never a narrower one"
+
+
+@pytest.mark.integration
+async def test_monthly_report_carries_a_narrative_and_the_weekly_one_does_not(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """D-14's asymmetry, asserted at the wire level -- the one a "make the two responses
+    consistent" refactor would break."""
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    await _seed_reference_history(committed_history, session)
+
+    async with Client(mcp) as mcp_client:
+        weekly = await mcp_client.call_tool("fitness_get_weekly_report", {})
+        monthly = await mcp_client.call_tool("fitness_get_monthly_report", {})
+
+    assert weekly.is_error is False
+    assert monthly.is_error is False
+
+    weekly_payload = weekly.structured_content
+    assert weekly_payload is not None
+    assert "narrative" not in weekly_payload, (
+        "D-14: the weekly report must never carry a narrative field at all"
+    )
+
+    monthly_payload = monthly.structured_content
+    assert monthly_payload is not None
+    assert monthly_payload["data_available"] is True
+    narrative = monthly_payload["narrative"]
+    assert isinstance(narrative, str) and narrative.startswith("# Monthly report"), (
+        "D-14: the monthly report's narrative is a deterministic markdown template, generated "
+        "server-side, never absent when data_available is True"
+    )
+
+
+@pytest.mark.integration
+async def test_report_highlights_carry_their_truncation_counts(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """truncate()'s contract: without both fields Claude reads a capped list as the whole truth.
+
+    Seeds one more plateaued exercise than ``MAX_REPORT_PLATEAU_HIGHLIGHTS`` and asserts the
+    response is capped, flagged, and reports the real PLATEAUED count -- not the number scanned.
+    """
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    plateau_count = MAX_REPORT_PLATEAU_HIGHLIGHTS + 1
+    await _seed_plateaued_exercises(committed_history, plateau_count)
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_weekly_report", {})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["data_available"] is True
+    assert len(payload["plateau_highlights"]) == MAX_REPORT_PLATEAU_HIGHLIGHTS
+    assert payload["plateau_highlights_truncated"] is True
+    assert payload["plateau_highlights_total"] == plateau_count, (
+        "plateau_highlights_total must count PLATEAUED exercises, not the number scanned"
+    )

@@ -84,6 +84,13 @@ BUDGETS: dict[str, int] = {
     "fitness_get_recomposition_status": 12_288,
     "fitness_get_muscle_group_volume": 12_288,
     "fitness_get_training_summary": 16_384,
+    # The heaviest single-transaction call in the phase after fitness_compare_periods: nine-plus
+    # composed analytics calls in one report. Measured 23,875 bytes against worst_case_history on
+    # 2026-09-05.
+    "fitness_get_weekly_report": 32_768,
+    # Same composition as the weekly report PLUS the D-14 narrative string. Measured 31,630 bytes
+    # on 2026-09-05 -- the narrative alone costs roughly 31,630 - 23,875 = 7,755 of those bytes.
+    "fitness_get_monthly_report": 49_152,
     "fitness_get_recent_workouts": 20_480,
     "fitness_get_weekly_volume": 20_480,
     "fitness_get_training_frequency": 20_480,
@@ -126,6 +133,8 @@ WORST_CASE_ARGS: dict[str, dict[str, object]] = {
     "fitness_get_training_frequency": {"weeks": 52},
     "fitness_get_plateaus": {"lookback_weeks": 52, "plateaued_only": False},
     "fitness_get_training_summary": {"weeks": 12},
+    "fitness_get_weekly_report": {},
+    "fitness_get_monthly_report": {},
     "fitness_get_recent_workouts": {"limit": 25},
     "fitness_get_training_program": {},
     # `lean_bulk` is the SEEDED active program, so this call takes the "already active"

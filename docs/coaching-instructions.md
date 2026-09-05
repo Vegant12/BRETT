@@ -53,6 +53,8 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
 | The user asks | Call | Parameters (required in **bold**) |
 |---|---|---|
 | "Am I progressing?" / "How's my training going?" / any broad opener | `fitness_get_training_summary` | `weeks` (max 52) |
+| "Give me my weekly report" / "how did this week go?" | `fitness_get_weekly_report` | *(none)* |
+| "Give me my monthly report" / "how was this month?" | `fitness_get_monthly_report` | *(none)* |
 | "Which muscles are undertrained?" / "too much volume?" / "how many sets for side delts?" | `fitness_get_muscle_group_volume` | `weeks` |
 | "How much am I training?" / "is my volume up or down?" | `fitness_get_weekly_volume` | `weeks` |
 | "How often do I train X?" / "am I hitting each muscle enough times a week?" | `fitness_get_training_frequency` | `weeks` |
