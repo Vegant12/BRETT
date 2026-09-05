@@ -98,6 +98,20 @@ MAX_COMPARISON_ITEMS = 25
 # years of history and still terminates.
 MAX_COMPARISON_PERIOD_DAYS = 365
 
+# D-02's "narrow extras, not the full lists". `fitness_get_personal_records` and
+# `fitness_get_plateaus` still return everything; a REPORT carries the handful worth naming
+# in a summary paragraph. Five, because a coaching answer that cites more than about five
+# individual lifts has stopped summarizing. Both lists travel with `was_truncated` and
+# `total_available` from `truncate()` -- an unlabelled cap is a wrong answer delivered with
+# full confidence.
+MAX_REPORT_PR_HIGHLIGHTS = 5
+MAX_REPORT_PLATEAU_HIGHLIGHTS = 5
+
+# Deliberately no window-count cap beside the two constants above. Both report tools take NO
+# parameters -- the period is fixed by which tool was called (D-04) -- so there is no
+# caller-supplied window to cap. "The other window tools all have one" is exactly the reasoning
+# that would add a parameter the analytics layer has no place to receive.
+
 
 # Type parameters are declared PEP 695 style (`def f[T](...)`) rather than with module-level
 # `TypeVar`/`ParamSpec` objects. The binding is identical -- both scope the variable to the

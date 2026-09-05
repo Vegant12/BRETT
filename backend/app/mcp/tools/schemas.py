@@ -35,6 +35,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from app.analytics.schemas import (
+    ActivityPeriodSummary,
     ActivityTrendResult,
     BodyMeasurementTrendResult,
     BodyWeightTrendResult,
@@ -46,13 +47,16 @@ from app.analytics.schemas import (
     FreshnessMetadata,
     MuscleGroupComparison,
     MuscleGroupFrequency,
+    NutritionPeriodSummary,
     NutritionTrendResult,
     PeriodSummary,
     PersonalRecordsResult,
     PlateauResult,
     ProgressionSignal,
+    RecentRecord,
     RecompositionResult,
     RecompositionStatus,
+    ReportPeriod,
     TrainingProgram,
     TrendVerdict,
     WeeklyVolumeResult,
@@ -475,3 +479,94 @@ class TrainingSummaryResponse(_McpModel):
     average_7d_kg: Decimal | None
     coverage: CoverageMetadata | None
     freshness: FreshnessMetadata | None
+
+
+class _ReportBody(_McpModel):
+    """Every field both report responses share (RPT-01, RPT-02; D-02, D-04).
+
+    A shared base rather than two 26-field copies, and that is a deliberate exception to this
+    module's otherwise-flat style: D-04's "same sections in both, not a different emphasis per
+    period" is a claim about the RESPONSE SHAPE, and a base class makes it structurally true
+    instead of true by inspection. The two subclasses differ by exactly one field, which is
+    exactly what D-14 specifies.
+
+    The spine -- ``volume_by_week``, ``muscles``, ``recomposition_status``,
+    ``recomposition_disclaimer``, ``progression_signal``, ``progression_verdict``,
+    ``weight_trend_rate_percent_per_week``, ``average_7d_kg`` -- is
+    ``TrainingSummaryResponse``'s, field for field, because D-02 says to reuse that spine and
+    because two spellings of "this week's volume" is how two tools end up disagreeing about
+    the same week.
+
+    **Two anchors, both named on the wire.** ``window_start``/``window_end`` govern the
+    volume, muscle, PR, activity and nutrition sections. ``recomposition_anchor_day`` is the
+    DIFFERENT anchor the verdict and the weight trend carry (a fixed 12-week lookback ending
+    today -- ``get_recomposition_status`` takes no window and D-01 forbids adding one), and
+    ``plateau_lookback_weeks`` with each ``PlateauResult``'s own ``lookback_start``/
+    ``lookback_end`` is a third. Claude cannot report "this week" honestly without seeing
+    which figures are actually about this week.
+
+    **No recommendations field (D-03).** Composed DATA only. Claude synthesizes the
+    recommendation from this payload and ``docs/coaching-instructions.md``'s decision
+    framework.
+    """
+
+    data_available: bool
+    period: ReportPeriod | None
+    window_start: dt.date | None
+    window_end: dt.date | None
+    days_in_period: int | None
+
+    sessions_per_week: Decimal | None
+    volume_by_week: list[SummaryVolumeWeek]
+    muscles: list[MuscleGroupRollup]
+
+    recomposition_status: RecompositionStatus | None
+    recomposition_disclaimer: str | None
+    recomposition_anchor_day: dt.date | None
+    progression_signal: ProgressionSignal | None
+    progression_verdict: TrendVerdict | None
+    weight_trend_rate_percent_per_week: Decimal | None
+    average_7d_kg: Decimal | None
+
+    active_program: TrainingProgram | None
+    program_started_on: dt.date | None
+    program_switch_in_window: bool | None
+    previous_program: TrainingProgram | None
+    program_switched_on: dt.date | None
+
+    pr_highlights: list[RecentRecord]
+    pr_highlights_truncated: bool
+    pr_highlights_total: int
+    plateau_highlights: list[PlateauResult]
+    plateau_highlights_truncated: bool
+    plateau_highlights_total: int
+    plateau_lookback_weeks: int | None
+
+    measurements: list[BodyMeasurementTrendResult]
+    activity: ActivityPeriodSummary | None
+    nutrition: NutritionPeriodSummary | None
+
+    coverage: CoverageMetadata | None
+    freshness: FreshnessMetadata | None
+
+
+class WeeklyReportResponse(_ReportBody):
+    """RPT-01: Monday of the current local week through today.
+
+    Deliberately has NO ``narrative`` field. D-14 scopes the markdown narrative to the
+    monthly report only, at the user's explicit request -- a weekly answer is short enough
+    that a prose restatement beside the structured fields is duplicated context, not help.
+    """
+
+
+class MonthlyReportResponse(_ReportBody):
+    """RPT-02: the first of the current local calendar month through today.
+
+    ``narrative`` is D-14: a markdown string generated server-side by
+    ``analytics/reports.py::build_narrative``, a DETERMINISTIC template restating the same
+    data the structured fields above already carry. Not free-form text, not AI-authored, and
+    carrying no recommendation language -- ``test_analytics_reports.py`` asserts all three.
+    ``None`` exactly when ``data_available`` is False.
+    """
+
+    narrative: str | None
