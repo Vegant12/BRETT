@@ -182,7 +182,7 @@ Notes for planning:
 **Plans**: 10 plans in 7 waves
 
 Plans:
-- [ ] 13-01-PLAN.md — the RPT-03 scheduled-task capability spike, run FIRST with `fitness_ping` before anything is built (wave 1)
+- [x] 13-01-PLAN.md — the RPT-03 scheduled-task capability spike, run FIRST with `fitness_ping` before anything is built (wave 1)
 - [x] 13-02-PLAN.md — `GoldenBuilder.health_metric`, Apple Health rows in `worst_case_history`, and the D-06 production nutrition-coverage measurement (wave 1)
 - [x] 13-03-PLAN.md — `local_month_start`, `FRESHNESS_RESOURCES_REPORT`, and `get_recent_records`: the cross-exercise PR scan in ONE query (wave 1)
 - [x] 13-04-PLAN.md — `analytics/health.py`: activity + nutrition rolling averages, per-metric independent floors, and the period-summary generalization (wave 2)
@@ -223,7 +223,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11 → 12 → 13
 | 10. Max-Weight Strength Signal | v2.0 | 1/1 | Complete   | 2026-09-03 |
 | 11. Body Measurement History | v2.0 | 3/3 | Complete    | 2026-09-04 |
 | 12. Training Programs & Confirm-Gated Write Tool | v2.0 | 5/5 | Complete   | 2026-09-04 |
-| 13. Health Analytics, Reports & Coaching Style | v2.0 | 8/10 | In Progress|  |
+| 13. Health Analytics, Reports & Coaching Style | v2.0 | 9/10 | In Progress|  |
 
 ## Requirement Coverage (v2.0)
 
