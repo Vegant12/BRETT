@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
 status: planning
-stopped_at: roadmap created, ready to plan phase 14
-last_updated: "2026-09-05T13:00:00.000Z"
-last_activity: 2026-09-05
+stopped_at: Phase 14 context gathered
+last_updated: "2026-09-07T04:09:32.822Z"
+last_activity: "2026-09-07 - Completed quick task 260907-dsu: Formalize weekly/monthly report narrative as a reusable section template"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -77,24 +77,30 @@ Requirements → Active:
   plus a documented single source of truth for the production `DATABASE_URL`
   (`gcloud secrets versions access latest --secret="brett-database-url"`) — is **still not done**
   and should lead the next milestone.
+
 - **Open (carried from v1.0):** Hevy's real rate limits remain undocumented — the existing retry
   policy is unverified against a real limit, not confirmed unnecessary.
+
 - **Open (carried from v1.0):** MCP Python SDK had a breaking `FastMCP` → `MCPServer` rework
   mid-project; re-read SDK docs at the start of any phase touching `app/mcp/`.
+
 - **Open (from Phase 13, does not close with the milestone):** D-06's production
   nutrition/activity coverage re-query never ran — `gcloud secrets versions access` was blocked
   by the sandbox's command classifier. `MEASURED_DAY_FLOORS` (3/7, 5/14, 10/30) is reused for
   nutrition trend floors as a documented UNMEASURED fallback. See
   `docs/health-auto-export-setup.md` §11. Needs a human-operator re-query.
+
 - **Open (accepted, documented):** `sample_count` semantics diverge between the backfill (raw
   sample count, >1 for 91.7% of rows) and the webhook (always 1), so a falling `sample_count` on
   a backfilled day is a false positive for the Pitfall N-2 batch-split detector. Documented in
   `docs/health-auto-export-setup.md` §7. No overlapping day existed to exercise it (zero overlap
   confirmed: export ends 2026-08-26, webhook begins 2026-09-02), so it stays open.
+
 - **Open (low urgency):** the Hevy-source exclusion predicate's string matching is formally
   unverified against a live payload — Hevy stopped writing to HealthKit for this user around
   May 2025, so nothing live matched it during Phase 8. It remains load-bearing for historical
   data and would matter again if Hevy resumes write-back. Worth a periodic check.
+
 - **Open (decision, not an oversight):** `Gymverse` (2 records) and `Zing` (1 record) also wrote
   `ActiveEnergyBurned` into HealthKit and were **deliberately ingested**. HEALTH-08 names Hevy
   specifically, and its rationale — "BRETT already holds this data at higher fidelity" — is true
@@ -127,8 +133,8 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 
 ## Session Continuity
 
-Last session: 2026-09-05
-Stopped at: ROADMAP.md written (Phases 14-19), REQUIREMENTS.md traceability filled in
+Last session: 2026-09-07T04:09:32.815Z
+Stopped at: Phase 14 context gathered
 (18/18 mapped, all "Planned"), STATE.md updated. No plans exist yet for any v2.1 phase.
 Resume: `/gsd-discuss-phase 14`
 
