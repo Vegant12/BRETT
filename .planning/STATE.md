@@ -29,7 +29,7 @@ Milestone: v2.1 Longitudinal Physique Analysis
 Phase: 14 of 19 total (Deploy Pipeline Migration Safety) — first phase of 6 in this milestone
 Plan: — (not yet planned)
 Status: Roadmap created, ready to plan
-Last activity: 2026-09-05 — ROADMAP.md written, 18/18 v2.1 requirements mapped across 6 phases (14-19)
+Last activity: 2026-09-07 - Completed quick task 260907-dsu: Formalize weekly/monthly report narrative as a reusable section template
 
 Progress: [──────────] 0% — 0/6 v2.1 phases complete
 
@@ -99,6 +99,12 @@ Requirements → Active:
   `ActiveEnergyBurned` into HealthKit and were **deliberately ingested**. HEALTH-08 names Hevy
   specifically, and its rationale — "BRETT already holds this data at higher fidelity" — is true
   of Hevy and false of these two, whose workouts BRETT does not hold at all.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260907-dsu | Formalize weekly/monthly report narrative as a reusable section template | 2026-09-07 | fe36e1c | [260907-dsu-formalize-weekly-monthly-report-narrativ](./quick/260907-dsu-formalize-weekly-monthly-report-narrativ/) |
 
 ## Deferred Items
 
