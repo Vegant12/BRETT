@@ -105,21 +105,48 @@ def redact(text: str, database_url: str) -> str:
     return scrubbed
 
 
+# WR-02: a stalled DB connection (e.g. a firewall silently dropping packets instead of sending
+# RST/ICMP-unreachable, or a lock held on `alembic_version`) must not hang `alembic
+# current`/`alembic upgrade head` for the OS-level TCP connect timeout (often minutes) or
+# indefinitely -- the whole point of DEPLOY-04 is to fail loudly and fast, not to hang the deploy
+# pipeline with no diagnostic output.
+_ALEMBIC_TIMEOUT_SECONDS = 60
+
+
 def build_runner(database_url: str) -> AlembicRunner:
     """Return a callable that runs `alembic` against `database_url`.
 
     Mirrors `tests/conftest.py`'s `alembic` fixture exactly: does not raise on a nonzero exit,
     because a raised `CalledProcessError` would hide the alembic output that explains the drift.
+    A timeout is treated the same way -- reported back as a failed `CompletedProcess` rather than
+    letting `subprocess.TimeoutExpired` propagate uncaught, so callers only ever handle one
+    failure shape (a nonzero returncode with an explanatory stderr).
     """
 
     def _run(*args: str) -> "subprocess.CompletedProcess[str]":
-        return subprocess.run(  # noqa: S603
-            [sys.executable, "-m", "alembic", *args],
-            cwd=BACKEND_DIR,
-            env={**os.environ, "DATABASE_URL": database_url},
-            capture_output=True,
-            text=True,
-        )
+        try:
+            return subprocess.run(  # noqa: S603
+                [sys.executable, "-m", "alembic", *args],
+                cwd=BACKEND_DIR,
+                env={**os.environ, "DATABASE_URL": database_url},
+                capture_output=True,
+                text=True,
+                timeout=_ALEMBIC_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return subprocess.CompletedProcess(
+                args=exc.cmd,
+                returncode=1,
+                stdout=exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+                stderr=(
+                    f"alembic {' '.join(args)} timed out after {exc.timeout}s"
+                    + (
+                        f"; partial stderr: {exc.stderr.decode() if isinstance(exc.stderr, bytes) else exc.stderr}"
+                        if exc.stderr
+                        else ""
+                    )
+                ),
+            )
 
     return _run
 
