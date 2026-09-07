@@ -39,8 +39,15 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analytics import reports as reports_module
 from app.analytics.recomposition import INTERPRETATION_DISCLAIMER
-from app.analytics.reports import build_narrative, compose_report, resolve_report_window
+from app.analytics.reports import (
+    _NARRATIVE_TEMPLATE,
+    _NarrativeSection,
+    build_narrative,
+    compose_report,
+    resolve_report_window,
+)
 from app.analytics.schemas import (
     ActivityPeriodSummary,
     AggregateProgression,
@@ -741,6 +748,51 @@ def test_every_number_in_the_narrative_is_already_in_the_structured_fields() -> 
             "report.model_dump_json() -- the narrative has introduced a number the "
             "structured fields do not carry"
         )
+
+
+def test_the_template_declares_the_seven_sections_in_order() -> None:
+    """The shared contract, asserted on the template itself rather than inferred from rendered
+    text. `test_the_seven_section_headings_are_present` proves the headings reach the output;
+    this proves there is ONE ordered declaration producing them, which is what makes weekly and
+    monthly structurally identical instead of coincidentally identical."""
+    assert [section.heading for section in _NARRATIVE_TEMPLATE] == [
+        "## Training",
+        "## Strength",
+        "## Body",
+        "## Nutrition",
+        "## Activity",
+        "## Program and recomposition",
+        "## Data quality",
+    ]
+    assert all(section.periods is None for section in _NARRATIVE_TEMPLATE), (
+        "every section shipped today applies to BOTH periods; the first period-restricted "
+        "section is Phase 18's monthly-only physique block"
+    )
+
+
+def test_a_monthly_only_section_renders_monthly_and_is_absent_weekly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 18's forward-designed slot (ROADMAP Phase 18, success criterion 1: the monthly
+    report gains a physique section the weekly report structurally cannot carry). Registers a
+    throwaway monthly-only section and asserts it appears for MONTHLY and not for WEEKLY --
+    proving a future section is one template entry plus one builder, with no edit to any
+    existing section."""
+    marker = "## Throwaway monthly-only section"
+    extended = (
+        *reports_module._NARRATIVE_TEMPLATE,
+        _NarrativeSection(marker, lambda report: ["- monthly only"], (ReportPeriod.MONTHLY,)),
+    )
+    monkeypatch.setattr(reports_module, "_NARRATIVE_TEMPLATE", extended)
+
+    monthly = build_narrative(_report(period=ReportPeriod.MONTHLY))
+    weekly = build_narrative(_report(period=ReportPeriod.WEEKLY))
+
+    assert marker in monthly
+    assert "- monthly only" in monthly
+    assert marker not in weekly
+    # The restriction must SKIP the section, never render an empty heading for it.
+    assert "- monthly only" not in weekly
 
 
 # ---------------------------------------------------------------------------------------------
