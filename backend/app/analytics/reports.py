@@ -35,6 +35,8 @@ owns the transaction. The session is positional and everything else keyword-only
 
 import datetime as dt
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -235,59 +237,33 @@ def _period_summary_lines(summary: ActivityPeriodSummary | NutritionPeriodSummar
     return lines
 
 
-def build_narrative(report: ReportResult) -> str:
-    """D-14: the monthly report's markdown narrative -- a DETERMINISTIC template, not
-    free-form or AI-authored text.
+@dataclass(frozen=True, slots=True)
+class _NarrativeSection:
+    """One heading plus the builder that renders its body lines, and the periods it applies to.
 
-    Restates the SAME composed data already present in ``report``'s structured fields --
-    headings, numbers, existing trend/verdict labels -- and introduces nothing. Calling this
-    function twice on the same ``ReportResult`` returns byte-identical strings: it reads no
-    clock, no environment variable and no dict whose iteration order is not already pinned by
-    the model it was built from (every list field on ``ReportResult`` is documented as
-    deterministically sorted or gap-free by the function that produced it, and
-    ``FreshnessMetadata.resources`` is built from the fixed ``FRESHNESS_RESOURCES_REPORT``
-    tuple, never a set).
+    `periods=None` means EVERY period -- all seven of today's sections. A section restricted to
+    one period declares it explicitly, which is the slot Phase 18's monthly-only physique
+    section occupies: a new entry in `_NARRATIVE_TEMPLATE` plus its own builder, editing no
+    existing section's code.
 
-    **PURE and synchronous.** Takes the already-composed result, issues no query and opens no
-    session -- exactly ``format_summary``'s shape in
-    ``app/integrations/health_auto_export/backfill.py``, which returns lines rather than
-    printing them so the block is testable with no container and no captured stdout.
+    `build` is a dataclass FIELD, not a class attribute. Instance attribute lookup performs no
+    descriptor binding, so `self.build(report)` calls the plain function with one argument; a
+    class-level `build = _training_lines` would bind `self` and pass two.
 
-    **No third-party text-templating library anywhere in this codebase**, and none is added
-    here -- pulling one in for eight f-strings would be a dependency in the critical path of
-    health data. A ``list[str]`` built with explicit ``if`` branches, joined once at the end
-    with ``"\\n".join(...)``, is the whole implementation.
-    (Rephrased to avoid tripping this very module's own literal-substring acceptance grep --
-    the decision content is unchanged from stating the two forbidden identifiers outright.)
-
-    **D-03, restated at the point where it is easiest to violate: NO recommendation
-    language.** Not "you should", not "consider adding", not "try". Every line here is a
-    restatement of a number or a label the structured fields already carry -- never a new
-    computation, never a judgment call. ``test_analytics_reports.py`` asserts this with a
-    banned-token scan and a numeric-provenance check (every number in the prose is already a
-    substring of ``report.model_dump_json()``), because this is a rule a well-meaning future
-    edit will break and no reviewer will reliably catch by eye.
-
-    **``report.recomposition.disclaimer`` travels VERBATIM**, on its own line.
-    ``RecompositionResult``'s own docstring calls it "a REQUIRED FIELD, not documentation" --
-    paraphrasing it here would be exactly the serialization change that docstring warns
-    against.
-
-    Every ``Decimal`` renders via ``str()`` -- never binary-floating-point-converted, never
-    rounded. Every ``dt.date``/``dt.datetime`` renders via ``.isoformat()``. Every ``StrEnum``
-    renders via ``.value``. A null figure renders as an explicit word ("not recorded", "not
-    enough weigh-ins", ...) and never as a bare ``0`` -- the same rule ``schemas.py`` states for
-    ``tonnage_kg is None`` vs. ``Decimal("0.000")``. (Rephrased to avoid tripping
-    ``test_analytics_isolation.py``'s own static no-float guard, which is anchored on the
-    literal constructor call this sentence would otherwise contain -- the decision content is
-    unchanged.)
+    Builders return BODY lines only. `build_narrative` owns the blank line and the heading, so
+    no builder can forget one and no two builders can disagree about the separator.
     """
-    period_label = report.period.value.capitalize()
+
+    heading: str
+    build: Callable[[ReportResult], list[str]]
+    periods: tuple[ReportPeriod, ...] | None = None
+
+    def applies_to(self, period: ReportPeriod) -> bool:
+        return self.periods is None or period in self.periods
+
+
+def _training_lines(report: ReportResult) -> list[str]:
     lines: list[str] = [
-        f"# {period_label} report — {report.window_start.isoformat()} to "
-        f"{report.window_end.isoformat()}",
-        "",
-        "## Training",
         f"- Period: {report.days_in_period} days, {report.window_start.isoformat()} to "
         f"{report.window_end.isoformat()}",
         f"- Sessions per week: {report.frequency.sessions_per_week}",
@@ -299,9 +275,11 @@ def build_narrative(report: ReportResult) -> str:
             f"- week of {week.week_start.isoformat()}: {week.sessions} sessions, "
             f"{week.hard_sets} hard sets, {reps} reps, {tonnage} kg"
         )
+    return lines
 
-    lines.append("")
-    lines.append("## Strength")
+
+def _strength_lines(report: ReportResult) -> list[str]:
+    lines: list[str] = []
     if report.pr_highlights.records:
         lines.append("- New records this period:")
         for pr in report.pr_highlights.records:
@@ -340,9 +318,11 @@ def build_narrative(report: ReportResult) -> str:
             lines.append(f"  - {label}: {duration} days, {weight_part}")
     else:
         lines.append("  - none")
+    return lines
 
-    lines.append("")
-    lines.append("## Body")
+
+def _body_lines(report: ReportResult) -> list[str]:
+    lines: list[str] = []
     weight_trend = report.recomposition.weight_trend
     avg_7d = (
         "not enough weigh-ins"
@@ -397,17 +377,19 @@ def build_narrative(report: ReportResult) -> str:
         if measurement.is_stale:
             body += " (stale)"
         lines.append(f"- {measurement.metric.value}: {body}")
+    return lines
 
-    lines.append("")
-    lines.append("## Nutrition")
-    lines.extend(_period_summary_lines(report.nutrition))
 
-    lines.append("")
-    lines.append("## Activity")
-    lines.extend(_period_summary_lines(report.activity))
+def _nutrition_lines(report: ReportResult) -> list[str]:
+    return _period_summary_lines(report.nutrition)
 
-    lines.append("")
-    lines.append("## Program and recomposition")
+
+def _activity_lines(report: ReportResult) -> list[str]:
+    return _period_summary_lines(report.activity)
+
+
+def _program_lines(report: ReportResult) -> list[str]:
+    lines: list[str] = []
     recomposition = report.recomposition
     lines.append(
         f"- As of {report.recomposition_anchor_day.isoformat()} — a different anchor from the "
@@ -438,9 +420,11 @@ def build_narrative(report: ReportResult) -> str:
         f"{progression.verdict.value} over {progression.classified_exercises} exercises."
     )
     lines.append(recomposition.disclaimer)
+    return lines
 
-    lines.append("")
-    lines.append("## Data quality")
+
+def _data_quality_lines(report: ReportResult) -> list[str]:
+    lines: list[str] = []
     sessions_line = f"- Sessions in window: {report.coverage.sessions_in_window}"
     if report.coverage.insufficient_data:
         sessions_line += "; not enough sessions for a trend claim"
@@ -448,5 +432,91 @@ def build_narrative(report: ReportResult) -> str:
     for resource, synced_at in report.freshness.resources.items():
         synced = "never synced" if synced_at is None else f"last synced {synced_at.isoformat()}"
         lines.append(f"- {resource}: {synced}")
+    return lines
 
+
+# The shared weekly/monthly contract, made visible in code shape rather than enforced only by
+# convention and tests. Seven entries today, all `periods=None` (every period). A section
+# restricted to one `ReportPeriod` -- Phase 18's monthly-only physique section -- is one more
+# entry here plus one more builder above, editing no existing section.
+_NARRATIVE_TEMPLATE: tuple[_NarrativeSection, ...] = (
+    _NarrativeSection("## Training", _training_lines),
+    _NarrativeSection("## Strength", _strength_lines),
+    _NarrativeSection("## Body", _body_lines),
+    _NarrativeSection("## Nutrition", _nutrition_lines),
+    _NarrativeSection("## Activity", _activity_lines),
+    _NarrativeSection("## Program and recomposition", _program_lines),
+    _NarrativeSection("## Data quality", _data_quality_lines),
+)
+
+
+def build_narrative(report: ReportResult) -> str:
+    """D-14: the monthly report's markdown narrative -- a DETERMINISTIC template, not
+    free-form or AI-authored text.
+
+    Restates the SAME composed data already present in ``report``'s structured fields --
+    headings, numbers, existing trend/verdict labels -- and introduces nothing. Calling this
+    function twice on the same ``ReportResult`` returns byte-identical strings: it reads no
+    clock, no environment variable and no dict whose iteration order is not already pinned by
+    the model it was built from (every list field on ``ReportResult`` is documented as
+    deterministically sorted or gap-free by the function that produced it, and
+    ``FreshnessMetadata.resources`` is built from the fixed ``FRESHNESS_RESOURCES_REPORT``
+    tuple, never a set).
+
+    **PURE and synchronous.** Takes the already-composed result, issues no query and opens no
+    session -- exactly ``format_summary``'s shape in
+    ``app/integrations/health_auto_export/backfill.py``, which returns lines rather than
+    printing them so the block is testable with no container and no captured stdout.
+
+    **No third-party text-templating library anywhere in this codebase**, and none is added
+    here -- pulling one in for eight f-strings would be a dependency in the critical path of
+    health data. A ``list[str]`` built with explicit ``if`` branches, joined once at the end
+    with ``"\\n".join(...)``, is the whole implementation.
+    (Rephrased to avoid tripping this very module's own literal-substring acceptance grep --
+    the decision content is unchanged from stating the two forbidden identifiers outright.)
+
+    **D-03, restated at the point where it is easiest to violate: NO recommendation
+    language.** Not "you should", not "consider adding", not "try". Every line here is a
+    restatement of a number or a label the structured fields already carry -- never a new
+    computation, never a judgment call. ``test_analytics_reports.py`` asserts this with a
+    banned-token scan and a numeric-provenance check (every number in the prose is already a
+    substring of ``report.model_dump_json()``), because this is a rule a well-meaning future
+    edit will break and no reviewer will reliably catch by eye.
+
+    **``report.recomposition.disclaimer`` travels VERBATIM**, on its own line.
+    ``RecompositionResult``'s own docstring calls it "a REQUIRED FIELD, not documentation" --
+    paraphrasing it here would be exactly the serialization change that docstring warns
+    against.
+
+    Every ``Decimal`` renders via ``str()`` -- never binary-floating-point-converted, never
+    rounded. Every ``dt.date``/``dt.datetime`` renders via ``.isoformat()``. Every ``StrEnum``
+    renders via ``.value``. A null figure renders as an explicit word ("not recorded", "not
+    enough weigh-ins", ...) and never as a bare ``0`` -- the same rule ``schemas.py`` states for
+    ``tonnage_kg is None`` vs. ``Decimal("0.000")``. (Rephrased to avoid tripping
+    ``test_analytics_isolation.py``'s own static no-float guard, which is anchored on the
+    literal constructor call this sentence would otherwise contain -- the decision content is
+    unchanged.)
+
+    **The shape, since this refactor:** the narrative is an ordered template of named sections
+    (``_NARRATIVE_TEMPLATE``), and this function is the title plus a loop over it. Weekly and
+    monthly share the template by construction -- the same seven ``_NarrativeSection`` entries
+    render for both -- rather than by convention alone. A section may declare itself restricted
+    to one ``ReportPeriod`` and is skipped for the other; every section shipped today applies to
+    both. Each builder returns BODY lines only, taking one ``ReportResult`` argument; this
+    function owns the leading blank line and the heading for every section, so no builder can
+    omit one and no two builders can disagree about the separator. Every rendering rule above --
+    determinism, D-03, the verbatim disclaimer, the Decimal/isoformat/``.value`` conventions --
+    is unchanged and now applies inside the builders rather than inline here.
+    """
+    period_label = report.period.value.capitalize()
+    lines: list[str] = [
+        f"# {period_label} report — {report.window_start.isoformat()} to "
+        f"{report.window_end.isoformat()}",
+    ]
+    for section in _NARRATIVE_TEMPLATE:
+        if not section.applies_to(report.period):
+            continue
+        lines.append("")
+        lines.append(section.heading)
+        lines.extend(section.build(report))
     return "\n".join(lines)
