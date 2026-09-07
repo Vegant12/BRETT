@@ -34,6 +34,7 @@ import datetime as dt
 import inspect
 import re
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -485,6 +486,28 @@ def test_the_seven_section_headings_are_present() -> None:
         "## Data quality",
     ):
         assert heading in narrative
+
+
+_NARRATIVE_GOLDEN_DIR = Path(__file__).resolve().parent / "fixtures" / "reports"
+
+
+@pytest.mark.parametrize(
+    ("period", "golden"),
+    [
+        (ReportPeriod.MONTHLY, "monthly_narrative.md"),
+        (ReportPeriod.WEEKLY, "weekly_narrative.md"),
+    ],
+)
+def test_the_narrative_is_byte_identical_to_the_committed_golden(
+    period: ReportPeriod, golden: str
+) -> None:
+    """The refactor guard. The other tests in this block assert SUBSTRINGS, so a reordered,
+    reworded or silently dropped section passes all of them. This one does not: it pins the
+    whole rendered document, captured from the pre-refactor `build_narrative`, so any change
+    to what a report renders has to be a deliberate re-capture of this file with a stated
+    reason -- never a side effect of restructuring how it is rendered."""
+    expected = (_NARRATIVE_GOLDEN_DIR / golden).read_text(encoding="utf-8")
+    assert build_narrative(_report(period=period)) + "\n" == expected
 
 
 def test_every_hard_set_total_appears_in_the_output() -> None:
