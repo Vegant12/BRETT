@@ -46,10 +46,29 @@ RUNTIME_SA="brett-run@${PROJECT_ID}.iam.gserviceaccount.com"
 # the gcloud invocation below, and it is never echoed. Never enable shell tracing (the -x flag)
 # in this file: it would print the production DSN into the terminal and into any CI log
 # capturing this deploy.
-DATABASE_URL="${BRETT_DATABASE_URL:-$(gcloud secrets versions access latest --project="$PROJECT_ID" --secret="brett-database-url")}"
+#
+# WR-01: `gcloud secrets versions access` failing outright (PERMISSION_DENIED, NOT_FOUND) is a
+# DIFFERENT failure shape than it succeeding with an empty payload, and `set -euo pipefail` alone
+# would abort on the former before the empty-value check below ever ran, surfacing gcloud's raw
+# stderr with no DEPLOY-04 prefix. Capture that failure explicitly so both shapes get a
+# DEPLOY-04-prefixed message an operator can find in docs/runbook-deploy.md.
+if [[ -n "${BRETT_DATABASE_URL:-}" ]]; then
+  DATABASE_URL="$BRETT_DATABASE_URL"
+else
+  GCLOUD_ERR_FILE="$(mktemp)"
+  if ! DATABASE_URL="$(gcloud secrets versions access latest --project="$PROJECT_ID" --secret="brett-database-url" 2>"$GCLOUD_ERR_FILE")"; then
+    GCLOUD_ERR="$(cat "$GCLOUD_ERR_FILE")"
+    rm -f "$GCLOUD_ERR_FILE"
+    echo "DEPLOY-04: failed to resolve DATABASE_URL from Secret Manager (brett-database-url); gcloud secrets versions access latest --secret=brett-database-url exited non-zero. This is an IAM permission or missing-secret-version issue, not an empty-value one. gcloud said: $GCLOUD_ERR" >&2
+    exit 1
+  fi
+  rm -f "$GCLOUD_ERR_FILE"
+fi
 
 # An empty value here would make `alembic upgrade head` fail with a pydantic ValidationError
-# about a missing field, which reads like a code bug rather than a missing secret.
+# about a missing field, which reads like a code bug rather than a missing secret. Distinct from
+# the branch above: this is gcloud exiting 0 with an empty payload (e.g. an empty secret version),
+# not gcloud failing outright.
 if [[ -z "$DATABASE_URL" ]]; then
   echo "DEPLOY-04: DATABASE_URL resolved to an empty value; gcloud secrets versions access latest --secret=brett-database-url returned nothing and BRETT_DATABASE_URL is unset. Refusing to deploy." >&2
   exit 1
