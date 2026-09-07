@@ -79,7 +79,12 @@ numbering from v2.0's last phase (13); it does not restart at 1.
   2. The script (or a documented equivalent pre-flight) runs `alembic upgrade head`, or an enforced `alembic current` vs `alembic heads` check that aborts on mismatch, with a documented single source of truth for the production `DATABASE_URL` (today: `gcloud secrets versions access latest --secret="brett-database-url"`).
   3. A new static assertion in `backend/tests/test_cloud_run_deploy.py` proves the migration step/pre-flight exists in the script, mirroring the existing `_REQUIRED_FLAGS` guard pattern (lines 54-64).
   4. The fix is rehearsed against a real drift scenario (a database intentionally behind head), not asserted only against fixtures.
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 14-01-PLAN.md — Extract the migration pre-flight predicate and rehearse it against a real drifted Postgres container
+- [ ] 14-02-PLAN.md — Add the fetch/apply/verify block to scripts/deploy-cloud-run.sh with static DEPLOY-04 guards
+- [ ] 14-03-PLAN.md — Execute the real deploy script against drift with gcloud stubbed, and write the deploy runbook
 
 ### Phase 15: Physique Rating Calibration Spike
 **Goal**: The rating scale's diff thresholds and any elapsed-time floor are set from measured model behavior, not a guess baked into the migration.
