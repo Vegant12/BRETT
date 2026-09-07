@@ -14,10 +14,13 @@ is added separately: a predicate that only ever sees fabricated strings could pa
 being wrong about what `alembic current`/`alembic heads` actually print.
 """
 
+import os
 import subprocess
+import sys
 from collections.abc import Callable
 
 import pytest
+from sqlalchemy.engine import make_url
 
 from app.db.migration_preflight import (
     check_at_head,
@@ -25,6 +28,7 @@ from app.db.migration_preflight import (
     parse_revisions,
     redact,
 )
+from tests.conftest import BACKEND_DIR
 
 
 def _fake_runner(
@@ -178,3 +182,92 @@ def test_main_returns_1_and_names_deploy_04_when_database_url_is_unset(
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "DEPLOY-04" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Drift rehearsal: the same predicate, run against a REAL Postgres container
+# deliberately downgraded one revision behind head -- the exact condition that broke
+# production three times during v2.0. This is D-04's explicit requirement: a permanent
+# regression test, not a one-off manual runbook that proves nothing on the next change.
+# ---------------------------------------------------------------------------
+
+
+def _preflight(url: str) -> "subprocess.CompletedProcess[str]":
+    """The exact command `scripts/deploy-cloud-run.sh` will run in plan 14-02, invoked as a
+    subprocess so its exit code -- the thing `set -euo pipefail` reacts to -- is what gets
+    asserted here."""
+    return subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "app.db.migration_preflight"],
+        cwd=BACKEND_DIR,
+        env={**os.environ, "DATABASE_URL": url, "PYTHONPATH": BACKEND_DIR},
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.integration
+def test_preflight_detects_a_database_one_revision_behind_head(
+    alembic: Callable[..., "subprocess.CompletedProcess[str]"],
+    restore_schema: None,
+) -> None:
+    """The Phase 13 incident, reproduced: `0005` applied, `0006` expected. This is the drift
+    rehearsal -- a real database intentionally behind head, not a fixture."""
+    assert alembic("upgrade", "head").returncode == 0
+    assert check_at_head(alembic).ok is True  # baseline: at head means ok
+
+    down = alembic("downgrade", "-1")
+    assert down.returncode == 0, down.stderr
+
+    drifted = check_at_head(alembic)
+    assert drifted.ok is False, (
+        "DEPLOY-04 violated: the pre-flight reported a database one revision behind head as "
+        "in sync; this is exactly the state that shipped UndefinedTableError to production in "
+        "Phase 13"
+    )
+    assert drifted.current == frozenset({"0005"})
+    assert drifted.heads == frozenset({"0006"})
+    assert "DEPLOY-04" in drifted.detail
+    # `restore_schema` is DECLARED, not optional: this test downgrades the session-scoped
+    # container and every later test in the session fails for an unrelated reason if it is
+    # left behind.
+
+
+@pytest.mark.integration
+def test_preflight_passes_once_the_pending_migration_is_applied(
+    alembic: Callable[..., "subprocess.CompletedProcess[str]"],
+    restore_schema: None,
+) -> None:
+    """Proves the D-01 auto-apply actually clears the gate -- a detector that never returns to
+    ok would block every deploy forever."""
+    alembic("downgrade", "-1")
+    assert check_at_head(alembic).ok is False
+
+    assert alembic("upgrade", "head").returncode == 0
+    result = check_at_head(alembic)
+    assert result.ok is True
+    assert "at head" in result.detail
+
+
+@pytest.mark.integration
+def test_preflight_module_entrypoint_exits_nonzero_on_drift_without_leaking_the_dsn(
+    postgres_url: str,
+    alembic: Callable[..., "subprocess.CompletedProcess[str]"],
+    restore_schema: None,
+) -> None:
+    """The exact command the deploy script will run (plan 14-02), exercised as a real
+    subprocess so its exit code is what `set -euo pipefail` reacts to."""
+    alembic("upgrade", "head")
+    assert _preflight(postgres_url).returncode == 0
+
+    alembic("downgrade", "-1")
+    drifted = _preflight(postgres_url)
+    assert drifted.returncode == 1, (
+        "DEPLOY-04 violated: the pre-flight entrypoint exited 0 against a drifted database; "
+        "`set -euo pipefail` in scripts/deploy-cloud-run.sh would then let `gcloud run deploy` "
+        "run against a stale schema"
+    )
+    combined = drifted.stdout + drifted.stderr
+    assert "DEPLOY-04" in combined
+    assert postgres_url not in combined
+    if make_url(postgres_url).password:
+        assert make_url(postgres_url).password not in combined
