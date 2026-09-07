@@ -63,6 +63,16 @@ _REQUIRED_FLAGS = (
     "--max",
 )
 
+# DEPLOY-04: every one of these is a piece of the pre-flight migration gate. Dropping any one
+# silently restores the v2.0 failure mode -- a deploy that ships code against a stale schema.
+_MIGRATION_PREFLIGHT_MARKERS = (
+    "gcloud secrets versions access latest",
+    '--secret="brett-database-url"',
+    "BRETT_DATABASE_URL",
+    "alembic upgrade head",
+    "app.db.migration_preflight",
+)
+
 
 @pytest.fixture(scope="module")
 def env_file() -> dict[str, str]:
@@ -299,6 +309,81 @@ def test_deploy_script_has_no_comment_inside_the_gcloud_call() -> None:
         f"comment -- the deploy still runs, but without every flag below it (no --env-vars-file, "
         f"no --set-secrets, no --memory) and `bash -n` reports the file as valid. Move the "
         f"comment above `exec gcloud run deploy`. Offending lines: {offenders}"
+    )
+
+
+def test_deploy_script_migrates_before_it_deploys() -> None:
+    """A test, not a comment: the gate is three shell statements a future edit could delete or
+    reorder, and nothing else in this suite would notice until the next production incident.
+
+    ROADMAP success criterion 3 requires this static guard: the fast suite must fail the moment
+    the DSN fetch, the upgrade, or the verification step is removed from
+    scripts/deploy-cloud-run.sh, or moves below `exec gcloud run deploy`.
+    """
+    lines = _deploy_script_text().splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("exec gcloud run deploy")]
+    assert len(starts) == 1, (
+        f"DEPLOY-04 violated: expected exactly one `exec gcloud run deploy` invocation in "
+        f"scripts/deploy-cloud-run.sh, found {len(starts)}"
+    )
+
+    for marker in _MIGRATION_PREFLIGHT_MARKERS:
+        hits = [i for i, line in enumerate(lines) if marker in line]
+        assert hits, (
+            f"DEPLOY-04 violated: scripts/deploy-cloud-run.sh no longer contains {marker!r}; "
+            f"the pre-flight migration gate is what stops a deploy shipping code against a "
+            f"stale schema, which reached production three times during v2.0 (0004 vs 0005, a "
+            f"wrong DATABASE_URL, and 0005 vs 0006 surfacing as UndefinedTableError)"
+        )
+        assert min(hits) < starts[0], (
+            f"DEPLOY-04 violated: {marker!r} appears in scripts/deploy-cloud-run.sh only at or "
+            f"below `exec gcloud run deploy` (line {min(hits)} vs {starts[0]}); `exec` replaces "
+            f"the shell process, so anything after it never runs and the gate would be decorative"
+        )
+
+
+def test_deploy_script_never_traces_or_exports_the_database_url() -> None:
+    """T-14-01: the script now holds the production DSN in a variable.
+
+    The three ways it could escape into a terminal or CI log are shell tracing (`set -x`),
+    `export`ing it into the environment of a later command, and an explicit echo of the value.
+    A leaked production DSN in a log is permanent -- there is no way to un-leak a captured log
+    line, so this must fail the fast suite rather than rely on code review.
+    """
+    script = _deploy_script_text()
+
+    assert "set -x" not in script, (
+        "T-14-01 violated: scripts/deploy-cloud-run.sh enables shell tracing (`set -x`), which "
+        "would print the production DSN into the terminal and into any CI log capturing this "
+        "deploy; a leaked production DSN is permanent"
+    )
+    assert "export DATABASE_URL" not in script, (
+        "T-14-01 violated: scripts/deploy-cloud-run.sh exports DATABASE_URL, putting the "
+        "production DSN into the environment of every command run afterward instead of only "
+        "the ones that need it; a leaked production DSN is permanent"
+    )
+    assert 'echo "$DATABASE_URL"' not in script, (
+        'T-14-01 violated: scripts/deploy-cloud-run.sh contains echo "$DATABASE_URL", which '
+        "would print the production DSN into the terminal and into any CI log capturing this "
+        "deploy; a leaked production DSN is permanent"
+    )
+    assert '${DATABASE_URL}"' not in script, (
+        "T-14-01 violated: scripts/deploy-cloud-run.sh contains a braced-and-quoted "
+        '${DATABASE_URL}" expansion (the shape of echo "${DATABASE_URL}" and friends), which '
+        "would print the production DSN into the terminal and into any CI log capturing this "
+        "deploy; a leaked production DSN is permanent"
+    )
+
+    # T-14-03: migrating the wrong database is as dangerous as not migrating, and these lines are
+    # the only record of which database source this deploy touched.
+    assert "brett-database-url:latest in project" in script, (
+        "T-14-03 violated: scripts/deploy-cloud-run.sh no longer echoes which Secret Manager "
+        "source it used; the deploy log would carry no record of which database was migrated"
+    )
+    assert "BRETT_DATABASE_URL override" in script, (
+        "T-14-03 violated: scripts/deploy-cloud-run.sh no longer echoes when the "
+        "BRETT_DATABASE_URL override is in use; an operator could believe the override is off "
+        "when it is on, with no record in the deploy log to correct that belief"
     )
 
 
