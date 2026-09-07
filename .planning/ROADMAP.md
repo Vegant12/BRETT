@@ -163,7 +163,7 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 11. Body Measurement History | 3/3 | Shipped (v2.0) | 2026-09-04 |
 | 12. Training Programs & Confirm-Gated Write Tool | 5/5 | Shipped (v2.0) | 2026-09-04 |
 | 13. Health Analytics, Reports & Coaching Style | 10/10 | Shipped (v2.0) | 2026-09-05 |
-| 14. Deploy Pipeline Migration Safety | 3/3 | Complete   | 2026-09-07 |
+| 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
 | 15. Physique Rating Calibration Spike | 0/TBD | Not started | - |
 | 16. Physique Data Model & Repository | 0/TBD | Not started | - |
 | 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |

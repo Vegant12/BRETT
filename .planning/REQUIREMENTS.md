@@ -110,5 +110,5 @@ Which phases cover which requirements. Populated during roadmap creation.
 | RPT-05 | Phase 18 | Planned |
 | MCP-07 | Phase 17 | Planned |
 | MCP-08 | Phase 17 | Planned |
-| DEPLOY-04 | Phase 14 | Planned |
+| DEPLOY-04 | Phase 14 | Complete |
 | DEPLOY-05 | Phase 19 | Planned |
