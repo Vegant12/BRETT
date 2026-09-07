@@ -61,7 +61,7 @@ numbering from v2.0's last phase (13); it does not restart at 1.
 
 ### 🚧 v2.1 Longitudinal Physique Analysis (Phases 14-19) — IN PROGRESS
 
-- [ ] **Phase 14: Deploy Pipeline Migration Safety** - Close the deploy-migration gap before this milestone ships its own new migration
+- [x] **Phase 14: Deploy Pipeline Migration Safety** - Close the deploy-migration gap before this milestone ships its own new migration (completed 2026-09-07)
 - [ ] **Phase 15: Physique Rating Calibration Spike** - Measure real rating drift/anchoring before the observation schema locks
 - [ ] **Phase 16: Physique Data Model & Repository** - Persist a physique observation's full shape with no MCP surface yet
 - [ ] **Phase 17: Physique Analytics & MCP Read/Write Tools** - Claude can log and retrieve physique observations; diff and volume-correlation analytics land alongside
@@ -82,9 +82,9 @@ numbering from v2.0's last phase (13); it does not restart at 1.
 **Plans**: 3 plans
 
 Plans:
-- [ ] 14-01-PLAN.md — Extract the migration pre-flight predicate and rehearse it against a real drifted Postgres container
-- [ ] 14-02-PLAN.md — Add the fetch/apply/verify block to scripts/deploy-cloud-run.sh with static DEPLOY-04 guards
-- [ ] 14-03-PLAN.md — Execute the real deploy script against drift with gcloud stubbed, and write the deploy runbook
+- [x] 14-01-PLAN.md — Extract the migration pre-flight predicate and rehearse it against a real drifted Postgres container
+- [x] 14-02-PLAN.md — Add the fetch/apply/verify block to scripts/deploy-cloud-run.sh with static DEPLOY-04 guards
+- [x] 14-03-PLAN.md — Execute the real deploy script against drift with gcloud stubbed, and write the deploy runbook
 
 ### Phase 15: Physique Rating Calibration Spike
 **Goal**: The rating scale's diff thresholds and any elapsed-time floor are set from measured model behavior, not a guess baked into the migration.
@@ -163,7 +163,7 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 11. Body Measurement History | 3/3 | Shipped (v2.0) | 2026-09-04 |
 | 12. Training Programs & Confirm-Gated Write Tool | 5/5 | Shipped (v2.0) | 2026-09-04 |
 | 13. Health Analytics, Reports & Coaching Style | 10/10 | Shipped (v2.0) | 2026-09-05 |
-| 14. Deploy Pipeline Migration Safety | 0/TBD | Not started | - |
+| 14. Deploy Pipeline Migration Safety | 3/3 | Complete   | 2026-09-07 |
 | 15. Physique Rating Calibration Spike | 0/TBD | Not started | - |
 | 16. Physique Data Model & Repository | 0/TBD | Not started | - |
 | 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |
