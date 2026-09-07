@@ -24,6 +24,55 @@ MIN_INSTANCES="${BRETT_MIN_INSTANCES:-0}"
 MAX_INSTANCES="${BRETT_MAX_INSTANCES:-2}"
 RUNTIME_SA="brett-run@${PROJECT_ID}.iam.gserviceaccount.com"
 
+# DEPLOY-04: production ran a schema BEHIND the deployed code three separate times during v2.0 --
+# Phase 8 (`alembic current` was 0004, the code needed 0005), the Phase 9 operator run (the
+# shell was pointed at the wrong DATABASE_URL, so the before-state read was stale), and the
+# Phase 13 spike (0005 vs 0006, surfacing in production as
+# `UndefinedTableError: relation "user_program_history" does not exist`). Every one of those was
+# a human forgetting to migrate, not a missing detector, so this step APPLIES the pending
+# migrations (D-01) and then independently re-verifies that they landed (D-02) rather than
+# trusting the upgrade command's exit code. The strict-mode flags declared at the top of this
+# file are what turns any failure below into an abort BEFORE `exec gcloud run deploy` runs.
+#
+# D-05: the URL is fetched from Secret Manager here rather than inherited from the shell,
+# because a wrong DATABASE_URL in an operator's environment is precisely what the Phase 9
+# incident was. D-06: BRETT_DATABASE_URL is the deliberate escape hatch for testing this
+# pipeline against a non-production database; leave it unset and the production path always
+# resolves through `gcloud secrets versions access`. --project is pinned for the same reason it
+# is pinned on the deploy below: the active gcloud project on a developer machine is routinely
+# something unrelated.
+#
+# The value is passed per-command and never `export`ed, so it does not enter the environment of
+# the gcloud invocation below, and it is never echoed. Never enable shell tracing (the -x flag)
+# in this file: it would print the production DSN into the terminal and into any CI log
+# capturing this deploy.
+DATABASE_URL="${BRETT_DATABASE_URL:-$(gcloud secrets versions access latest --project="$PROJECT_ID" --secret="brett-database-url")}"
+
+# An empty value here would make `alembic upgrade head` fail with a pydantic ValidationError
+# about a missing field, which reads like a code bug rather than a missing secret.
+if [[ -z "$DATABASE_URL" ]]; then
+  echo "DEPLOY-04: DATABASE_URL resolved to an empty value; gcloud secrets versions access latest --secret=brett-database-url returned nothing and BRETT_DATABASE_URL is unset. Refusing to deploy." >&2
+  exit 1
+fi
+
+# Which source was used, WITHOUT the value: migrating the wrong database is as bad as not
+# migrating, and this line is the only record of which one this deploy touched.
+if [[ -n "${BRETT_DATABASE_URL:-}" ]]; then
+  echo "DEPLOY-04: using the BRETT_DATABASE_URL override (non-production path)"
+else
+  echo "DEPLOY-04: using Secret Manager brett-database-url:latest in project $PROJECT_ID"
+fi
+
+# D-01: apply, do not merely detect. alembic runs from backend/ because alembic.ini lives there,
+# and via its own CLI for the same reason this script shells out to gcloud.
+(cd "$REPO_ROOT/backend" && DATABASE_URL="$DATABASE_URL" uv run alembic upgrade head)
+
+# D-02: an independent confirmation that `alembic current` now equals `alembic heads`. A partial
+# or silently-incomplete apply exits 1 here and the deploy never happens. The predicate lives in
+# backend/app/db/migration_preflight.py so backend/tests/test_migration_preflight.py can call it
+# directly against a real drifted database (D-04).
+(cd "$REPO_ROOT/backend" && DATABASE_URL="$DATABASE_URL" PYTHONPATH="$REPO_ROOT/backend" uv run python -m app.db.migration_preflight)
+
 # The memory request below was RAISED to a full gigabyte from the half-gigabyte value this
 # service originally shipped with, and must not be tuned back down: RESEARCH Pitfall 5 measured
 # ~235 MB peak resident memory decoding a 10 MB Health Auto Export ingest body. A Cloud Run OOM
