@@ -378,12 +378,143 @@ evidence of "does not exist."
 
 ## D-08 Instruction-Level Mitigation Draft
 
-pending -- written by plan 15-02
+D-08: if the anchored chain showed a real self-reinforcing ratchet, this is recorded as an
+**accepted, monitored risk** with an instruction-level mitigation. It explicitly does NOT
+trigger a schema or write-tool design change, does NOT promote PHYS-F01 (the hard elapsed-time
+floor) out of deferred status, and does NOT block Phase 16.
+
+Status: **NOT ELIGIBLE — no ratchet was observed at N=5; the draft is kept because a later
+regression is possible and it costs nothing**
+
+Destination: the `fitness_log_physique_observation` tool description (Phase 17, PHYS-06) and/or
+`docs/coaching-instructions.md` (Phase 18). Drafted here so the Phase 17/18 planner does not
+have to invent it under a character budget — the same posture `13-SPIKE-RESULT.md` took with its
+D-13 preamble draft.
+
+```text
+Derive each muscle-group rating primarily from the photo in front of you. The prior observation
+returned by fitness_get_latest_physique_observation is a sanity check on your reading, not a
+target to move toward or away from. If your reading disagrees with it, record your reading.
+```
+
+Character count of the draft text: 280 characters, well inside `docs/coaching-instructions.md`'s
+`_PASTE_CEILING_CHARS = 9_000` budget.
+
+**Honest labelling:** 15-RESEARCH.md's State of the Art found that prompt-level anchoring
+mitigations achieve roughly a 6.7% bias reduction and that chain-of-thought framing can make
+numeric anchoring worse. This draft is therefore recorded as a low-efficacy, low-cost
+instruction, not as a fix. The only mitigation the literature shows to reliably work is not
+feeding prior context at all — which is precisely what PHYS-07 deliberately does feed, and which
+this project accepted as a design decision at the milestone gate.
 
 ## Recommended Constants
 
-pending -- written by plan 15-02
+Phase 16 (schema) and Phase 17 (`app/analytics/physique.py`) copy this block verbatim rather
+than re-deriving values from prose (D-09).
+
+**Authority (D-07):** this spike may set (a) a recommended minimum-elapsed-time floor and
+(b) confirmation or refinement of PHYS-01's anchor wording. PHYS-01's 5-level COUNT and
+PHYS-09's pure-ordinal-diff design are locked and are restated below unchanged, not re-decided.
+
+```python
+# LOCKED by PHYS-01/D-07 — restated here for the copying phase, NOT re-decided by this spike.
+# The 5-level count is fixed. Level 5 is defined relative to this same person's own physique
+# only, so population comparison is structurally forbidden at the definition level.
+# Anchor-wording verdict from this spike (PHYS-12, 2026-09-08, 15-SPIKE-RESULT.md): ANCHORS-CONFIRMED
+# Every one of the 10 real calls placed every assessable group on exactly one of the five named
+# levels with no invented intermediate; the two genuinely ambiguous cases (lats B5, side_delts B3)
+# used the scale's own `Not Assessable` escape hatch instead of blurring two adjacent level
+# definitions, and no group's blind range exceeded 1 step across 5 independent draws — the
+# anchors read as usable, not as needing refinement.
+PHYSIQUE_RATING_LEVELS = (
+    "Minimal",
+    "Emerging",
+    "Developed",
+    "Well-Developed",
+    "Standout",
+)
+
+# The verbatim-travelling anchor definitions, in the INTERPRETATION_DISCLAIMER posture
+# (recomposition.py) so the wording cannot drift between sessions. Confirmed unchanged from the
+# exact spike prompt (PHYS-12, 2026-09-08, 15-SPIKE-RESULT.md `## Method`).
+PHYSIQUE_RATING_ANCHORS = (
+    "1. Minimal - the group shows little visible development; its outline is not apparent "
+    "in this photo set. "
+    "2. Emerging - the group's outline is visible but shallow; shape is suggested rather "
+    "than defined. "
+    "3. Developed - the group has clear shape and visible separation from adjacent groups. "
+    "4. Well-Developed - the group is clearly fuller or more defined than the average group "
+    "on THIS person's own body. "
+    "5. Standout - the group is among the most developed on THIS person's own body; it is "
+    "the group a viewer would notice first."
+)
+
+# PHYS-12 spike (2026-09-08, 15-SPIKE-RESULT.md). Blind condition on ONE unchanged photo-set:
+# largest observed range was 1 level (every one of the 5 rated groups), lowest modal count was
+# 3/5 (lats, biceps, side_delts). Anchored 5-step chain, each step simulating an observation
+# "approximately 30 days" after the last: zero travel (R1 == R5) on all 5 groups. Ratchet
+# verdict: RATCHET-NOT-OBSERVED. Set to 30 because that is the exact elapsed interval the
+# anchored chain simulated and found completely stable (zero spurious movement at that spacing),
+# and it matches the monthly report cadence this feature is built to feed — an observation
+# cannot be logged twice inside the same reporting cycle. Real photos will vary more than this
+# session's fixed set, so 30 days is a floor with margin, not a tight fit to the exact interval
+# tested.
+# DOCUMENTED, NOT ENFORCED: PHYS-F01 (the hard floor that refuses or flags a too-close
+# observation) stays deferred per D-08. Phase 16/17 should carry this constant and surface it,
+# not build enforcement on it — that would overstep this spike's stated authority.
+PHYSIQUE_MIN_ELAPSED_DAYS = 30
+
+# PHYS-12 spike (2026-09-08). The instrument's own noise floor: the largest level-range any
+# muscle group showed across 5 blind draws on an UNCHANGED photo-set was 1. A diff smaller than
+# or equal to that is indistinguishable from the rater, not from the body. Ordinal-only, so
+# PHYS-09's "no arithmetic beyond ordinal comparison" rule is intact: this is a comparison of
+# an ordinal index difference against an integer, not a computed score.
+# AUTHORITY NOTE: ROADMAP Phase 15 success criterion #3 names "diff thresholds" as spike output,
+# but D-07 locks PHYS-09's design as pure ordinal comparison with no arithmetic beyond that. This
+# value is a recommendation Phase 17's planner must explicitly confirm before it changes PHYS-09's
+# improved/unchanged/regressed classification behavior — this spike does not, by itself,
+# authorize adding a magnitude gate inside PHYS-09.
+PHYSIQUE_DIFF_MIN_LEVEL_DELTA = 1
+```
 
 ## Scope and Limitations
 
-pending -- written by plan 15-02
+What this record does NOT support, stated plainly so a Phase 16/17 reader does not over-read it:
+
+1. **Single-specimen repeatability, N=5.** One photo-set, one model, one session. This is a
+   test-retest design, not an inter-rater-reliability study. No kappa, no ICC, no p-value is
+   reported; those require multiple subjects and would be spurious precision here.
+2. **The 5 blind draws are not 5 raters.** They are 5 independent draws from the same model
+   under byte-identical instructions. Framing them as distinct judges would misdescribe the
+   design.
+3. **CLAUDE.md was injected into all 11 calls.** `general-purpose` subagents automatically
+   receive this repo's `CLAUDE.md` and memory hierarchy, so every call carried BRETT's project
+   framing. Because that content was IDENTICAL and constant across all blind and anchored calls,
+   it cannot differentially bias one condition relative to the other — it is a controlled
+   constant, not a confound. It does mean these ratings were produced inside a coaching context
+   rather than by a neutral classifier, which is arguably closer to production anyway
+   (15-RESEARCH.md Pitfall 4, Assumption A3).
+4. **The anchoring block approximates a schema that does not exist yet.** PHYS-07's read tool
+   has not been designed (Phase 17). The `PRIOR OBSERVATION` text used here — five rating lines
+   with a one-sentence justification each, framed as ~30 days old — is a plausible approximation
+   of its eventual return shape. **Flag for Phase 17:** if the real read tool exposes materially
+   more context (richer notes, confounder metadata, multiple prior observations), the anchoring
+   magnitude measured here may not transfer, and this spike should be re-read as a lower bound.
+5. **`PHYSIQUE_MIN_ELAPSED_DAYS` is documented, not enforced.** PHYS-F01 remains deferred
+   (D-07, D-08). Phase 16/17 should carry and surface the constant, not build a refuse/flag path
+   on it.
+6. **No model-identity provenance was recorded per call.** PHYS-F03 (per-observation model
+   version) stays deferred, so a future drift discontinuity cannot be attributed to a model
+   change using this record. Cheap to add later at the schema level; impossible to backfill.
+7. **The subagent type was `general-purpose`,** a deliberate, narrow exception to GSD
+   anti-pattern #10, taken because no `gsd-*` agent is designed as a blank visual rater and the
+   rule's rationale (project-aware prompts, workflow context) is the exact contamination this
+   measurement had to avoid.
+8. **The photo no longer exists.** Per D-02 it lived only in the executing session's scratchpad
+   and was deleted after the last call. This record cannot be re-run against the same specimen;
+   a re-run would be a different specimen and a different measurement.
+
+**Downstream handoff.** ROADMAP Phase 15 success criterion #4 is now satisfied: Phase 16's
+observation schema is unblocked. Phase 16 consumes `PHYSIQUE_RATING_LEVELS` /
+`PHYSIQUE_RATING_ANCHORS`; Phase 17 consumes `PHYSIQUE_MIN_ELAPSED_DAYS` and
+`PHYSIQUE_DIFF_MIN_LEVEL_DELTA` plus, if eligible, the D-08 mitigation draft.
