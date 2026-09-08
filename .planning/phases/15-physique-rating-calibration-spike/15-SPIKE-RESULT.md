@@ -198,7 +198,40 @@ counts are computed in `## Blind Condition: Analysis` by plan 15-02.)
 
 ## Blind Condition: Analysis
 
-pending -- written by plan 15-02
+Status: **BLIND-STABLE**
+
+Single-instrument repeatability, not inter-rater reliability: these are 5 independent draws from
+the same model under byte-identical instructions on one unchanged photo-set, not 5 distinct
+judges. No kappa, no ICC and no p-value is reported — those assume multiple subjects and would
+dress N=5 single-specimen data in a formula that measures nothing here.
+
+| Muscle group | B1 | B2 | B3 | B4 | B5 | Mode | Modal count /5 | Range (levels) |
+|---|---|---|---|---|---|---|---|---|
+| chest | Emerging | Emerging | Emerging | Minimal | Emerging | Emerging | 4/5 | 1 |
+| lats | Emerging | Minimal | Minimal | Minimal | Not Assessable | Minimal | 3/5 | 1 |
+| biceps | Emerging | Emerging | Minimal | Minimal | Emerging | Emerging | 3/5 | 1 |
+| abs | Emerging | Emerging | Minimal | Emerging | Emerging | Emerging | 4/5 | 1 |
+| side_delts | Emerging | Emerging | Not Assessable | Emerging | Developed | Emerging | 3/5 | 1 |
+
+- **Mode** = the most frequently returned level. On a tie, list both and mark the modal count as
+  the tied count.
+- **Modal count /5** = exact-agreement count: how many of the 5 draws returned the mode.
+- **Range (levels)** = `max index − min index`. `Not Assessable` draws are excluded from range and
+  counted separately in a `NA count` note under the table if any occurred.
+
+**NA count:** lats 1/5 (B5, occluded per the raw output); side_delts 1/5 (B3, no flexed/raised-arm
+view available per the raw output).
+
+**Reading:** The largest range observed is 1 level, tied across all five rated groups — no group
+showed a 2-or-greater spread across its 5 draws. The lowest modal count is 3/5, tied across lats,
+biceps and side_delts (chest and abs each held 4/5). This rules out a perfectly noiseless
+instrument — every group's range is exactly one step, never zero — but because no group's range
+reaches 2, a one-level adjacent-pair change on this unchanged photo-set is indistinguishable from
+this instrument's own rater noise; a real PHYS-09 diff of exactly one level, on data this thin,
+cannot by itself be trusted as evidence of a real physique change. What remains open: N=5 draws on
+one specimen, one photo-set, and one model version bounds how far this generalizes — a different
+body, a lower-quality photo set, or a different model snapshot could plausibly show a wider (or
+narrower) range than the 1-level ceiling observed here.
 
 ## Anchored Condition: Raw Output
 
@@ -264,11 +297,84 @@ Raw output quoted verbatim.
 
 ## Anchored Condition: Analysis
 
-pending -- written by plan 15-02
+Apply the decision-rule arithmetic pre-registered in `## Method` before any data existed.
+
+| Muscle group | A1 | A2 | A3 | A4 | A5 | anchored_travel (R5−R1) | same-direction transitions /4 | opposing_count /4 | blind_range (from blind condition) |
+|---|---|---|---|---|---|---|---|---|---|
+| chest | Minimal | Minimal | Minimal | Minimal | Minimal | 0 | 4/4 | 0/4 | 1 |
+| lats | Minimal | Minimal | Minimal | Minimal | Minimal | 0 | 4/4 | 0/4 | 1 |
+| biceps | Minimal | Minimal | Minimal | Minimal | Minimal | 0 | 4/4 | 0/4 | 1 |
+| abs | Emerging | Emerging | Emerging | Emerging | Emerging | 0 | 4/4 | 0/4 | 1 |
+| side_delts | Minimal | Minimal | Minimal | Minimal | Minimal | 0 | 4/4 | 0/4 | 1 |
+
+`anchored_travel = 0` for every group, so there is no non-zero sign for a transition to agree or
+disagree with. Convention applied: a flat (zero-magnitude) A_i→A_{i+1} step counts toward
+"same-direction transitions" when the overall travel is itself flat, and `opposing_count` counts
+only transitions that move opposite in sign to a *non-zero* travel. All 20 of the 20 total
+transitions across the 5 groups (4 transitions × 5 groups) were flat, so every group reads 4/4
+same-direction and 0/4 opposing under that convention.
+
+**PHYS-09 first-vs-last check.** Applying the ordinal diff PHYS-09 will use (improved /
+unchanged / regressed / not-comparable) directly between A1 and A5, on a photo-set that never
+changed:
+
+| Muscle group | PHYS-09 verdict A1 → A5 | Any single adjacent transition that would also read non-`unchanged`? |
+|---|---|---|
+| chest | unchanged | No — all 4 adjacent transitions (A1→A2, A2→A3, A3→A4, A4→A5) also read unchanged |
+| lats | unchanged | No — all 4 adjacent transitions also read unchanged |
+| biceps | unchanged | No — all 4 adjacent transitions also read unchanged |
+| abs | unchanged | No — all 4 adjacent transitions also read unchanged |
+| side_delts | unchanged | No — all 4 adjacent transitions also read unchanged |
+
+The second column is the point of the whole exercise: a group whose A1→A5 diff is non-`unchanged`
+while every adjacent transition reads `unchanged` is a drift production's adjacent-pair-only
+design would never surface. No group in this run is in that state — every group's A1→A5 diff
+agrees with every one of its own adjacent transitions.
+
+**Reading:** The contrast RESEARCH.md Pattern 3 specifies explicitly as a ratchet's signature —
+"blind condition shows scatter with no direction, anchored condition shows a one-directional staircase" — is ABSENT in this run. Every one of the 5 anchored groups returned the identical
+level across all 5 sequential steps (`anchored_travel = 0`, `opposing_count = 0/4` on every group,
+and there is no direction present to call "one-directional"), while the blind condition — which
+has no sequential dependency at all — showed strictly more spread than the anchored chain
+(`blind_range = 1` on every group, versus the anchored chain's own range of 0). This rules out a
+ratchet in this specific run: the anchored chain was not merely non-directional, it was flatter
+than the instrument's own baseline noise floor. No p-value is reported. What remains open: a flat
+result at N=5 on one specimen, using an anchoring block that approximates a not-yet-designed
+PHYS-07 schema (see `## Scope and Limitations`), bounds how far "not observed here" generalizes —
+a longer chain, a different specimen, or a richer real `PRIOR OBSERVATION` payload could still
+produce the ratchet this run did not.
 
 ## Ratchet Verdict
 
-pending -- written by plan 15-02
+Status: **RATCHET-NOT-OBSERVED**
+
+Determined by the rule pre-registered in `## Method`, restated here for the reader:
+
+- RATCHET-OBSERVED — some group has `|anchored_travel| >= 1` AND `opposing_count == 0` AND
+  `blind_range == 0`.
+- RATCHET-INCONCLUSIVE — some group has `|anchored_travel| >= 1` AND `opposing_count == 0`, but
+  `blind_range >= 1` for that group.
+- RATCHET-NOT-OBSERVED — no group meets either.
+
+**Groups that triggered the verdict:** none — every one of the 5 rated groups (chest, lats,
+biceps, abs, side_delts) has `anchored_travel = 0`, so no group satisfies `|anchored_travel| >= 1`
+under either positive rule.
+
+**What this answers (ROADMAP success criterion #2):** whether PHYS-07's prior-observation-as-
+context mitigation produces a self-reinforcing ratchet — a slow drift no adjacent-pair diff can
+detect because every individual month-to-month comparison still looks reasonable. In this N=5 run,
+no such drift appeared: the anchored chain was perfectly flat on all 5 muscle groups, and even the
+blind condition's own repeat-measure scatter (range 1 on every group) exceeded the anchored
+chain's own range of 0. This run gives no evidence of a self-reinforcing ratchet from PHYS-07's
+design.
+
+**Corroborating external evidence (15-RESEARCH.md State of the Art):** 2026 LLM-as-judge
+anchoring literature independently reports that prior-score context measurably and
+systematically shifts subsequent judgments, that explicit warning prompts reduce it only
+marginally, and that chain-of-thought prompting can make numeric anchoring worse. Whatever this
+N=5 run found, the literature's direction of effect is the prior a Phase 16/17 reader should
+carry — a RATCHET-NOT-OBSERVED here is evidence of "not detectable at N=5 on this specimen," not
+evidence of "does not exist."
 
 ## D-08 Instruction-Level Mitigation Draft
 
