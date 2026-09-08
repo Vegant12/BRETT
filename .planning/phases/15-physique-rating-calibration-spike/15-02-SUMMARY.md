@@ -175,3 +175,12 @@ record; no application code, no UI, and no data-source wiring is in scope.
 ---
 *Phase: 15-physique-rating-calibration-spike*
 *Completed: 2026-09-08*
+
+## Self-Check: PASSED
+
+- `15-SPIKE-RESULT.md` exists: FOUND
+- `15-02-SUMMARY.md` exists: FOUND
+- Commit `f989ec0` exists: FOUND
+- Commit `29929f3` exists: FOUND
+- Commit `314b609` exists: FOUND
+- Commit `79acb6d` (this SUMMARY's own commit) verified post-hoc: FOUND
