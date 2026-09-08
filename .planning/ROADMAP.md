@@ -62,7 +62,7 @@ numbering from v2.0's last phase (13); it does not restart at 1.
 ### 🚧 v2.1 Longitudinal Physique Analysis (Phases 14-19) — IN PROGRESS
 
 - [x] **Phase 14: Deploy Pipeline Migration Safety** - Close the deploy-migration gap before this milestone ships its own new migration (completed 2026-09-07)
-- [ ] **Phase 15: Physique Rating Calibration Spike** - Measure real rating drift/anchoring before the observation schema locks
+- [x] **Phase 15: Physique Rating Calibration Spike** - Measure real rating drift/anchoring before the observation schema locks (completed 2026-09-08)
 - [ ] **Phase 16: Physique Data Model & Repository** - Persist a physique observation's full shape with no MCP surface yet
 - [ ] **Phase 17: Physique Analytics & MCP Read/Write Tools** - Claude can log and retrieve physique observations; diff and volume-correlation analytics land alongside
 - [ ] **Phase 18: Monthly Report Physique Integration** - The monthly report gains a physique section; the weekly report structurally cannot
@@ -99,7 +99,7 @@ Plans:
 
 Plans:
 - [x] 15-01-PLAN.md — Pause for the user's real photo-set, stage it in the session scratchpad, smoke-test isolated-subagent image reads, pre-register the ratchet decision rule, then collect 5 blind ratings and a 5-step anchored chain as verbatim evidence
-- [ ] 15-02-PLAN.md — Compute both conditions' descriptive statistics, state the ratchet verdict by the pre-registered rule, write the named constants Phase 16/17 copy verbatim, and run the leak/zero-code-change audit
+- [x] 15-02-PLAN.md — Compute both conditions' descriptive statistics, state the ratchet verdict by the pre-registered rule, write the named constants Phase 16/17 copy verbatim, and run the leak/zero-code-change audit
 
 ### Phase 16: Physique Data Model & Repository
 **Goal**: A physique observation's full shape — ratings, notes, confounder metadata, not-assessable handling — persists correctly and reads back out cleanly, with no MCP surface yet.
@@ -168,7 +168,7 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 12. Training Programs & Confirm-Gated Write Tool | 5/5 | Shipped (v2.0) | 2026-09-04 |
 | 13. Health Analytics, Reports & Coaching Style | 10/10 | Shipped (v2.0) | 2026-09-05 |
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
-| 15. Physique Rating Calibration Spike | 1/2 | In Progress|  |
+| 15. Physique Rating Calibration Spike | 2/2 | Complete   | 2026-09-08 |
 | 16. Physique Data Model & Repository | 0/TBD | Not started | - |
 | 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
