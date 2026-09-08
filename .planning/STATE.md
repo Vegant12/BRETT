@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
-status: verifying
-stopped_at: Completed 15-01-PLAN.md
-last_updated: "2026-09-08T05:30:54.690Z"
+status: planning
+stopped_at: Completed and verified Phase 15 (physique-rating-calibration-spike)
+last_updated: "2026-09-08T06:01:05.906Z"
 last_activity: 2026-09-08
 progress:
   total_phases: 6
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 15 — physique-rating-calibration-spike
+**Current focus:** Phase 16 — physique-data-model-&-repository (not yet started; Phase 15 complete and verified)
 
 ## Current Position
 
 Milestone: v2.1 Longitudinal Physique Analysis
-Phase: 15 (physique-rating-calibration-spike) — VERIFYING
-Plan: 2 of 2
-Status: Phase complete — ready for verification
+Phase: 16 (physique-data-model-&-repository)
+Plan: Not started
+Status: Ready to plan
 Last activity: 2026-09-08
 
 Progress: [███───────] 33% — 2/6 v2.1 phases complete
@@ -144,11 +144,9 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 
 ## Session Continuity
 
-Last session: 2026-09-08T05:24:44Z
-Stopped at: Completed 15-02-PLAN.md; post-execution code review applied and phase-goal
-verification in progress within the same session.
-Resume: `/gsd-progress` to see current state, or `/gsd-discuss-phase 16` once Phase 15
-verification completes (Phase 14 is already complete — do not re-run its discuss step).
+Last session: 2026-09-08T06:01:05.906Z
+Stopped at: Phase 15 complete and verified (16/16 must-haves, see 15-VERIFICATION.md); post-execution code review findings fixed.
+Resume: `/gsd-discuss-phase 16` (Phase 14 is already complete — do not re-run its discuss step).
 
 ### v2.1 milestone-gate decisions (made before research, carry into requirements)
 
