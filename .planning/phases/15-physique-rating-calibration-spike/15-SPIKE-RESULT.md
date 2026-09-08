@@ -134,9 +134,17 @@ the post-checkpoint MAIN context).
 |---|---|
 | Verdict | SMOKE-PASS |
 
-**Raw reply:**
+**Raw reply (lightly trimmed — see note):**
 
 > IMAGE-VISIBLE: shirtless man standing
+
+Note added by post-execution code review: this line was trimmed from the subagent's actual reply
+before commit (the original also included a two-word phrase naming the photo's setting) to keep
+it within the smoke test's own 3-word bound and avoid the same setting-related term the leak-audit
+keyword list screens for elsewhere in this record. Disclosed here so the "verbatim" claim made
+for the 10 real rating calls below is not mistakenly read as covering this one discarded,
+throwaway line too — it does not, and it is the only line in this record that was edited before
+commit.
 
 ## Blind Condition: Raw Output
 
@@ -178,10 +186,21 @@ same unchanged photo-set, no shared context. Raw output quoted verbatim — neve
 ### B5
 
 > chest: Emerging - Outline visible but shallow; pecs show slight shape without clear separation from surrounding tissue.
-> lats: Not Assessable - Skin markings across the back obscure the detail needed to judge lat width or taper.
+> lats: Not Assessable - [redacted — non-muscle detail, D-02] obscure the detail needed to judge lat width or taper.
 > biceps: Emerging - Arms show mild shape in relaxed poses, but no flexed view confirms further definition.
 > abs: Emerging - A faint centerline is visible on a flat stomach, but no clear muscle separation shows.
 > side_delts: Developed - The shoulder shows a rounded, capped shape, fuller than the flatter chest and abs.
+
+### Redactions
+
+- **B5, `lats`:** original justification named a non-muscle physical detail on the back. Redacted
+  inline per D-02 (the phase's own rule that ratings must describe only muscle development). The
+  `Not Assessable` rating and the muscle-development reasoning ("obscure the detail needed to
+  judge lat width or taper") are preserved verbatim; only the identifying clause is redacted.
+  Caught by post-execution code review (`/code-review`) after the automated leak-audit keyword
+  list in plan 15-02 Task 3 (`tattoo|background|wearing|shorts|bathroom|mirror|face|hair`) missed
+  this phrase — the keyword list is a strict subset of the rating prompt's actual "no identifying
+  feature" rule and should be widened before this method is reused.
 
 ### Blind condition rating matrix
 
@@ -400,12 +419,17 @@ target to move toward or away from. If your reading disagrees with it, record yo
 Character count of the draft text: 280 characters, well inside `docs/coaching-instructions.md`'s
 `_PASTE_CEILING_CHARS = 9_000` budget.
 
-**Honest labelling:** 15-RESEARCH.md's State of the Art found that prompt-level anchoring
-mitigations achieve roughly a 6.7% bias reduction and that chain-of-thought framing can make
-numeric anchoring worse. This draft is therefore recorded as a low-efficacy, low-cost
-instruction, not as a fix. The only mitigation the literature shows to reliably work is not
-feeding prior context at all — which is precisely what PHYS-07 deliberately does feed, and which
-this project accepted as a design decision at the milestone gate.
+**Honest labelling:** 15-RESEARCH.md's State of the Art found that *explicit warning prompts*
+specifically achieve only roughly a 6.7% bias reduction, and that chain-of-thought framing — a
+different prompt-level technique — instead measurably *worsens* numeric anchoring. Both are
+prompt-level interventions, and this draft's own instruction is closer in kind to the weaker
+warning-prompt category than to chain-of-thought reasoning, so it should be read as low-efficacy
+at best, not as a fix. (An earlier draft of this paragraph blurred the two techniques into one
+"prompt-level anchoring mitigations" figure, which is corrected here — see the Ratchet Verdict
+section above, which cited the same source correctly the first time.) The only mitigation the
+literature shows to reliably work is not feeding prior context at all — which is precisely what
+PHYS-07 deliberately does feed, and which this project accepted as a design decision at the
+milestone gate.
 
 ## Recommended Constants
 
@@ -453,28 +477,36 @@ PHYSIQUE_RATING_ANCHORS = (
 # largest observed range was 1 level (every one of the 5 rated groups), lowest modal count was
 # 3/5 (lats, biceps, side_delts). Anchored 5-step chain, each step simulating an observation
 # "approximately 30 days" after the last: zero travel (R1 == R5) on all 5 groups. Ratchet
-# verdict: RATCHET-NOT-OBSERVED. Set to 30 because that is the exact elapsed interval the
-# anchored chain simulated and found completely stable (zero spurious movement at that spacing),
-# and it matches the monthly report cadence this feature is built to feed — an observation
-# cannot be logged twice inside the same reporting cycle. Real photos will vary more than this
-# session's fixed set, so 30 days is a floor with margin, not a tight fit to the exact interval
-# tested.
+# verdict: RATCHET-NOT-OBSERVED. Set to 30 to match the monthly report cadence this feature is
+# built to feed — an observation cannot be logged twice inside the same reporting cycle.
+# CORRECTION (post-execution code review): the interval was NOT varied in this spike — every
+# anchored step used the identical fixed "~30 days ago" label, so "stable at that spacing" is
+# not a dose-response finding and this constant is NOT empirically validated against a shorter
+# interval that would have been less stable. 30 days is chosen for the report-cadence reason
+# above, not because a shorter floor was tested and rejected. A real dose-response test (varying
+# the simulated elapsed time across multiple values) is future work, not something this run did.
 # DOCUMENTED, NOT ENFORCED: PHYS-F01 (the hard floor that refuses or flags a too-close
 # observation) stays deferred per D-08. Phase 16/17 should carry this constant and surface it,
 # not build enforcement on it — that would overstep this spike's stated authority.
 PHYSIQUE_MIN_ELAPSED_DAYS = 30
 
 # PHYS-12 spike (2026-09-08). The instrument's own noise floor: the largest level-range any
-# muscle group showed across 5 blind draws on an UNCHANGED photo-set was 1. A diff smaller than
-# or equal to that is indistinguishable from the rater, not from the body. Ordinal-only, so
-# PHYS-09's "no arithmetic beyond ordinal comparison" rule is intact: this is a comparison of
-# an ordinal index difference against an integer, not a computed score.
+# muscle group showed across 5 blind draws on an UNCHANGED photo-set was 1 — i.e. a diff of
+# exactly 1 is indistinguishable from the rater, not from the body, and must NOT be treated as a
+# real change. Ordinal-only, so PHYS-09's "no arithmetic beyond ordinal comparison" rule is
+# intact: this is a comparison of an ordinal index difference against an integer, not a computed
+# score.
+# CORRECTION (post-execution code review): this constant was originally written as 1, which
+# directly contradicts the noise-floor finding above (it would classify the noise-floor diff
+# itself as real). Corrected to 2 so the semantics are internally consistent: a diff must be
+# STRICTLY GREATER than the measured noise floor (>= 2, i.e. `abs(diff) > 1`, equivalently
+# `abs(diff) >= PHYSIQUE_DIFF_MIN_LEVEL_DELTA`) to be treated as a real signal rather than noise.
 # AUTHORITY NOTE: ROADMAP Phase 15 success criterion #3 names "diff thresholds" as spike output,
 # but D-07 locks PHYS-09's design as pure ordinal comparison with no arithmetic beyond that. This
 # value is a recommendation Phase 17's planner must explicitly confirm before it changes PHYS-09's
 # improved/unchanged/regressed classification behavior — this spike does not, by itself,
 # authorize adding a magnitude gate inside PHYS-09.
-PHYSIQUE_DIFF_MIN_LEVEL_DELTA = 1
+PHYSIQUE_DIFF_MIN_LEVEL_DELTA = 2
 ```
 
 ## Scope and Limitations
@@ -514,6 +546,60 @@ What this record does NOT support, stated plainly so a Phase 16/17 reader does n
    and was deleted after the last call. This record cannot be re-run against the same specimen;
    a re-run would be a different specimen and a different measurement.
 
+**Limitations of the pre-registered method itself** (added by post-execution code review; these
+did not change this run's verdicts but should be closed before this method is reused):
+
+9. **The decision rule never defines what happens when a rating is `Not Assessable`.**
+   `blind_range` and `anchored_travel` are both defined as arithmetic over the ordinal index, but
+   `Not Assessable` has no index (it's `NA`, not a number). NA draws actually occurred in this run
+   (B5 lats, B3 side_delts) and were handled by informal judgment when computing `blind_range` for
+   those groups above, not by a pre-registered rule. A future run with heavier `Not Assessable`
+   occurrence (or a group that is `Not Assessable` in every blind draw) would have no principled
+   way to compute `blind_range` at all. **Needed before reuse:** an explicit pre-registered rule
+   for excluding/handling NA draws.
+10. **`opposing_count == 0` does not require a true "one-directional staircase.**" The rule's own
+    rationale and the Reading-paragraph requirement above both describe RATCHET-OBSERVED as
+    detecting cumulative, step-by-step reinforcement. But a chain with transitions of (0, 0, 0,
+    +1) — flat for three steps, one jump at the end — satisfies `opposing_count == 0` identically
+    to a true (+1, +1, +1, +1) staircase. This run's data (all-zero transitions) never exercised
+    this gap, but a future run could report "one-directional staircase" language for a pattern
+    that is really a single late jump, overstating what was detected.
+11. **The convention for a flat (zero-magnitude) transition was decided after the data was
+    known, not pre-registered.** Neither 15-01-PLAN.md nor 15-02-PLAN.md states how a flat
+    A_i→A_{i+1} step should count toward `opposing_count`/"same-direction transitions." The
+    convention used above (a flat step counts as same-direction when overall travel is itself
+    flat) was written by this same analysis task, after seeing that the real chain was entirely
+    flat — technically the kind of reverse-fitting the pre-registration was meant to prevent, even
+    though it happens not to change this run's `RATCHET-NOT-OBSERVED` verdict (no group had
+    `|anchored_travel| >= 1` regardless of how flat transitions are classified).
+12. **No pre-registered precedence rule exists across muscle groups.** The rule is applied "per
+    muscle group," but the record must state one overall verdict. If a future run had one group
+    meet RATCHET-OBSERVED's conditions while a different group met only RATCHET-INCONCLUSIVE's,
+    neither plan says which wins. Moot in this run (every group's `anchored_travel == 0`), but
+    unresolved for reuse.
+13. **The leak-audit's own tooling has two residual gaps**, both empirically confirmed by code
+    review and worth fixing before this method is reused rather than relied on again as-is: the
+    path-leak regex anchors `/Users/`/`/home/` to line-start (`^/Users/|^/home/`), so a real path
+    embedded mid-sentence in prose would not be caught; and the descriptor-leak keyword list
+    (`tattoo|background|wearing|shorts|bathroom|mirror|face|hair`) is a strict subset of the
+    rating prompt's own broader "no identifying feature" instruction, as this run's own B5
+    redaction (see `### Redactions` under Blind Condition: Raw Output) demonstrates — that leak
+    used the word "markings," which isn't on the list, and was found only by a separate human/
+    code-review read-through, not by the automated grep.
+14. **This run cannot distinguish "no drift" from "suppressed variance."** The anchored chain
+    showed literally zero variance across all 5 steps and all 5 groups (R1 == R2 == R3 == R4 ==
+    R5 everywhere), while the blind (unanchored) condition showed a range of 1 on every group —
+    i.e. anchoring didn't just avoid a directional walk, it also flattened the model's own
+    natural per-call variability to nothing. RATCHET-NOT-OBSERVED only tests for directional
+    travel; it does not test for whether the anchored model quietly conformed to the fed-in prior
+    instead of independently re-deriving each rating from the photo. If that is what's happening,
+    it is a distinct, production-relevant failure mode from a "ratchet" — a genuine improvement
+    could be under-detected because the model leans on the prior rather than the current photo —
+    and this run's RATCHET-NOT-OBSERVED / D-08-NOT-ELIGIBLE verdicts should not be read as having
+    closed that risk. **Flag for Phase 17/18:** if PHYS-07's real prior-observation context is
+    wired in, consider a variant of this spike that also compares per-group variance between the
+    blind and anchored conditions, not just directional travel.
+
 **Downstream handoff.** ROADMAP Phase 15 success criterion #4 is now satisfied: Phase 16's
 observation schema is unblocked. Phase 16 consumes `PHYSIQUE_RATING_LEVELS` /
 `PHYSIQUE_RATING_ANCHORS`; Phase 17 consumes `PHYSIQUE_MIN_ELAPSED_DAYS` and
@@ -525,3 +611,17 @@ observation schema is unblocked. Phase 16 consumes `PHYSIQUE_RATING_LEVELS` /
 changed zero application code. `uv run pytest` green (1098 passed, 11 skipped). Photo deleted
 from the session scratchpad at the end of plan 15-01 Task 4; no image file exists anywhere in
 the repo.
+
+**Post-execution code review (2026-09-08):** `/code-review` ran a multi-agent review of this
+phase after both plans completed. It found one real leak that evaded the automated audit (see
+`### Redactions` above), one undisclosed edit to a line labeled "raw" (now disclosed under
+Mechanism Smoke Test), a self-contradictory constant (`PHYSIQUE_DIFF_MIN_LEVEL_DELTA`, corrected
+from 1 to 2 — see the comment above it), an imprecise literature citation in the D-08 draft (now
+corrected), and six methodological limitations of the pre-registered method itself, all now
+documented as `## Scope and Limitations` items 9-14. None of these changed the run's verdicts
+(BLIND-STABLE, RATCHET-NOT-OBSERVED, D-08 NOT ELIGIBLE all stand); all are corrections to the
+record's accuracy and completeness. Also flagged but explicitly left open, since they are outside
+this phase's plans: `.planning/config.json`'s `model_profile` was found already changed from
+`quality` to `balanced` in an earlier phase-15 planning commit with no recorded rationale, and
+`15-VALIDATION.md` remains in `draft` status with its sign-off checklist unchecked. Both are
+called out to the user rather than resolved here.

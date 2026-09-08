@@ -26,12 +26,12 @@ See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 ## Current Position
 
 Milestone: v2.1 Longitudinal Physique Analysis
-Phase: 15 (physique-rating-calibration-spike) — EXECUTING
+Phase: 15 (physique-rating-calibration-spike) — VERIFYING
 Plan: 2 of 2
 Status: Phase complete — ready for verification
 Last activity: 2026-09-08
 
-Progress: [──────────] 0% — 0/6 v2.1 phases complete
+Progress: [███───────] 33% — 2/6 v2.1 phases complete
 
 Two milestones shipped to date: v1.0 (7 phases, 65 plans) and v2.0 (6 phases, 34 plans).
 Phase numbering continues from v2.0's last phase (13); v2.1 runs Phase 14 through Phase 19:
@@ -47,6 +47,11 @@ Integration, 19 Production Deploy of Migration 0007.
 | v2.0 Apple Health & Coaching | 6 | 34 | 81 | 2026-09-02 → 2026-09-05 (4 days) | 220 |
 
 **Codebase at v2.0 close:** ~52.3k LOC in `backend/`, 925 test functions, 20 MCP tools.
+
+**Per-plan execution metrics (v2.1):**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
 | Phase 15 P01 | 35 min | 4 tasks | 1 files |
 | Phase 15 P02 | 13 min | 3 tasks | 1 files |
 
@@ -58,7 +63,8 @@ Full decision log lives in PROJECT.md Key Decisions table. All v2.0 decisions we
 validated at milestone close — no decision remains in "Pending" state.
 
 - [Phase 15]: Moved user-supplied photos out of the repo working directory into the session scratchpad rather than copying, since they arrived sitting untracked inside the repo folder itself. — Leaving copies of a real body photo inside a git working tree is a disclosure risk even if uncommitted; mv + git status verification closed it before any rating call.
-- [Phase 15]: Anchored chain in the 15-01 spike run showed zero drift across all 5 muscle groups (R1..R5 identical); blind condition was noisier on 3 of 5 groups. — Pre-registered ratchet rule requires |anchored_travel| >= 1 for RATCHET-OBSERVED/INCONCLUSIVE; with zero travel this run is very likely RATCHET-NOT-OBSERVED, which plan 15-02 should state plainly.
+- [Phase 15]: Anchored chain in the 15-01 spike run showed zero drift across all 5 muscle groups (R1..R5 identical). Plan 15-02's pre-registered analysis found the blind condition BLIND-STABLE (range exactly 1 on every group, not the noisier informal read this entry originally logged) and the ratchet verdict RATCHET-NOT-OBSERVED (every group's anchored_travel == 0). — Corrected here after plan 15-02 computed the actual rule-applied statistics; see 15-SPIKE-RESULT.md.
+- [Phase 15]: Post-execution code review found and fixed a self-contradictory constant (`PHYSIQUE_DIFF_MIN_LEVEL_DELTA` corrected 1→2), a real identifying-detail leak that evaded the automated audit (redacted), and an imprecise literature citation in the D-08 draft — none changed the run's verdicts. Full detail in 15-SPIKE-RESULT.md's "Post-execution code review" footer. — Documented so a future session doesn't need to re-discover these from the review transcript.
 
 ### Pending Todos
 
@@ -138,10 +144,11 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 
 ## Session Continuity
 
-Last session: 2026-09-08T05:11:15.560Z
-Stopped at: Completed 15-01-PLAN.md
-(18/18 mapped, all "Planned"), STATE.md updated. No plans exist yet for any v2.1 phase.
-Resume: `/gsd-discuss-phase 14`
+Last session: 2026-09-08T05:24:44Z
+Stopped at: Completed 15-02-PLAN.md; post-execution code review applied and phase-goal
+verification in progress within the same session.
+Resume: `/gsd-progress` to see current state, or `/gsd-discuss-phase 16` once Phase 15
+verification completes (Phase 14 is already complete — do not re-run its discuss step).
 
 ### v2.1 milestone-gate decisions (made before research, carry into requirements)
 
