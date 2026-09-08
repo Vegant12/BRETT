@@ -202,7 +202,65 @@ pending -- written by plan 15-02
 
 ## Anchored Condition: Raw Output
 
-pending -- written by plan 15-01 Task 4
+5 sequential isolated `Task(subagent_type="general-purpose")` calls on the same unchanged
+photo-set. A1 is unanchored (independent seed). A2-A5 each received the immediately preceding
+step's five verbatim rating lines as `PRIOR OBSERVATION ... approximately 30 days ago`, using
+the anchoring block pre-registered in `## Method`. No call was told the photo was unchanged.
+Raw output quoted verbatim.
+
+### A1 (seed, unanchored)
+
+> chest: Minimal - Pec outline is flat with no visible lower-chest line or separation from the shoulder in the front view.
+> lats: Minimal - Back shows no visible taper or width; no lat outline is apparent beneath the skin.
+> biceps: Minimal - Arms show almost no bulge or peak in either the front or side-profile view.
+> abs: Emerging - A faint vertical midline is visible but no segmented shape or separation is present.
+> side_delts: Minimal - Shoulders appear narrow and sloped, with no visible rounding or cap at the deltoid.
+
+### A2 (anchored to A1)
+
+> chest: Minimal - Pec outline remains flat with no visible separation from the shoulder in the front-facing view.
+> lats: Minimal - Back view shows straight sides with no taper or width, no lat outline beneath the skin.
+> biceps: Minimal - Arms show little bulge or peak across the front, back, and side-profile views.
+> abs: Emerging - A faint vertical midline is visible on the torso but no segmented shape appears.
+> side_delts: Minimal - Shoulders appear narrow and sloped, with no visible cap at the deltoid in front view.
+
+### A3 (anchored to A2)
+
+> chest: Minimal - Pec area remains flat in the front view with no visible separation from the shoulder.
+> lats: Minimal - Back view shows straight sides with no taper or visible lat width beneath the skin.
+> biceps: Minimal - Arms show little bulge or peak in relaxed front, back, and side-profile positions.
+> abs: Emerging - A faint vertical midline is visible on the torso but no segmented shape appears.
+> side_delts: Minimal - Shoulders appear narrow and sloped, with no visible cap at the deltoid in front view.
+
+### A4 (anchored to A3)
+
+> chest: Minimal - Pec area remains flat with no visible separation from the shoulder or upper abdomen in front views.
+> lats: Minimal - Back view shows straight sides with no visible taper or width beneath the skin.
+> biceps: Minimal - Arms show little bulge or peak in relaxed front, back, and side positions.
+> abs: Emerging - A faint vertical midline is visible but no segmented shape appears on the torso.
+> side_delts: Minimal - Shoulders appear narrow and sloped, with no visible cap at the deltoid.
+
+### A5 (anchored to A4)
+
+> chest: Minimal - Pec area remains flat with no visible separation from shoulder or upper abdomen in front or side views.
+> lats: Minimal - Back view shows straight sides with no visible taper or width beneath the skin.
+> biceps: Minimal - Arms show little bulge or peak in relaxed front, back, and side positions.
+> abs: Emerging - A faint vertical midline is visible on the front view but no segmented shape appears.
+> side_delts: Minimal - Shoulders appear narrow and sloped in front and side views, with no visible deltoid cap.
+
+### Anchored chain rating matrix
+
+| Muscle group | A1 | A2 | A3 | A4 | A5 |
+|---|---|---|---|---|---|
+| chest | Minimal | Minimal | Minimal | Minimal | Minimal |
+| lats | Minimal | Minimal | Minimal | Minimal | Minimal |
+| biceps | Minimal | Minimal | Minimal | Minimal | Minimal |
+| abs | Emerging | Emerging | Emerging | Emerging | Emerging |
+| side_delts | Minimal | Minimal | Minimal | Minimal | Minimal |
+
+(Level names only. First-vs-last diff and monotonic-direction counts are computed in
+`## Anchored Condition: Analysis` by plan 15-02, using the decision rule pre-registered in
+`## Method`.)
 
 ## Anchored Condition: Analysis
 
