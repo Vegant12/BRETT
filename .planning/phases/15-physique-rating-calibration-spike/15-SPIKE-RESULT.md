@@ -1,0 +1,225 @@
+# Phase 15 — PHYS-12 Physique Rating Calibration Spike Record
+
+**Purpose:** the durable record ROADMAP.md Phase 15 success criterion #1 requires. It measures
+how much a Claude-produced 5-level ordinal muscle-development rating moves across repeated
+**blind** calls on an unchanged real photo-set (test-retest noise), and across an **anchored**
+chain that mirrors PHYS-07's prior-observation-as-context mitigation (success criterion #2:
+does that mitigation produce a self-reinforcing ratchet?). Success criterion #4 blocks Phase
+16's observation schema until this file exists. Phase 16's schema and Phase 17's
+`app/analytics/physique.py` consume the `## Recommended Constants` section verbatim.
+
+**Authority of this record (D-07):** it may set (a) a recommended minimum-elapsed-time floor and
+(b) confirmation or refinement of PHYS-01's anchor wording. PHYS-01's 5-level count and
+PHYS-09's pure-ordinal-diff design (no arithmetic beyond ordinal comparison) stay locked
+regardless of what this spike found.
+
+## Method
+
+Pre-registered on 2026-09-08, **before any rating call output was collected**, so the analysis in
+plan 15-02 cannot be reverse-fitted to the data.
+
+| Field | Value |
+|---|---|
+| Date run | 2026-09-08 |
+| Specimen | ONE real photo-set (1-3 shots from a single session), unchanged across all calls (D-03) |
+| Photo handling | Session scratchpad only; never committed, deleted after the last call (D-02) |
+| Rated groups (D-05) | `chest`, `lats`, `biceps`, `abs`, `side_delts` |
+| Excluded groups | `abductors`, `adductors` — PHYS-02 permanently not-assessable from standard photos |
+| Blind condition (D-04, D-06) | 5 independent `Task(subagent_type="general-purpose")` calls, fresh context each, no knowledge of each other |
+| Anchored condition (D-04, D-06) | 5 sequential calls: A1 unanchored (seed), A2-A5 each fed the previous step's full rating output as "prior observation" text — 4 anchored transitions |
+| Total real calls | 10 (plus 1 discarded smoke test) |
+| Statistics | Mode, range, exact-agreement count (blind); first-vs-last ordinal diff, monotonic-direction count (anchored). **No kappa, no ICC, no p-value** — this is a single-specimen repeatability design, not a multi-subject reliability study; those formulas do not apply and a fabricated one would misrepresent N=5 |
+
+### Ordinal index
+
+`Minimal`=1, `Emerging`=2, `Developed`=3, `Well-Developed`=4, `Standout`=5, `Not Assessable`=NA.
+
+### Pre-registered ratchet decision rule
+
+Applied per muscle group by plan 15-02, to the anchored chain R1..R5:
+
+- `anchored_travel` = index(R5) − index(R1)
+- `opposing_count` = of the 4 step-to-step transitions, how many move opposite in sign to `anchored_travel`
+- `blind_range` = max index − min index across the 5 blind draws for the same group
+
+Verdicts:
+
+- **RATCHET-OBSERVED** — at least one group has `|anchored_travel| >= 1` AND `opposing_count == 0`
+  AND `blind_range == 0` for that same group. (The blind condition was perfectly stable on this
+  group while the anchored chain walked one direction — the movement cannot be base noise.)
+- **RATCHET-INCONCLUSIVE** — at least one group has `|anchored_travel| >= 1` AND
+  `opposing_count == 0`, but `blind_range >= 1` for that group. (The anchored walk is not
+  distinguishable from the blind condition's own scatter at N=5.)
+- **RATCHET-NOT-OBSERVED** — no group meets either condition above.
+
+Blind-condition verdict:
+
+- **BLIND-STABLE** — every rated group has `blind_range <= 1` AND its modal level was returned
+  by at least 3 of the 5 draws.
+- **BLIND-NOISY** — any rated group fails either half of that.
+
+### Exact rating prompt (blind condition, verbatim)
+
+```text
+You are rating a set of physique progress photos for a personal fitness tracking system.
+
+Read the image file(s) at these absolute paths using your Read tool:
+<ABSOLUTE_SCRATCHPAD_PATH_1>
+<ABSOLUTE_SCRATCHPAD_PATH_2 if present>
+<ABSOLUTE_SCRATCHPAD_PATH_3 if present>
+
+Rate exactly these five muscle groups, in this order:
+chest, lats, biceps, abs, side_delts
+
+Use this fixed 5-level ordinal scale. Do not invent intermediate levels, do not use
+half-steps, do not use numbers other than these names:
+
+1. Minimal - the group shows little visible development; its outline is not apparent
+   in this photo set.
+2. Emerging - the group's outline is visible but shallow; shape is suggested rather
+   than defined.
+3. Developed - the group has clear shape and visible separation from adjacent groups.
+4. Well-Developed - the group is clearly fuller or more defined than the average group
+   on THIS person's own body.
+5. Standout - the group is among the most developed on THIS person's own body; it is
+   the group a viewer would notice first.
+
+Levels 4 and 5 are defined relative to THIS SAME PERSON's own body only. Never compare
+against another person, an athlete, a competitor, or any population standard.
+
+If the photo set does not show a group well enough to place it on the scale, answer
+`Not Assessable` for that group and give a one-line reason instead of a level.
+
+Describe ONLY muscle development. Do not describe or mention the background, clothing,
+face, hair, tattoos, location, or any other identifying feature.
+
+Reply with exactly these five lines and nothing else - no preamble, no summary, no
+caveats:
+
+chest: <level name or Not Assessable> - <one sentence, 20 words maximum>
+lats: <level name or Not Assessable> - <one sentence, 20 words maximum>
+biceps: <level name or Not Assessable> - <one sentence, 20 words maximum>
+abs: <level name or Not Assessable> - <one sentence, 20 words maximum>
+side_delts: <level name or Not Assessable> - <one sentence, 20 words maximum>
+```
+
+### Exact anchoring block (anchored condition, prepended to the same prompt for A2..A5)
+
+```text
+PRIOR OBSERVATION - the most recent physique observation on record for this person,
+recorded approximately 30 days ago:
+
+<the previous step's five verbatim rating lines>
+
+Use it as context for how this person was previously assessed.
+
+---
+```
+
+The anchoring block deliberately carries NO mitigation instruction. D-08's proposed mitigation
+("derive each rating primarily from the photo; treat the prior observation as a sanity check,
+not a target") is what this spike RECOMMENDS if a ratchet appears — including it in the prompt
+would measure the mitigated system rather than the PHYS-07 system as currently specified. The
+anchored calls are also never told the photo is the same photo, because in production it never
+would be.
+
+## Mechanism Smoke Test
+
+One throwaway `Task(subagent_type="general-purpose")` call, discarded from the sample, run
+before the 10 real calls to verify 15-RESEARCH.md Assumption A1 (a spawned subagent can
+independently `Read` an image at a path) and Open Question 1 (`Task` is actually available in
+the post-checkpoint MAIN context).
+
+| Field | Value |
+|---|---|
+| Verdict | SMOKE-PASS |
+
+**Raw reply:**
+
+> IMAGE-VISIBLE: shirtless man standing
+
+## Blind Condition: Raw Output
+
+5 independent isolated `Task(subagent_type="general-purpose")` calls, byte-identical prompts,
+same unchanged photo-set, no shared context. Raw output quoted verbatim — never paraphrased.
+
+### B1
+
+> chest: Emerging - Chest shows a slight rounded mound but lacks fullness or separation from surrounding tissue.
+> lats: Emerging - Back view shows a mild taper from shoulders to waist without visible width or separation.
+> biceps: Emerging - Relaxed arm shows a modest rounded shape without a distinct peak or separation.
+> abs: Emerging - A faint centerline is visible on the torso but no distinct segmented definition.
+> side_delts: Emerging - Shoulders show a rounded cap that blends into the upper arm without clear separation.
+
+### B2
+
+> chest: Emerging - Chest shows a slight rounded shape but no visible separation from surrounding muscle in these photos.
+> lats: Minimal - Back view shows little taper from shoulders to waist; outline is not clearly apparent here.
+> biceps: Emerging - Upper arm shows a slight rounded bulge but shape is not clearly defined in these photos.
+> abs: Emerging - A faint central abdominal line is visible but no segment separation appears in these photos.
+> side_delts: Emerging - Shoulder caps show slight rounding but lack defined separation from chest and arms.
+
+### B3
+
+> chest: Emerging - A slight pectoral mound is visible in the front view, but no separation or defined shape.
+> lats: Minimal - The back view shows no visible V-taper or lat outline beneath the skin surface.
+> biceps: Minimal - Arms are shown relaxed in every photo, showing little visible bulge or muscle shape.
+> abs: Minimal - The front-view torso appears smooth with no visible abdominal separation or definition.
+> side_delts: Not Assessable - No photo shows arms raised or flexed to reveal deltoid shape or rounding.
+
+### B4
+
+> chest: Minimal - Chest appears flat with no visible pectoral shape or separation from surrounding tissue in this photo set.
+> lats: Minimal - Back appears narrow with little visible width or taper in the rear-view photo.
+> biceps: Minimal - Arms show no visible muscle bulge or definition at rest across these photos.
+> abs: Emerging - Stomach shows a faint centerline but no distinct segmented shape in this photo set.
+> side_delts: Emerging - Shoulders show a slightly rounded cap, though shape remains shallow in these photos.
+
+### B5
+
+> chest: Emerging - Outline visible but shallow; pecs show slight shape without clear separation from surrounding tissue.
+> lats: Not Assessable - Skin markings across the back obscure the detail needed to judge lat width or taper.
+> biceps: Emerging - Arms show mild shape in relaxed poses, but no flexed view confirms further definition.
+> abs: Emerging - A faint centerline is visible on a flat stomach, but no clear muscle separation shows.
+> side_delts: Developed - The shoulder shows a rounded, capped shape, fuller than the flatter chest and abs.
+
+### Blind condition rating matrix
+
+| Muscle group | B1 | B2 | B3 | B4 | B5 |
+|---|---|---|---|---|---|
+| chest | Emerging | Emerging | Emerging | Minimal | Emerging |
+| lats | Emerging | Minimal | Minimal | Minimal | Not Assessable |
+| biceps | Emerging | Emerging | Minimal | Minimal | Emerging |
+| abs | Emerging | Emerging | Minimal | Emerging | Emerging |
+| side_delts | Emerging | Emerging | Not Assessable | Emerging | Developed |
+
+(Level names only, transcribed from the verbatim blocks above. Mode / range / exact-agreement
+counts are computed in `## Blind Condition: Analysis` by plan 15-02.)
+
+## Blind Condition: Analysis
+
+pending -- written by plan 15-02
+
+## Anchored Condition: Raw Output
+
+pending -- written by plan 15-01 Task 4
+
+## Anchored Condition: Analysis
+
+pending -- written by plan 15-02
+
+## Ratchet Verdict
+
+pending -- written by plan 15-02
+
+## D-08 Instruction-Level Mitigation Draft
+
+pending -- written by plan 15-02
+
+## Recommended Constants
+
+pending -- written by plan 15-02
+
+## Scope and Limitations
+
+pending -- written by plan 15-02
