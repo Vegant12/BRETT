@@ -518,3 +518,10 @@ What this record does NOT support, stated plainly so a Phase 16/17 reader does n
 observation schema is unblocked. Phase 16 consumes `PHYSIQUE_RATING_LEVELS` /
 `PHYSIQUE_RATING_ANCHORS`; Phase 17 consumes `PHYSIQUE_MIN_ELAPSED_DAYS` and
 `PHYSIQUE_DIFF_MIN_LEVEL_DELTA` plus, if eligible, the D-08 mitigation draft.
+
+---
+
+**Phase-close confirmation (2026-09-08):** `git diff --name-only backend/` empty — this phase
+changed zero application code. `uv run pytest` green (1098 passed, 11 skipped). Photo deleted
+from the session scratchpad at the end of plan 15-01 Task 4; no image file exists anywhere in
+the repo.
