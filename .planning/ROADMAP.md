@@ -98,7 +98,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 15-01-PLAN.md — Pause for the user's real photo-set, stage it in the session scratchpad, smoke-test isolated-subagent image reads, pre-register the ratchet decision rule, then collect 5 blind ratings and a 5-step anchored chain as verbatim evidence
+- [x] 15-01-PLAN.md — Pause for the user's real photo-set, stage it in the session scratchpad, smoke-test isolated-subagent image reads, pre-register the ratchet decision rule, then collect 5 blind ratings and a 5-step anchored chain as verbatim evidence
 - [ ] 15-02-PLAN.md — Compute both conditions' descriptive statistics, state the ratchet verdict by the pre-registered rule, write the named constants Phase 16/17 copy verbatim, and run the leak/zero-code-change audit
 
 ### Phase 16: Physique Data Model & Repository
@@ -168,7 +168,7 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 12. Training Programs & Confirm-Gated Write Tool | 5/5 | Shipped (v2.0) | 2026-09-04 |
 | 13. Health Analytics, Reports & Coaching Style | 10/10 | Shipped (v2.0) | 2026-09-05 |
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
-| 15. Physique Rating Calibration Spike | 0/2 | Not started | - |
+| 15. Physique Rating Calibration Spike | 1/2 | In Progress|  |
 | 16. Physique Data Model & Repository | 0/TBD | Not started | - |
 | 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |

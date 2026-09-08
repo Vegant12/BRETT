@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
 status: executing
-stopped_at: Phase 15 context gathered
-last_updated: "2026-09-07T06:21:48.960Z"
-last_activity: 2026-09-07
+stopped_at: Completed 15-01-PLAN.md
+last_updated: "2026-09-08T05:11:51.370Z"
+last_activity: 2026-09-08
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
-  percent: 100
+  total_plans: 5
+  completed_plans: 4
+  percent: 80
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 14 — deploy-pipeline-migration-safety
+**Current focus:** Phase 15 — physique-rating-calibration-spike
 
 ## Current Position
 
 Milestone: v2.1 Longitudinal Physique Analysis
-Phase: 15
-Plan: Not started
-Status: Executing Phase 14
-Last activity: 2026-09-07
+Phase: 15 (physique-rating-calibration-spike) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
+Last activity: 2026-09-08
 
 Progress: [──────────] 0% — 0/6 v2.1 phases complete
 
@@ -47,6 +47,7 @@ Integration, 19 Production Deploy of Migration 0007.
 | v2.0 Apple Health & Coaching | 6 | 34 | 81 | 2026-09-02 → 2026-09-05 (4 days) | 220 |
 
 **Codebase at v2.0 close:** ~52.3k LOC in `backend/`, 925 test functions, 20 MCP tools.
+| Phase 15 P01 | 35 min | 4 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -54,6 +55,9 @@ Integration, 19 Production Deploy of Migration 0007.
 
 Full decision log lives in PROJECT.md Key Decisions table. All v2.0 decisions were
 validated at milestone close — no decision remains in "Pending" state.
+
+- [Phase 15]: Moved user-supplied photos out of the repo working directory into the session scratchpad rather than copying, since they arrived sitting untracked inside the repo folder itself. — Leaving copies of a real body photo inside a git working tree is a disclosure risk even if uncommitted; mv + git status verification closed it before any rating call.
+- [Phase 15]: Anchored chain in the 15-01 spike run showed zero drift across all 5 muscle groups (R1..R5 identical); blind condition was noisier on 3 of 5 groups. — Pre-registered ratchet rule requires |anchored_travel| >= 1 for RATCHET-OBSERVED/INCONCLUSIVE; with zero travel this run is very likely RATCHET-NOT-OBSERVED, which plan 15-02 should state plainly.
 
 ### Pending Todos
 
@@ -133,8 +137,8 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 
 ## Session Continuity
 
-Last session: 2026-09-07T06:21:48.952Z
-Stopped at: Phase 15 context gathered
+Last session: 2026-09-08T05:11:15.560Z
+Stopped at: Completed 15-01-PLAN.md
 (18/18 mapped, all "Planned"), STATE.md updated. No plans exist yet for any v2.1 phase.
 Resume: `/gsd-discuss-phase 14`
 

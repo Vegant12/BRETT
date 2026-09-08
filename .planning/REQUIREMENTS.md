@@ -30,7 +30,7 @@
 
 ### Rating Calibration
 
-- [ ] **PHYS-12**: Before the observation schema is finalized, a spike measures actual rating movement across repeated, blind and anchored calls on the same photo set. Its results set the diff thresholds and any elapsed-time floor, rather than those being guessed. The spike explicitly tests whether the anchoring mitigation in PHYS-07 causes a self-reinforcing ratchet — a slow drift no adjacent-pair diff can detect because every individual month-to-month comparison still looks reasonable
+- [x] **PHYS-12**: Before the observation schema is finalized, a spike measures actual rating movement across repeated, blind and anchored calls on the same photo set. Its results set the diff thresholds and any elapsed-time floor, rather than those being guessed. The spike explicitly tests whether the anchoring mitigation in PHYS-07 causes a self-reinforcing ratchet — a slow drift no adjacent-pair diff can detect because every individual month-to-month comparison still looks reasonable
 
 ### Monthly Report Integration
 
