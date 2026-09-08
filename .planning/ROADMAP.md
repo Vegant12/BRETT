@@ -95,7 +95,11 @@ Plans:
   2. The spike explicitly tests and reports whether PHYS-07's prior-observation-as-context mitigation produces a self-reinforcing ratchet — a slow drift no adjacent-pair diff can detect.
   3. The spike's findings state concrete recommended values (rating step count/anchors, diff thresholds, any minimum-elapsed-time floor) that Phase 16's schema and Phase 17's analytics consume as constants.
   4. Phase 16's observation schema is not started until this result exists.
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 15-01-PLAN.md — Pause for the user's real photo-set, stage it in the session scratchpad, smoke-test isolated-subagent image reads, pre-register the ratchet decision rule, then collect 5 blind ratings and a 5-step anchored chain as verbatim evidence
+- [ ] 15-02-PLAN.md — Compute both conditions' descriptive statistics, state the ratchet verdict by the pre-registered rule, write the named constants Phase 16/17 copy verbatim, and run the leak/zero-code-change audit
 
 ### Phase 16: Physique Data Model & Repository
 **Goal**: A physique observation's full shape — ratings, notes, confounder metadata, not-assessable handling — persists correctly and reads back out cleanly, with no MCP surface yet.
@@ -164,7 +168,7 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 12. Training Programs & Confirm-Gated Write Tool | 5/5 | Shipped (v2.0) | 2026-09-04 |
 | 13. Health Analytics, Reports & Coaching Style | 10/10 | Shipped (v2.0) | 2026-09-05 |
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
-| 15. Physique Rating Calibration Spike | 0/TBD | Not started | - |
+| 15. Physique Rating Calibration Spike | 0/2 | Not started | - |
 | 16. Physique Data Model & Repository | 0/TBD | Not started | - |
 | 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
