@@ -63,7 +63,7 @@ numbering from v2.0's last phase (13); it does not restart at 1.
 
 - [x] **Phase 14: Deploy Pipeline Migration Safety** - Close the deploy-migration gap before this milestone ships its own new migration (completed 2026-09-07)
 - [x] **Phase 15: Physique Rating Calibration Spike** - Measure real rating drift/anchoring before the observation schema locks (completed 2026-09-08)
-- [ ] **Phase 16: Physique Data Model & Repository** - Persist a physique observation's full shape with no MCP surface yet
+- [x] **Phase 16: Physique Data Model & Repository** - Persist a physique observation's full shape with no MCP surface yet (completed 2026-09-09)
 - [ ] **Phase 17: Physique Analytics & MCP Read/Write Tools** - Claude can log and retrieve physique observations; diff and volume-correlation analytics land alongside
 - [ ] **Phase 18: Monthly Report Physique Integration** - The monthly report gains a physique section; the weekly report structurally cannot
 - [ ] **Phase 19: Production Deploy of Migration 0007** - Prove Phase 14's fix works by deploying this milestone's own migration through it
@@ -116,7 +116,7 @@ Plans:
 Plans:
 - [x] 16-01-PLAN.md — Declare the PhysiqueObservation/PhysiqueRating models with the Phase 15 locked constants and extend the fast-suite metadata guards
 - [x] 16-02-PLAN.md — Hand-write migration 0007, wire the new tables into the test-fixture purge, and prove every CHECK constraint refuses a real bad value
-- [ ] 16-03-PLAN.md — Build repositories/physique.py (create_observation + get_latest_observation) and prove the 19-row round trip, refusal paths and tenant scoping
+- [x] 16-03-PLAN.md — Build repositories/physique.py (create_observation + get_latest_observation) and prove the 19-row round trip, refusal paths and tenant scoping
 
 ### Phase 17: Physique Analytics & MCP Read/Write Tools
 **Goal**: Claude can record one physique observation per photo session and retrieve the prior one for context; deterministic diff and volume-correlation analytics exist underneath; the write-tool guard suite reflects a truthful two-write-module system rather than a widened but still-uniform one.
@@ -174,7 +174,7 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 13. Health Analytics, Reports & Coaching Style | 10/10 | Shipped (v2.0) | 2026-09-05 |
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
 | 15. Physique Rating Calibration Spike | 2/2 | Complete    | 2026-09-08 |
-| 16. Physique Data Model & Repository | 2/3 | In Progress|  |
+| 16. Physique Data Model & Repository | 3/3 | Complete   | 2026-09-09 |
 | 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
 | 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
