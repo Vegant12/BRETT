@@ -11,6 +11,7 @@ Every new model must be imported here.
 from app.db.models.body import BodyMeasurement
 from app.db.models.exercise import ExerciseMuscle, ExerciseMuscleOverride, ExerciseTemplate
 from app.db.models.health import HealthDailyMetric
+from app.db.models.physique import PhysiqueObservation, PhysiqueRating
 from app.db.models.program import ProgramPeriod, ProgramSwitchToken
 from app.db.models.sync_state import SyncState
 from app.db.models.user import User
@@ -22,6 +23,8 @@ __all__ = [
     "ExerciseMuscleOverride",
     "ExerciseTemplate",
     "HealthDailyMetric",
+    "PhysiqueObservation",
+    "PhysiqueRating",
     "ProgramPeriod",
     "ProgramSwitchToken",
     "SyncState",

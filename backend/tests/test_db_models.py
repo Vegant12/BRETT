@@ -15,6 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.config import Settings
 from app.db.base import NAMING_CONVENTION, Base, TimestampMixin
 from app.db.models import User
+from app.db.models.physique import (
+    PHYSIQUE_RATING_ANCHORS,
+    PHYSIQUE_RATING_LEVELS,
+    PhysiqueRatingLevel,
+)
 from app.db.session import make_engine, make_sessionmaker
 
 # Same shape as the live-schema guard in `test_hevy_schema.py`, applied one layer
@@ -29,13 +34,17 @@ def test_metadata_contains_expected_tables() -> None:
     Kept as an equality assertion, not a subset check: the value of this test is that a
     stray model or a typo'd `__tablename__` fails the FAST suite on the commit that
     introduces it. This is the complete Phase 3 schema plus Phase 8's single addition,
-    plus Phase 12's two additions.
+    plus Phase 12's two additions, plus Phase 16's two additions.
 
     `health_daily_metrics` is the ONLY table Phase 8 adds (D-02). A `health_workouts`
     appearing here would mean the Hevy-re-export exclusion had been reopened.
     `user_program_history` and `program_switch_tokens` are the ONLY tables Phase 12
     adds (GOAL-01); a mutable `users.active_program` column appearing instead of
     `user_program_history` would mean PITFALLS #16 had been reopened.
+
+    `physique_observations` and `physique_ratings` are the ONLY tables Phase 16 adds
+    (PHYS-03). A `physique_photos` table appearing here would mean the milestone-gate
+    decision that BRETT never stores photos had been reopened.
     """
     assert set(Base.metadata.tables) == {
         "users",
@@ -50,6 +59,8 @@ def test_metadata_contains_expected_tables() -> None:
         "health_daily_metrics",
         "user_program_history",
         "program_switch_tokens",
+        "physique_observations",
+        "physique_ratings",
     }
 
 
@@ -144,6 +155,123 @@ def test_health_daily_metric_value_is_fractional_safe() -> None:
     assert column.nullable is False
 
 
+def test_physique_rating_levels_are_the_five_spike_confirmed_values() -> None:
+    """PHYS-01: five levels, no invented intermediate, in ordinal order.
+
+    The Phase 15 spike (15-SPIKE-RESULT.md, ANCHORS-CONFIRMED) placed every assessable group
+    on exactly one of these five and used `Not Assessable` rather than blurring two adjacent
+    definitions. Declaration order IS ordinal order -- Phase 17's diff indexes into it.
+    """
+    assert PHYSIQUE_RATING_LEVELS == (
+        "Minimal",
+        "Emerging",
+        "Developed",
+        "Well-Developed",
+        "Standout",
+    )
+    assert tuple(level.value for level in PhysiqueRatingLevel) == PHYSIQUE_RATING_LEVELS
+
+
+def test_physique_rating_anchors_travel_verbatim() -> None:
+    """PHYS-01: the anchor wording is one constant so it cannot drift between sessions.
+
+    Same posture as `recomposition.INTERPRETATION_DISCLAIMER`. Level 5 is defined relative to
+    THIS person's own body, which is what structurally forbids population comparison.
+    """
+    assert PHYSIQUE_RATING_ANCHORS.startswith("1. Minimal - the group shows little visible")
+    assert "on THIS person's own body" in PHYSIQUE_RATING_ANCHORS
+    for level in PHYSIQUE_RATING_LEVELS:
+        assert level in PHYSIQUE_RATING_ANCHORS, level
+    # No population comparison anywhere in the anchors.
+    assert "average person" not in PHYSIQUE_RATING_ANCHORS
+
+
+def test_physique_note_field_caps_are_not_transposed() -> None:
+    """D-04/D-05/D-06 give four similar free-text fields three DIFFERENT caps.
+
+    16-RESEARCH.md Pitfall 5: copy-pasting one column declaration for another transposes them,
+    and nothing else in the suite would notice.
+    """
+    observation = Base.metadata.tables["physique_observations"].c
+    assert observation.leanness_notes.type.length == 500
+    assert observation.conditioning_notes.type.length == 500
+    assert observation.symmetry_notes.type.length == 500
+    assert observation.conditions_note.type.length == 200
+    assert Base.metadata.tables["physique_ratings"].c.not_assessable_reason.type.length == 160
+
+
+def test_physique_observation_date_is_a_calendar_date() -> None:
+    """`observed_on` is a DATE for the same reason `body_measurements.measured_on` is.
+
+    A photo session happens on a calendar day in Asia/Jakarta; storing a TIMESTAMPTZ would
+    require inventing a time of day, and PHYSIQUE_MIN_ELAPSED_DAYS would then be measured
+    against the invented value.
+    """
+    column = Base.metadata.tables["physique_observations"].c.observed_on
+    assert isinstance(column.type, sa.Date)
+    assert not isinstance(column.type, sa.DateTime)
+    assert column.nullable is False
+
+
+def test_physique_vocabularies_are_check_constrained_not_native_enums() -> None:
+    """PHYS-03/D-02: `String` + named CHECK, never a pg ENUM whose pg_type outlives DROP TABLE.
+
+    A native ENUM makes `downgrade()` incomplete unless it also calls `sa.Enum(...).drop()`,
+    which is easy to forget and is exactly what `test_migrations_round_trip` catches.
+    """
+    names = sorted(
+        constraint.name
+        for table_name in ("physique_observations", "physique_ratings")
+        for constraint in Base.metadata.tables[table_name].constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    )
+    assert names == [
+        "ck_physique_observations_valid_photo_angles",
+        "ck_physique_observations_valid_pose_state",
+        "ck_physique_ratings_rating_xor_not_assessable",
+        "ck_physique_ratings_valid_rating_level",
+    ]
+    for table_name, column_name in (
+        ("physique_ratings", "rating_level"),
+        ("physique_observations", "pose_state"),
+    ):
+        column = Base.metadata.tables[table_name].c[column_name]
+        assert type(column.type).__name__ == "String", (table_name, column_name)
+
+
+def test_physique_ratings_unique_key_is_observation_and_muscle_group() -> None:
+    """D-07/D-08: exactly one row per (observation, muscle_group), enforced by PostgreSQL.
+
+    D-07 writes all 19 groups unconditionally, so "missing entirely" is never a third state
+    beside "rated" and "Not Assessable" -- but only if the database refuses the duplicate.
+    """
+    table = Base.metadata.tables["physique_ratings"]
+    unique = {
+        constraint.name: [column.name for column in constraint.columns]
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert unique["uq_physique_ratings_observation_id_muscle_group"] == [
+        "observation_id",
+        "muscle_group",
+    ]
+
+
+def test_physique_supersede_fk_nulls_rather_than_cascades() -> None:
+    """D-01 + 16-RESEARCH.md Pitfall 4: `superseded_by_id` must be SET NULL, not CASCADE.
+
+    Every other FK in this schema is CASCADE, which makes CASCADE the paste-of-least-resistance.
+    Here it would mean deleting a newer, superseding observation reaches back into the older row
+    it merely references -- wrong for an append-only ledger.
+    """
+    columns = Base.metadata.tables["physique_observations"].c
+    supersede_fk = next(iter(columns.superseded_by_id.foreign_keys))
+    assert supersede_fk.ondelete == "SET NULL"
+    assert supersede_fk.column.table.name == "physique_observations"
+    child_fk = next(iter(Base.metadata.tables["physique_ratings"].c.observation_id.foreign_keys))
+    assert child_fk.ondelete == "CASCADE"
+
+
 def test_sync_state_unique_constraint_enables_upsert() -> None:
     """HEVY-09: one cursor row per (user, provider, resource), enforced by the DB.
 
@@ -209,6 +337,8 @@ def test_reference_models_declare_no_relationships() -> None:
         ExerciseMuscleOverride,
         ExerciseTemplate,
         HealthDailyMetric,
+        PhysiqueObservation,
+        PhysiqueRating,
         SyncState,
     )
 
@@ -218,6 +348,8 @@ def test_reference_models_declare_no_relationships() -> None:
         ExerciseMuscleOverride,
         ExerciseTemplate,
         HealthDailyMetric,
+        PhysiqueObservation,
+        PhysiqueRating,
         SyncState,
     ):
         assert list(model.__mapper__.relationships) == [], model.__name__
@@ -234,6 +366,9 @@ def test_reference_tables_are_scoped_to_a_user() -> None:
         # server-side. This model must offer no path for a payload-supplied one.
         "health_daily_metrics",
         "sync_state",
+        # PHYS-03: the observation header owns the tenant; physique_ratings is scoped
+        # through its FK to the header and has no user_id column of its own, by design.
+        "physique_observations",
     ):
         table = Base.metadata.tables[table_name]
         assert table.c.user_id.nullable is False, table_name

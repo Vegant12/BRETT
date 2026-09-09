@@ -86,4 +86,12 @@ UNION ALL
   SELECT 'program_switch_tokens', count(*),
          md5(string_agg(md5(x::text), ',' ORDER BY x.id))
     FROM program_switch_tokens x
+UNION ALL
+  SELECT 'physique_observations', count(*),
+         md5(string_agg(md5(x::text), ',' ORDER BY x.id))
+    FROM physique_observations x
+UNION ALL
+  SELECT 'physique_ratings', count(*),
+         md5(string_agg(md5(x::text), ',' ORDER BY x.id))
+    FROM physique_ratings x
 ORDER BY 1;
