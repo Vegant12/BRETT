@@ -1,0 +1,283 @@
+"""Read and write physique observations (PHYS-01..PHYS-05).
+
+This module is the ONE writer of `physique_observations` and `physique_ratings`. Every
+function takes an `AsyncSession` positionally and never commits — the CALLER owns the
+transaction, the same contract `programs.py` states, so Phase 17's MCP tool can make the
+commit the last statement it executes.
+
+D-07: an observation is ALWAYS all 19 `CanonicalMuscleGroup` rows, never a subset. Each row is
+either a rating level or `Not Assessable` with a reason. That makes "missing entirely" a
+non-state, so Phase 17's diff never has to distinguish three cases where two will do, and it
+is why the two hip-stabilizer groups a standard photo set never shows need no special-casing
+(PHYS-02): they take the identical path every other group takes and simply end up
+`Not Assessable` in ordinary use.
+
+ASVS V4: every function takes `user_id` explicitly and puts it in the predicate. There is one
+user today; the query that forgets the predicate is the one that would still be there when
+there are two.
+
+No ORM relationship mapping and no eager-loading helper are used anywhere in this module:
+`test_db_models.test_reference_models_declare_no_relationships`
+bans lazy-loadable relationships repo-wide because async lazy-load raises `MissingGreenlet`.
+`get_latest_observation` therefore issues two explicit queries and assembles a frozen
+dataclass, the same shape `repositories/workouts.py` returns.
+
+NOT implemented here, on purpose: PHYS-08's supersede WRITE, and any supersede-aware
+filtering on the read. D-01 pulls only the supersede COLUMNS forward into migration 0007;
+the semantics are Phase 17's. `get_latest_observation` today returns the newest observation
+whether or not it is superseded — see its docstring.
+"""
+
+import datetime as dt
+import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from sqlalchemy import insert, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models.physique import (
+    PhysiqueObservation,
+    PhysiqueRating,
+    PhysiqueRatingLevel,
+    PoseState,
+)
+from app.normalization.muscles import CanonicalMuscleGroup
+
+# D-05. A `not_assessable_reason` past this length is refused here rather than left for
+# asyncpg to truncate mid-transaction, aborting the session on a write that started clean.
+_NOT_ASSESSABLE_REASON_MAX_LENGTH = 160
+
+
+@dataclass(frozen=True, slots=True)
+class RatingEntry:
+    """One muscle group's verdict. Exactly one of the two optional fields is set.
+
+    Used for BOTH the write input and the read output: an entry that round-trips unchanged is
+    easier to reason about than an input type and a near-identical output type that can drift.
+    """
+
+    muscle_group: CanonicalMuscleGroup
+    rating_level: PhysiqueRatingLevel | None = None
+    not_assessable_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PhysiqueObservationRecord:
+    """One whole observation: the header's own facts plus all 19 ratings.
+
+    `ratings` is always length 19, ordered by `CanonicalMuscleGroup` declaration order, so a
+    caller can zip it against the enum without sorting.
+    """
+
+    id: uuid.UUID
+    observed_on: dt.date
+    leanness_notes: str | None
+    conditioning_notes: str | None
+    symmetry_notes: str | None
+    photo_angles_present: tuple[str, ...]
+    pose_state: PoseState
+    conditions_note: str | None
+    superseded_at: dt.datetime | None
+    superseded_reason: str | None
+    superseded_by_id: uuid.UUID | None
+    created_at: dt.datetime
+    ratings: tuple[RatingEntry, ...]
+
+
+def _validate_rating_coverage(ratings: Sequence[RatingEntry]) -> None:
+    """D-07: exactly one entry per CanonicalMuscleGroup, each a level XOR a reason.
+
+    Raises `ValueError` naming the offending groups. The database's own constraints
+    (`uq_physique_ratings_observation_id_muscle_group`,
+    `ck_physique_ratings_rating_xor_not_assessable`) are the backstop for any writer that
+    bypasses this module -- not the first line of defence for this one, which would leave a
+    half-written observation to clean up.
+    """
+    seen: set[CanonicalMuscleGroup] = set()
+    duplicates: set[CanonicalMuscleGroup] = set()
+    for entry in ratings:
+        if entry.muscle_group in seen:
+            duplicates.add(entry.muscle_group)
+        seen.add(entry.muscle_group)
+    if duplicates:
+        raise ValueError(
+            "physique observation has duplicate rating rows for: "
+            f"{sorted(group.value for group in duplicates)}"
+        )
+
+    missing = set(CanonicalMuscleGroup) - seen
+    if missing:
+        raise ValueError(
+            "physique observation is missing rating rows for: "
+            f"{sorted(group.value for group in missing)}"
+        )
+
+    for entry in ratings:
+        has_level = entry.rating_level is not None
+        has_reason = entry.not_assessable_reason is not None
+        if has_level == has_reason:
+            raise ValueError(
+                f"physique rating for {entry.muscle_group.value} must set exactly one of "
+                "rating_level or not_assessable_reason"
+            )
+        if (
+            entry.not_assessable_reason is not None
+            and len(entry.not_assessable_reason) > _NOT_ASSESSABLE_REASON_MAX_LENGTH
+        ):
+            raise ValueError(
+                f"physique rating for {entry.muscle_group.value} has a not_assessable_reason "
+                f"longer than {_NOT_ASSESSABLE_REASON_MAX_LENGTH} characters"
+            )
+
+
+async def create_observation(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    observed_on: dt.date,
+    ratings: Sequence[RatingEntry],
+    pose_state: PoseState,
+    photo_angles_present: Sequence[str] = (),
+    leanness_notes: str | None = None,
+    conditioning_notes: str | None = None,
+    symmetry_notes: str | None = None,
+    conditions_note: str | None = None,
+) -> PhysiqueObservationRecord:
+    """INSERT the header, then all 19 rating rows, in this session. The caller commits.
+
+    `ratings` must cover every `CanonicalMuscleGroup` exactly once (D-07) — validated before
+    any statement is issued.
+    """
+    _validate_rating_coverage(ratings)
+
+    observation_id = uuid.uuid4()
+    await session.execute(
+        insert(PhysiqueObservation).values(
+            id=observation_id,
+            user_id=user_id,
+            observed_on=observed_on,
+            leanness_notes=leanness_notes,
+            conditioning_notes=conditioning_notes,
+            symmetry_notes=symmetry_notes,
+            photo_angles_present=list(photo_angles_present),
+            pose_state=pose_state.value,
+            conditions_note=conditions_note,
+        )
+    )
+
+    by_group = {entry.muscle_group: entry for entry in ratings}
+
+    def _rating_payload(entry: RatingEntry) -> str | None:
+        level = entry.rating_level
+        return level.value if level is not None else None
+
+    await session.execute(
+        insert(PhysiqueRating),
+        [
+            {
+                "id": uuid.uuid4(),
+                "observation_id": observation_id,
+                "muscle_group": group.value,
+                "rating_level": _rating_payload(by_group[group]),
+                "not_assessable_reason": by_group[group].not_assessable_reason,
+            }
+            for group in CanonicalMuscleGroup
+        ],
+    )
+
+    await session.flush()
+    record = await _read_observation(session, observation_id=observation_id, user_id=user_id)
+    if record is None:  # pragma: no cover - the inserts above just created this row
+        raise RuntimeError("create_observation: newly inserted observation not found")
+    return record
+
+
+async def _read_observation(
+    session: AsyncSession, *, observation_id: uuid.UUID, user_id: uuid.UUID
+) -> PhysiqueObservationRecord | None:
+    """Assemble one observation plus its ratings from two explicit queries.
+
+    The `user_id` predicate is belt-and-braces even when the id is already known (ASVS V4).
+    """
+    observation = (
+        await session.execute(
+            select(PhysiqueObservation).where(
+                PhysiqueObservation.id == observation_id,
+                PhysiqueObservation.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if observation is None:
+        return None
+
+    rating_rows = (
+        (
+            await session.execute(
+                select(PhysiqueRating).where(PhysiqueRating.observation_id == observation_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    by_group = {row.muscle_group: row for row in rating_rows}
+
+    def _rating_level(stored: str | None) -> PhysiqueRatingLevel | None:
+        return PhysiqueRatingLevel(stored) if stored is not None else None
+
+    entries = tuple(
+        RatingEntry(
+            muscle_group=group,
+            rating_level=_rating_level(by_group[group.value].rating_level),
+            not_assessable_reason=by_group[group.value].not_assessable_reason,
+        )
+        for group in CanonicalMuscleGroup
+        if group.value in by_group
+    )
+
+    return PhysiqueObservationRecord(
+        id=observation.id,
+        observed_on=observation.observed_on,
+        leanness_notes=observation.leanness_notes,
+        conditioning_notes=observation.conditioning_notes,
+        symmetry_notes=observation.symmetry_notes,
+        photo_angles_present=tuple(observation.photo_angles_present),
+        pose_state=PoseState(observation.pose_state),
+        conditions_note=observation.conditions_note,
+        superseded_at=observation.superseded_at,
+        superseded_reason=observation.superseded_reason,
+        superseded_by_id=observation.superseded_by_id,
+        created_at=observation.created_at,
+        ratings=entries,
+    )
+
+
+async def get_latest_observation(
+    session: AsyncSession, *, user_id: uuid.UUID
+) -> PhysiqueObservationRecord | None:
+    """The user's most recent observation, or `None` if they have none.
+
+    Ordered `observed_on DESC, created_at DESC`. The `created_at` tie-break is load-bearing:
+    there is deliberately no unique constraint on `(user_id, observed_on)` (16-RESEARCH.md Open
+    Question 2), so two observations can share a calendar day and an unordered tie would make
+    the answer depend on the planner.
+
+    PHYS-08 SCOPE NOTE: this does NOT filter `superseded_at IS NULL`. D-01 pulls the supersede
+    columns forward into migration 0007 but leaves the semantics to Phase 17, which owns
+    PHYS-08. When Phase 17 adds supersede-aware reads, this predicate is the thing it changes.
+    """
+    observation_id = (
+        await session.execute(
+            select(PhysiqueObservation.id)
+            .where(PhysiqueObservation.user_id == user_id)
+            .order_by(
+                PhysiqueObservation.observed_on.desc(),
+                PhysiqueObservation.created_at.desc(),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if observation_id is None:
+        return None
+    return await _read_observation(session, observation_id=observation_id, user_id=user_id)
