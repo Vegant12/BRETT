@@ -49,6 +49,7 @@ from app.core.time import local_day, utc_now
 from app.db.models.body import BodyMeasurement
 from app.db.models.exercise import ExerciseMuscle, ExerciseMuscleOverride, ExerciseTemplate
 from app.db.models.health import HealthDailyMetric
+from app.db.models.physique import PhysiqueObservation, PhysiqueRating
 from app.db.models.program import ProgramPeriod, ProgramSwitchToken
 from app.db.models.sync_state import SyncState
 from app.db.models.user import User
@@ -369,6 +370,26 @@ class GoldenExercise:
     title: str = "Fixture Exercise"
 
 
+_NOT_VISIBLE_REASON = "Not visible in this fixture's photo set."
+
+
+def _rating_row(
+    group: CanonicalMuscleGroup,
+    supplied: dict[CanonicalMuscleGroup, tuple[str | None, str | None]],
+) -> dict[str, str | None]:
+    """Resolve one `physique_ratings` row's `rating_level`/`not_assessable_reason` pair.
+
+    A supplied level -> `rating_level=level, not_assessable_reason=None`. No supplied level
+    (either the group is absent from `supplied`, or it is present with `level=None`) ->
+    `rating_level=None, not_assessable_reason=` the caller's reason or `_NOT_VISIBLE_REASON`.
+    Both branches satisfy `ck_physique_ratings_rating_xor_not_assessable`.
+    """
+    level, reason = supplied.get(group, (None, None))
+    if level is not None:
+        return {"rating_level": level, "not_assessable_reason": None}
+    return {"rating_level": None, "not_assessable_reason": reason or _NOT_VISIBLE_REASON}
+
+
 class GoldenBuilder:
     """Builds synthetic analytics fixtures with exact, hand-computable contents.
 
@@ -614,6 +635,64 @@ class GoldenBuilder:
         await self._session.flush()
         return token_id
 
+    async def physique_observation(
+        self,
+        *,
+        observed_on: dt.date,
+        ratings: Sequence[tuple[CanonicalMuscleGroup, str | None, str | None]] | None = None,
+        leanness_notes: str | None = None,
+        conditioning_notes: str | None = None,
+        symmetry_notes: str | None = None,
+        photo_angles_present: Sequence[str] = ("front", "back", "side"),
+        pose_state: str = "relaxed",
+        conditions_note: str | None = None,
+        user_id: uuid.UUID = DEFAULT_USER_ID,
+    ) -> uuid.UUID:
+        """One `physique_observations` row plus its 19 `physique_ratings` children.
+
+        `ratings` is `(muscle_group, rating_level, not_assessable_reason)` triples. When it is
+        `None` every one of the 19 canonical groups is written as `Not Assessable` with a
+        placeholder reason -- D-07's invariant is that a row always exists per group, so the
+        DEFAULT must satisfy it rather than leaving the caller to remember 19 rows.
+
+        Any group the caller does supply overrides the default for that group; groups the
+        caller omits stay `Not Assessable`. Writing fewer than 19 rows is deliberately NOT
+        expressible here: the repository is what enforces completeness, and a fixture that
+        could produce an incomplete observation would let a test certify a shape the write
+        path forbids.
+
+        Flushes, does not commit, exactly like every other builder method.
+        """
+        supplied = {group: (level, reason) for group, level, reason in (ratings or ())}
+        observation_id = uuid.uuid4()
+        await self._session.execute(
+            insert(PhysiqueObservation).values(
+                id=observation_id,
+                user_id=user_id,
+                observed_on=observed_on,
+                leanness_notes=leanness_notes,
+                conditioning_notes=conditioning_notes,
+                symmetry_notes=symmetry_notes,
+                photo_angles_present=list(photo_angles_present),
+                pose_state=pose_state,
+                conditions_note=conditions_note,
+            )
+        )
+        await self._session.execute(
+            insert(PhysiqueRating),
+            [
+                {
+                    "id": uuid.uuid4(),
+                    "observation_id": observation_id,
+                    "muscle_group": group.value,
+                    **_rating_row(group, supplied),
+                }
+                for group in CanonicalMuscleGroup
+            ],
+        )
+        await self._session.flush()
+        return observation_id
+
     async def override(
         self,
         *,
@@ -774,6 +853,10 @@ _MCP_PURGE_TABLES: tuple[str, ...] = (
     # A child of `users` only, like `body_measurements` -- nothing references it, so it sits
     # beside its sibling rather than earlier in the chain.
     "health_daily_metrics",
+    # Ratings FK to physique_observations, so they are purged first. Both are children of
+    # `users` only; nothing else references either.
+    "physique_ratings",
+    "physique_observations",
     # Tokens FK to `user_program_history`, so they are purged first.
     "program_switch_tokens",
     "user_program_history",
@@ -796,6 +879,9 @@ def _mcp_purge_statements() -> list[Executable]:
     """
     workout_ids = select(Workout.id).where(Workout.user_id == DEFAULT_USER_ID)
     exercise_ids = select(WorkoutExercise.id).where(WorkoutExercise.workout_id.in_(workout_ids))
+    observation_ids = select(PhysiqueObservation.id).where(
+        PhysiqueObservation.user_id == DEFAULT_USER_ID
+    )
 
     by_table: dict[str, Executable] = {
         "workout_sets": delete(WorkoutSet).where(WorkoutSet.workout_exercise_id.in_(exercise_ids)),
@@ -815,6 +901,12 @@ def _mcp_purge_statements() -> list[Executable]:
         ),
         "health_daily_metrics": delete(HealthDailyMetric).where(
             HealthDailyMetric.user_id == DEFAULT_USER_ID
+        ),
+        "physique_ratings": delete(PhysiqueRating).where(
+            PhysiqueRating.observation_id.in_(observation_ids)
+        ),
+        "physique_observations": delete(PhysiqueObservation).where(
+            PhysiqueObservation.user_id == DEFAULT_USER_ID
         ),
         "program_switch_tokens": delete(ProgramSwitchToken).where(
             ProgramSwitchToken.user_id == DEFAULT_USER_ID
