@@ -114,7 +114,7 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 16-01-PLAN.md — Declare the PhysiqueObservation/PhysiqueRating models with the Phase 15 locked constants and extend the fast-suite metadata guards
+- [x] 16-01-PLAN.md — Declare the PhysiqueObservation/PhysiqueRating models with the Phase 15 locked constants and extend the fast-suite metadata guards
 - [ ] 16-02-PLAN.md — Hand-write migration 0007, wire the new tables into the test-fixture purge, and prove every CHECK constraint refuses a real bad value
 - [ ] 16-03-PLAN.md — Build repositories/physique.py (create_observation + get_latest_observation) and prove the 19-row round trip, refusal paths and tenant scoping
 
@@ -174,7 +174,7 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 13. Health Analytics, Reports & Coaching Style | 10/10 | Shipped (v2.0) | 2026-09-05 |
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
 | 15. Physique Rating Calibration Spike | 2/2 | Complete    | 2026-09-08 |
-| 16. Physique Data Model & Repository | 0/3 | Planned | - |
+| 16. Physique Data Model & Repository | 1/3 | In Progress|  |
 | 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
 | 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
