@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
 status: planning
-stopped_at: Completed and verified Phase 15 (physique-rating-calibration-spike)
-last_updated: "2026-09-08T06:01:05.906Z"
+stopped_at: Phase 16 context gathered
+last_updated: "2026-09-09T03:22:45.089Z"
 last_activity: 2026-09-08
 progress:
   total_phases: 6
@@ -144,8 +144,8 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 
 ## Session Continuity
 
-Last session: 2026-09-08T06:01:05.906Z
-Stopped at: Phase 15 complete and verified (16/16 must-haves, see 15-VERIFICATION.md); post-execution code review findings fixed.
+Last session: 2026-09-09T03:22:45.080Z
+Stopped at: Phase 16 context gathered
 Resume: `/gsd-discuss-phase 16` (Phase 14 is already complete — do not re-run its discuss step).
 
 ### v2.1 milestone-gate decisions (made before research, carry into requirements)
