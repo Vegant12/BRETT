@@ -624,7 +624,7 @@ shape — those were verified directly against this repo's code and a live namin
 execution. A1/A2 above are the only two claims resting on general PostgreSQL/SQLAlchemy knowledge
 rather than a direct read of this repo, and both are low-risk, cheaply test-caught if wrong.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Exact repository function surface beyond `create_observation`/`get_latest_observation`**
    - What we know: CONTEXT.md leaves this to Claude's Discretion, suggesting it "build what a
@@ -637,6 +637,8 @@ rather than a direct read of this repo, and both are low-risk, cheaply test-caug
      phase — matches the literal success criteria without speculatively building Phase 17's
      supersede-write or diff-read functions, which depend on requirements (PHYS-08/PHYS-09) this
      phase explicitly does not implement.
+   - RESOLVED: plan 16-03 built exactly `create_observation` and `get_latest_observation` — no
+     more, no less. `get_recent_observations` was deliberately deferred to Phase 17.
 
 2. **Whether `observed_on` (or equivalent header date field) needs its own uniqueness constraint**
    - What we know: `BodyMeasurement` keys on `(user_id, source, measured_on)` as a natural key
@@ -650,6 +652,8 @@ rather than a direct read of this repo, and both are low-risk, cheaply test-caug
      supersede mechanism (Phase 17) is the documented correction path for a duplicate, and
      ROADMAP's five success criteria for this phase do not mention same-day uniqueness. Revisit
      only if Phase 17's planner finds it genuinely needed.
+   - RESOLVED: plans add no `UniqueConstraint` on `(user_id, observed_on)`. Left as a seam for
+     Phase 17 to revisit if the supersede mechanism proves insufficient.
 
 ## Environment Availability
 
