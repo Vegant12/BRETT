@@ -210,10 +210,18 @@ def test_preflight_detects_a_database_one_revision_behind_head(
     alembic: Callable[..., "subprocess.CompletedProcess[str]"],
     restore_schema: None,
 ) -> None:
-    """The Phase 13 incident, reproduced: `0005` applied, `0006` expected. This is the drift
-    rehearsal -- a real database intentionally behind head, not a fixture."""
+    """The Phase 13 incident, reproduced: one revision applied, head expected. This is the
+    drift rehearsal -- a real database intentionally behind head, not a fixture.
+
+    The specific revision IDs are read back from `alembic heads`/`current` rather than
+    hardcoded: this test must keep passing as new migrations land and head moves (it broke
+    once already, in Phase 16, when migration `0007` shifted head one revision past this
+    test's original hardcoded `0005`/`0006` pair).
+    """
     assert alembic("upgrade", "head").returncode == 0
-    assert check_at_head(alembic).ok is True  # baseline: at head means ok
+    at_head = check_at_head(alembic)
+    assert at_head.ok is True  # baseline: at head means ok
+    (head_revision,) = at_head.heads
 
     down = alembic("downgrade", "-1")
     assert down.returncode == 0, down.stderr
@@ -224,8 +232,8 @@ def test_preflight_detects_a_database_one_revision_behind_head(
         "in sync; this is exactly the state that shipped UndefinedTableError to production in "
         "Phase 13"
     )
-    assert drifted.current == frozenset({"0005"})
-    assert drifted.heads == frozenset({"0006"})
+    assert drifted.current != frozenset({head_revision})
+    assert drifted.heads == frozenset({head_revision})
     assert "DEPLOY-04" in drifted.detail
     # `restore_schema` is DECLARED, not optional: this test downgrades the session-scoped
     # container and every later test in the session fails for an unrelated reason if it is

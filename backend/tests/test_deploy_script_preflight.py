@@ -58,9 +58,7 @@ def gcloud_stub(tmp_path: Path) -> tuple[Path, Path]:
     return stub_dir, log
 
 
-def _run_deploy(
-    stub_dir: Path, log: Path, **overrides: str
-) -> "subprocess.CompletedProcess[str]":
+def _run_deploy(stub_dir: Path, log: Path, **overrides: str) -> "subprocess.CompletedProcess[str]":
     env = {
         **os.environ,
         "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
@@ -97,7 +95,7 @@ def test_deploy_applies_a_pending_migration_then_deploys(
     assert alembic("upgrade", "head").returncode == 0
     down = alembic("downgrade", "-1")
     assert down.returncode == 0, down.stderr
-    assert alembic("current").stdout.strip().startswith("0005"), (
+    assert not alembic("current").stdout.strip().endswith("(head)"), (
         "the drift really exists before the script runs"
     )
 
