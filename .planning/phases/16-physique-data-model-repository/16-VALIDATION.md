@@ -1,10 +1,11 @@
 ---
 phase: 16
 slug: physique-data-model-repository
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: planned
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-09-09
+updated: 2026-09-09
 ---
 
 # Phase 16 — Validation Strategy
@@ -18,18 +19,19 @@ created: 2026-09-09
 | Property | Value |
 |----------|-------|
 | **Framework** | pytest 9.1.1 + pytest-asyncio (`asyncio_mode = "auto"`), per `pyproject.toml` |
-| **Config file** | `pyproject.toml` (`[tool.pytest.ini_options]`), `backend/alembic.ini` for migrations |
+| **Config file** | `pyproject.toml` at the REPO ROOT (`testpaths = ["backend/tests"]`, `pythonpath = ["backend"]`); `backend/alembic.ini` for migrations |
+| **Working directory** | Repo root for every `pytest`/`ruff`/`mypy` command. Only `alembic` runs with `cwd=backend/` (the `alembic` fixture already does this). |
 | **Quick run command** | `uv run pytest -m "not integration"` |
-| **Full suite command** | `uv run pytest` (includes `@pytest.mark.integration`, spins the shared session-scoped Postgres container) |
-| **Estimated runtime** | ~5s quick / ~60s full (Postgres container) |
+| **Full suite command** | `uv run pytest` (includes `@pytest.mark.integration`, spins the shared session-scoped `postgres:18-alpine` container) |
+| **Estimated runtime** | ~5s quick / ~60s full |
 
 ---
 
 ## Sampling Rate
 
-- **After every task commit:** Run `uv run pytest -m "not integration"`
-- **After every plan wave:** Run `uv run pytest` (full suite, including migration round-trip and new `test_db_physique.py` integration tests)
-- **Before `/gsd-verify-work`:** Full suite must be green, with explicit confirmation that `test_migrations_round_trip` and `test_no_pending_model_drift` pass unchanged (phase success criteria 2 and 5 name these tests directly)
+- **After every task commit:** `uv run pytest -m "not integration"`
+- **After every plan wave:** `uv run pytest` (full suite, including the migration round-trip and `test_db_physique.py`)
+- **Before `/gsd-verify-work`:** Full suite green, with explicit confirmation that `test_migrations_round_trip` and `test_no_pending_model_drift` pass UNCHANGED (ROADMAP criteria 2 and 5 name these tests directly), and that `test_mcp_isolation.py` / `test_mcp_tool_schemas.py` pass unmodified (Phase 16 adds no MCP surface)
 - **Max feedback latency:** 60 seconds
 
 ---
@@ -38,25 +40,30 @@ created: 2026-09-09
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 16-01-XX | 01 | 0 | PHYS-01 | — | `PhysiqueRatingLevel` StrEnum has exactly the 5 spike-confirmed values, no invented intermediate | unit | `pytest backend/tests/test_db_models.py -k physique -x` | ❌ W0 | ⬜ pending |
-| 16-01-XX | 01 | 0 | PHYS-02 | — | A rating row with `rating_level=None, not_assessable_reason=None` (or both set) is rejected by the DB | integration | `pytest backend/tests/test_db_physique.py::test_not_assessable_xor_rating -x -m integration` | ❌ W0 | ⬜ pending |
-| 16-01-XX | 01 | 0 | PHYS-03 | — | Header + child insert/read round-trips; `rating_level` uses `String`+CHECK not native ENUM; migration `0007` up/down leaves no orphaned `pg_type` | integration | `pytest backend/tests/test_migrations.py::test_migrations_round_trip -x -m integration` | ✅ existing — must keep passing unchanged | ⬜ pending |
-| 16-01-XX | 01 | 0 | PHYS-04 | — | Three independently-capped note fields persist and round-trip at their exact caps (500/500/500) | integration | `pytest backend/tests/test_db_physique.py::test_note_field_caps -x -m integration` | ❌ W0 | ⬜ pending |
-| 16-01-XX | 01 | 0 | PHYS-05 | — | `photo_angles_present` restricted to `{front,back,side}`; `pose_state` restricted to `{relaxed,lightly_flexed}`; `conditions_note` independent of ratings | integration | `pytest backend/tests/test_db_physique.py::test_confounder_metadata -x -m integration` | ❌ W0 | ⬜ pending |
-| 16-01-XX | 01 | 0 | (all) | — | `Base.metadata` table set includes the two new tables | unit | `pytest backend/tests/test_db_models.py::test_metadata_contains_expected_tables -x` | ✅ existing — must be edited (Pitfall 2) | ⬜ pending |
-| 16-01-XX | 01 | 0 | (all) | — | No new column trips the credential-shaped-name guard | unit | `pytest backend/tests/test_db_models.py -k credential -x` | ✅ existing — should pass unmodified | ⬜ pending |
-
-*Task IDs are placeholders pending planner output; the planner must map each row to its actual task ID.*
+| 16-01-T1 | 01 | 1 | PHYS-01, PHYS-03 | T-16-01, T-16-04 | `PhysiqueRatingLevel`/`PoseState`/`PhotoAngle` carry exactly the locked values; four CHECK constraints resolve to `ck_<table>_<label>`; no native ENUM; no `relationship()` | unit | `uv run ruff check backend/app/db/models/physique.py` + the inline `python -c` assertion block in the plan | ❌ created by this task | ⬜ pending |
+| 16-01-T2 | 01 | 1 | PHYS-01, PHYS-04, PHYS-05 | T-16-06, T-16-07 | Both tables named on purpose in the exact-equality metadata guard; note caps 500/500/200/160 not transposed; `observed_on` is a `Date`; `superseded_by_id` FK is SET NULL; credential-name guard still clean | unit | `uv run pytest backend/tests/test_db_models.py -k physique -q` and `uv run pytest -m "not integration" -q` | ❌ created by this task | ⬜ pending |
+| 16-02-T1 | 02 | 2 | PHYS-01..PHYS-05 | T-16-11, T-16-16 | Migration 0007 applies, reverses to base leaving only `alembic_version`, and matches the models (`alembic check`) | integration | `uv run pytest backend/tests/test_migrations.py -m integration -q` | ✅ existing — must keep passing unchanged | ⬜ pending |
+| 16-02-T2 | 02 | 2 | (all) | T-16-14 | Committed physique rows are purged FK-child-first between tests; no `KeyError` gap in `_mcp_purge_statements` | integration | `uv run pytest backend/tests/test_db_program_history.py backend/tests/test_migrations.py -m integration -q` | ✅ existing — extended | ⬜ pending |
+| 16-02-T3 | 02 | 2 | PHYS-02 | T-16-10 | A rating row with neither or both of `rating_level`/`not_assessable_reason` is refused by the database | integration | `uv run pytest backend/tests/test_db_physique.py::test_not_assessable_xor_rating -m integration -q` | ❌ created by this task | ⬜ pending |
+| 16-02-T3 | 02 | 2 | PHYS-04 | T-16-13 | Three note fields round-trip at their exact caps (500/500/500) and a 501-char write is refused | integration | `uv run pytest backend/tests/test_db_physique.py::test_note_field_caps -m integration -q` | ❌ created by this task | ⬜ pending |
+| 16-02-T3 | 02 | 2 | PHYS-05 | T-16-10 | `photo_angles_present` restricted to `{front,back,side}` (the `<@` operator's only proof); `pose_state` restricted to `{relaxed,lightly_flexed}`; `conditions_note` independent of ratings | integration | `uv run pytest backend/tests/test_db_physique.py::test_confounder_metadata -m integration -q` | ❌ created by this task | ⬜ pending |
+| 16-02-T3 | 02 | 2 | PHYS-03 | T-16-11, T-16-12 | Live column sets match exactly; `pg_type` holds no enum; duplicate `(observation_id, muscle_group)` refused | integration | `uv run pytest backend/tests/test_db_physique.py -m integration -q` | ❌ created by this task | ⬜ pending |
+| 16-03-T1 | 03 | 3 | PHYS-02, PHYS-03 | T-16-17, T-16-18, T-16-20 | Repository never commits, scopes every query on `user_id`, and validates the 19-row coverage before issuing any statement | unit | `uv run mypy backend/app/db/repositories/physique.py` + `uv run pytest -m "not integration" -q` | ❌ created by this task | ⬜ pending |
+| 16-03-T2 | 03 | 3 | PHYS-01, PHYS-02, PHYS-03 | T-16-17, T-16-19, T-16-22 | Full write/read round trip with 19 ratings in canonical order; abductors/adductors with no special-casing (grep-proven); incomplete/duplicate/both-or-neither refused with zero rows written; cross-tenant read returns nothing | integration | `uv run pytest backend/tests/test_db_physique.py -m integration -q` and `uv run pytest -q` | ❌ created by this task | ⬜ pending |
+| (phase gate) | — | 3 | (all) | T-16-22 | Phase 16 adds no MCP surface — `_WRITE_ALLOWLIST` still `{"program_switch.py"}` | unit | `uv run pytest backend/tests/test_mcp_isolation.py backend/tests/test_mcp_tool_schemas.py -q` | ✅ existing — must pass unmodified | ⬜ pending |
 
 ---
 
 ## Wave 0 Requirements
 
-- [ ] `backend/tests/test_db_physique.py` — new file, covers PHYS-02/04/05 and the header/child round-trip (PHYS-03's non-migration half)
-- [ ] `backend/app/db/models/physique.py` — new model file (prerequisite the above tests import)
-- [ ] `backend/app/db/repositories/physique.py` — new repository file (same prerequisite note)
-- [ ] `backend/tests/test_db_models.py::test_metadata_contains_expected_tables` — existing test, needs its expected-table set and docstring updated (Pitfall 2), not created fresh
-- [ ] Optional: a `GoldenBuilder`-style fixture helper for constructing a full 19-rating observation in tests, mirroring `conftest.py`'s existing `golden_workout`/`GoldenBuilder` pattern — not strictly required (tests can hand-build 19 rows inline) but reduces repetition across the PHYS-02/04/05 test cases
+All resolved — every MISSING test file is created by the plan task that also creates the code it
+exercises, so no task ships with an unverifiable `<verify>`:
+
+- [x] `backend/app/db/models/physique.py` — created by 16-01-T1, verified by 16-01-T2's unit tests
+- [x] `backend/tests/test_db_models.py` physique guards — added by 16-01-T2 (existing file, edited: `test_metadata_contains_expected_tables` is an EXACT-equality assertion, so this edit is mandatory, not optional — 16-RESEARCH.md Pitfall 2)
+- [x] `backend/tests/test_db_physique.py` — created by 16-02-T3 (schema half), extended by 16-03-T2 (repository half)
+- [x] `backend/app/db/repositories/physique.py` — created by 16-03-T1
+- [x] `GoldenBuilder.physique_observation` fixture helper + `_MCP_PURGE_TABLES` entries — added by 16-02-T2
 
 ---
 
@@ -68,11 +75,11 @@ created: 2026-09-09
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 60s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify (all 7 tasks carry one)
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 60s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved at planning (2026-09-09)

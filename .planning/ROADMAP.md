@@ -111,7 +111,12 @@ Plans:
   3. `Not Assessable` is representable per muscle group with a short reason rather than a forced numeric guess; `abductors` and `adductors` can be recorded this way without special-casing.
   4. Each observation stores three independently-capped free-text note fields (leanness, conditioning, symmetry) plus confounder metadata (photo angles present, pose state as a bounded enum, a short conditions note) as fields separate from the ratings — "the rating changed" and "conditions were comparable" stay two independently inspectable facts.
   5. Migration `0007` (next after `0006_user_program_history.py`) applies cleanly and round-trips (up/down) without orphaning a `pg_type`.
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 16-01-PLAN.md — Declare the PhysiqueObservation/PhysiqueRating models with the Phase 15 locked constants and extend the fast-suite metadata guards
+- [ ] 16-02-PLAN.md — Hand-write migration 0007, wire the new tables into the test-fixture purge, and prove every CHECK constraint refuses a real bad value
+- [ ] 16-03-PLAN.md — Build repositories/physique.py (create_observation + get_latest_observation) and prove the 19-row round trip, refusal paths and tenant scoping
 
 ### Phase 17: Physique Analytics & MCP Read/Write Tools
 **Goal**: Claude can record one physique observation per photo session and retrieve the prior one for context; deterministic diff and volume-correlation analytics exist underneath; the write-tool guard suite reflects a truthful two-write-module system rather than a widened but still-uniform one.
@@ -169,7 +174,7 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 13. Health Analytics, Reports & Coaching Style | 10/10 | Shipped (v2.0) | 2026-09-05 |
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
 | 15. Physique Rating Calibration Spike | 2/2 | Complete    | 2026-09-08 |
-| 16. Physique Data Model & Repository | 0/TBD | Not started | - |
+| 16. Physique Data Model & Repository | 0/3 | Planned | - |
 | 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
 | 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
