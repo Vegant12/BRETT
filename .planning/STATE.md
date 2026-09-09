@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
-status: planning
+status: executing
 stopped_at: Phase 16 context gathered
-last_updated: "2026-09-09T03:22:45.089Z"
-last_activity: 2026-09-08
+last_updated: "2026-09-09T04:39:24.885Z"
+last_activity: 2026-09-09 -- Phase 16 execution started
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 5
+  total_plans: 8
   completed_plans: 5
-  percent: 100
+  percent: 63
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 16 — physique-data-model-&-repository (not yet started; Phase 15 complete and verified)
+**Current focus:** Phase 16 — physique-data-model-repository
 
 ## Current Position
 
 Milestone: v2.1 Longitudinal Physique Analysis
-Phase: 16 (physique-data-model-&-repository)
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-08
+Phase: 16 (physique-data-model-repository) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 16
+Last activity: 2026-09-09 -- Phase 16 execution started
 
 Progress: [███───────] 33% — 2/6 v2.1 phases complete
 
