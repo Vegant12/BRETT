@@ -134,6 +134,8 @@ Both shipped milestones are archived in full:
 
 Full detail: `.planning/milestones/v2.0-ROADMAP.md`, `v2.0-REQUIREMENTS.md`, `v2.0-phases/`, and the shipped summary in `.planning/MILESTONES.md`.
 
+**In progress: v2.1 Longitudinal Physique Analysis** — Phase 16: Physique Data Model & Repository complete (2026-09-09). `PhysiqueObservation`/`PhysiqueRating` persist via migration `0007` (String-backed `StrEnum` + named `CHECK` constraints, never a native Postgres `ENUM`) and a single-writer repository (`create_observation`/`get_latest_observation`) keyed on the existing 19-value `CanonicalMuscleGroup` taxonomy, with the Phase 15 spike's locked constants (`PHYSIQUE_DIFF_MIN_LEVEL_DELTA = 2`, `PHYSIQUE_MIN_ELAPSED_DAYS = 30`) copied in verbatim. No MCP surface yet by design — this phase proves the persistence shape only; the write tool, prior-observation context, and diff analytics remain Active below for Phase 17+.
+
 **Carried-forward debt (see Requirements → Active):** the deploy-migration gap — production drifted behind deployed code three times in v2.0 alone, each caught only during live verification — was closed in Phase 14: Deploy Pipeline Migration Safety (2026-09-07). The D-06 nutrition-coverage re-query and Hevy's unverified rate limits remain open. Two GSD tooling issues also persist across both milestone closes: `gsd-tools.cjs audit-open` is broken (`ReferenceError: output is not defined`), and REQUIREMENTS.md's traceability table drifted out of sync with reality yet again this phase (`Pending` vs the tool's `Planned` wording), needing manual reconciliation.
 
 ## Evolution
@@ -154,4 +156,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-08 — Phase 15: Physique Rating Calibration Spike complete*
+*Last updated: 2026-09-09 — Phase 16: Physique Data Model & Repository complete*
