@@ -18,6 +18,7 @@ test container.
 """
 
 import datetime as dt
+import inspect
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -25,9 +26,10 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models.physique import (
+    PHYSIQUE_RATING_ANCHORS,
     PHYSIQUE_RATING_DISCLAIMER,
     PhotoAngle,
     PhysiqueObservation,
@@ -37,10 +39,14 @@ from app.db.models.physique import (
 )
 from app.mcp.context import AppContext
 from app.mcp.tools._common import local_today
-from app.mcp.tools.physique import fitness_log_physique_observation
+from app.mcp.tools.physique import (
+    fitness_get_latest_physique_observation,
+    fitness_log_physique_observation,
+)
 from app.mcp.tools.schemas import PhysiqueLogStatus, PhysiqueRatingInput
 from app.normalization.muscles import CanonicalMuscleGroup
 from tests.conftest import ANALYTICS_SECOND_USER_ID, DEFAULT_USER_ID, GoldenBuilder
+from tests.test_mcp_tools import LEAK_MARKERS
 
 # Mirrors `test_mcp_program_switch.py:42`. Port 1 is reserved and never listening, so the
 # connection fails immediately rather than hanging on a routable-but-silent host.
@@ -117,6 +123,11 @@ async def _observation_count(session: AsyncSession, *, user_id: uuid.UUID) -> in
     )
     assert count is not None
     return count
+
+
+# ---------------------------------------------------------------------------
+# Task 1: the write path -- one append, and four refusal families that write nothing.
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
@@ -407,3 +418,249 @@ async def test_every_response_branch_carries_the_disclaimer(
     )
     assert target_refusal.log_status == PhysiqueLogStatus.REFUSED
     assert target_refusal.disclaimer == PHYSIQUE_RATING_DISCLAIMER
+
+
+# ---------------------------------------------------------------------------
+# Task 2: the read path, the supersede round trip, and both degraded payloads.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_the_read_tool_returns_none_before_anything_is_logged(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """`data_available is True` with `observation is None` -- a real answer, not a
+    degradation."""
+    await session.commit()
+    ctx = _fake_ctx(client.app.state.sessionmaker)
+
+    result = await fitness_get_latest_physique_observation(ctx)
+
+    assert result.data_available is True
+    assert result.observation is None
+
+
+@pytest.mark.integration
+async def test_the_read_tool_returns_the_ratings_notes_and_confounders(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """PHYS-07. After one write, all 19 ratings, the three note fields and the confounder
+    metadata round-trip; a `Not Assessable` group carries `rating_level is None` and its
+    reason."""
+    await session.commit()
+    ctx = _fake_ctx(client.app.state.sessionmaker)
+    not_assessable_group = CanonicalMuscleGroup.ABDUCTORS
+
+    written = await fitness_log_physique_observation(
+        ctx,
+        ratings=_full_ratings(not_assessable={not_assessable_group}),
+        pose_state=PoseState.LIGHTLY_FLEXED,
+        photo_angles_present=[PhotoAngle.FRONT, PhotoAngle.BACK],
+        leanness_notes="lean note",
+        conditioning_notes="conditioning note",
+        symmetry_notes="symmetry note",
+        conditions_note="conditions note",
+    )
+    assert written.log_status == PhysiqueLogStatus.LOGGED
+
+    result = await fitness_get_latest_physique_observation(ctx)
+
+    assert result.observation is not None
+    assert len(result.observation.ratings) == 19
+    assert result.observation.leanness_notes == "lean note"
+    assert result.observation.conditioning_notes == "conditioning note"
+    assert result.observation.symmetry_notes == "symmetry note"
+    assert result.observation.pose_state == PoseState.LIGHTLY_FLEXED
+    assert result.observation.photo_angles_present == ["front", "back"]
+    assert result.observation.conditions_note == "conditions note"
+
+    not_assessable_view = next(
+        view for view in result.observation.ratings if view.muscle_group == not_assessable_group
+    )
+    assert not_assessable_view.rating_level is None
+    assert not_assessable_view.not_assessable_reason is not None
+
+
+@pytest.mark.integration
+async def test_the_read_tools_ratings_are_in_canonical_declaration_order(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """Exact equality against `list(CanonicalMuscleGroup)`, not a set comparison -- callers are
+    told they may zip against it."""
+    await session.commit()
+    ctx = _fake_ctx(client.app.state.sessionmaker)
+    written = await fitness_log_physique_observation(
+        ctx,
+        ratings=_full_ratings(),
+        pose_state=PoseState.RELAXED,
+        photo_angles_present=[PhotoAngle.FRONT],
+    )
+    assert written.log_status == PhysiqueLogStatus.LOGGED
+
+    result = await fitness_get_latest_physique_observation(ctx)
+
+    assert result.observation is not None
+    assert [view.muscle_group for view in result.observation.ratings] == list(CanonicalMuscleGroup)
+
+
+@pytest.mark.integration
+async def test_the_read_tool_ships_the_locked_rating_scale(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """PHYS-07: the locked scale travels with the prior observation, every time -- even before
+    one exists."""
+    await session.commit()
+    ctx = _fake_ctx(client.app.state.sessionmaker)
+
+    result = await fitness_get_latest_physique_observation(ctx)
+
+    assert result.rating_scale == PHYSIQUE_RATING_ANCHORS
+
+
+async def test_the_read_tool_takes_no_arguments() -> None:
+    """ "What is the current picture" is always a question about now -- same reasoning the
+    body-weight and program tools apply. No container needed: pure signature introspection."""
+    assert tuple(inspect.signature(fitness_get_latest_physique_observation).parameters) == ("ctx",)
+
+
+@pytest.mark.integration
+async def test_a_superseded_observation_disappears_from_the_read_but_stays_in_the_table(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """T-17-19. Log A, then log B superseding A: the read returns B; a direct row read shows A
+    still present with its supersede columns set and all 19 rating rows intact."""
+    await session.commit()
+    ctx = _fake_ctx(client.app.state.sessionmaker)
+    a = await fitness_log_physique_observation(
+        ctx,
+        ratings=_full_ratings(),
+        pose_state=PoseState.RELAXED,
+        photo_angles_present=[PhotoAngle.FRONT],
+    )
+    assert a.log_status == PhysiqueLogStatus.LOGGED
+
+    b = await fitness_log_physique_observation(
+        ctx,
+        ratings=_full_ratings(default=PhysiqueRatingLevel.STANDOUT),
+        pose_state=PoseState.RELAXED,
+        photo_angles_present=[PhotoAngle.FRONT],
+        supersedes_observation_id=a.observation_id,
+        superseded_reason="corrected reading",
+    )
+    assert b.log_status == PhysiqueLogStatus.LOGGED
+
+    result = await fitness_get_latest_physique_observation(ctx)
+    assert result.observation is not None
+    assert result.observation.observation_id == b.observation_id
+
+    row = (
+        await session.execute(
+            sa.select(
+                PhysiqueObservation.superseded_at,
+                PhysiqueObservation.superseded_reason,
+                PhysiqueObservation.superseded_by_id,
+            ).where(PhysiqueObservation.id == a.observation_id)
+        )
+    ).one()
+    assert row.superseded_at is not None
+    assert row.superseded_reason == "corrected reading"
+    assert row.superseded_by_id == b.observation_id
+
+    a_rating_count = await session.scalar(
+        sa.select(sa.func.count())
+        .select_from(PhysiqueRating)
+        .where(PhysiqueRating.observation_id == a.observation_id)
+    )
+    assert a_rating_count == 19
+
+
+@pytest.mark.integration
+async def test_the_supersede_response_names_the_target(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """B's response echoes back exactly which observation it superseded."""
+    await session.commit()
+    ctx = _fake_ctx(client.app.state.sessionmaker)
+    a = await fitness_log_physique_observation(
+        ctx,
+        ratings=_full_ratings(),
+        pose_state=PoseState.RELAXED,
+        photo_angles_present=[PhotoAngle.FRONT],
+    )
+    assert a.log_status == PhysiqueLogStatus.LOGGED
+
+    b = await fitness_log_physique_observation(
+        ctx,
+        ratings=_full_ratings(),
+        pose_state=PoseState.RELAXED,
+        photo_angles_present=[PhotoAngle.FRONT],
+        supersedes_observation_id=a.observation_id,
+        superseded_reason="duplicate",
+    )
+
+    assert b.superseded_observation_id == a.observation_id
+
+
+@pytest.mark.integration
+async def test_both_degraded_payloads_are_honest_and_leak_nothing(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """T-17-17 / PITFALLS #15. Against a dead database, the write tool reports `unknown` --
+    NEVER `refused` -- with `data_available is False`; the read tool reports `data_available
+    is False` with `observation is None`; both carry the disclaimer and leak nothing."""
+    await session.commit()
+    dead = create_async_engine(_DEAD_DB_URL, connect_args={"timeout": 1}, pool_pre_ping=False)
+    dead_sessionmaker = async_sessionmaker(dead, expire_on_commit=False, autoflush=False)
+    ctx = _fake_ctx(dead_sessionmaker)
+    try:
+        write_result = await fitness_log_physique_observation(
+            ctx,
+            ratings=_full_ratings(),
+            pose_state=PoseState.RELAXED,
+            photo_angles_present=[PhotoAngle.FRONT],
+        )
+        read_result = await fitness_get_latest_physique_observation(ctx)
+    finally:
+        await dead.dispose()
+
+    # PITFALLS #15: this write has no single-use token to make a retry safe, so `refused` on an
+    # append that may have landed would invite a second observation for the same day.
+    assert write_result.log_status is PhysiqueLogStatus.UNKNOWN
+    assert write_result.log_status is not PhysiqueLogStatus.REFUSED
+    assert write_result.data_available is False
+
+    assert read_result.data_available is False
+    assert read_result.observation is None
+
+    assert write_result.disclaimer == PHYSIQUE_RATING_DISCLAIMER
+    assert read_result.disclaimer == PHYSIQUE_RATING_DISCLAIMER
+
+    write_rendered = repr(write_result.model_dump())
+    read_rendered = repr(read_result.model_dump())
+    for leak in LEAK_MARKERS:
+        assert leak not in write_rendered, f"{leak!r} leaked into the degraded write payload"
+        assert leak not in read_rendered, f"{leak!r} leaked into the degraded read payload"
+
+
+@pytest.mark.integration
+async def test_the_degraded_write_reason_points_at_the_read_tool_not_a_retry(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """The degraded write's reason names the read tool and says not to retry."""
+    await session.commit()
+    dead = create_async_engine(_DEAD_DB_URL, connect_args={"timeout": 1}, pool_pre_ping=False)
+    dead_sessionmaker = async_sessionmaker(dead, expire_on_commit=False, autoflush=False)
+    ctx = _fake_ctx(dead_sessionmaker)
+    try:
+        result = await fitness_log_physique_observation(
+            ctx,
+            ratings=_full_ratings(),
+            pose_state=PoseState.RELAXED,
+            photo_angles_present=[PhotoAngle.FRONT],
+        )
+    finally:
+        await dead.dispose()
+
+    assert result.reason is not None
+    assert "fitness_get_latest_physique_observation" in result.reason
+    assert "do not retry" in result.reason
