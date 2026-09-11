@@ -69,6 +69,21 @@ PHYSIQUE_RATING_ANCHORS = (
 PHYSIQUE_MIN_ELAPSED_DAYS = 30
 PHYSIQUE_DIFF_MIN_LEVEL_DELTA = 2
 
+# PHYS-11. The ONE disclaimer text for this feature, defined here rather than in
+# `app/analytics/physique.py` or `app/mcp/tools/physique.py` because BOTH of those layers must
+# return it verbatim on every response, and a constant owned by either one would make the other's
+# disclaimer depend on a module it does not otherwise call. This file already holds the feature's
+# other user-facing prose constant (`PHYSIQUE_RATING_ANCHORS`), so it is the established home for
+# "locked physique strings", not a new pattern.
+#
+# The register is `recomposition.INTERPRETATION_DISCLAIMER`'s: a plain statement of what the
+# number is and is not, carrying no hedge and no recommendation.
+PHYSIQUE_RATING_DISCLAIMER = (
+    "These muscle-group ratings are subjective model output read from photographs, not a "
+    "measurement. They are not comparable to a measured figure such as kilograms lifted or "
+    "centimetres of waist, and they carry no comparison to anyone other than this same person."
+)
+
 
 class PhysiqueRatingLevel(StrEnum):
     """The five levels of PHYSIQUE_RATING_LEVELS. Declaration order IS ordinal order."""

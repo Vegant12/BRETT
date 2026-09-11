@@ -22,10 +22,10 @@ bans lazy-loadable relationships repo-wide because async lazy-load raises `Missi
 `get_latest_observation` therefore issues two explicit queries and assembles a frozen
 dataclass, the same shape `repositories/workouts.py` returns.
 
-NOT implemented here, on purpose: PHYS-08's supersede WRITE, and any supersede-aware
-filtering on the read. D-01 pulls only the supersede COLUMNS forward into migration 0007;
-the semantics are Phase 17's. `get_latest_observation` today returns the newest observation
-whether or not it is superseded — see its docstring.
+PHYS-08 (Phase 17) is implemented here: `_mark_superseded` is the ONLY place the three supersede
+columns are written, `create_observation` is its only caller, and `get_recent_observations` holds
+the only `superseded_at IS NULL` predicate in the repo. Nothing is ever hard-deleted -- the
+superseded row stays in the table and simply stops being returned by the read path.
 """
 
 import datetime as dt
@@ -187,18 +187,23 @@ async def create_observation(
     )
 
     await session.flush()
-    record = await _read_observation(session, observation_id=observation_id, user_id=user_id)
+    record = await get_observation(session, observation_id=observation_id, user_id=user_id)
     if record is None:  # pragma: no cover - the inserts above just created this row
         raise RuntimeError("create_observation: newly inserted observation not found")
     return record
 
 
-async def _read_observation(
+async def get_observation(
     session: AsyncSession, *, observation_id: uuid.UUID, user_id: uuid.UUID
 ) -> PhysiqueObservationRecord | None:
     """Assemble one observation plus its ratings from two explicit queries.
 
     The `user_id` predicate is belt-and-braces even when the id is already known (ASVS V4).
+
+    Public because the MCP write tool validates a caller-supplied `supersedes_observation_id`
+    through THIS lookup rather than adding a second query path (17-CONTEXT.md D-07). It
+    deliberately does NOT filter `superseded_at` -- a caller asking for a specific id is
+    entitled to see that the row is already superseded.
     """
     observation = (
         await session.execute(
@@ -253,31 +258,59 @@ async def _read_observation(
     )
 
 
+async def get_recent_observations(
+    session: AsyncSession, *, user_id: uuid.UUID, limit: int
+) -> list[PhysiqueObservationRecord]:
+    """The user's `limit` most recent NON-superseded observations, newest first.
+
+    `superseded_at IS NULL` lives HERE and nowhere else (PHYS-08). `get_latest_observation` is a
+    `limit=1` wrapper over this function and `app/analytics/physique.py`'s diff reads its two
+    inputs from here, so "a superseded observation is excluded from diffs" is one predicate in one
+    place rather than the same predicate written twice and drifting once.
+
+    Ordered `observed_on DESC, created_at DESC`. The `created_at` tie-break is load-bearing: there
+    is deliberately no unique constraint on `(user_id, observed_on)` (16-RESEARCH.md Open Question
+    2), so two observations can share a calendar day and an unordered tie would make the answer
+    depend on the planner.
+
+    Two explicit queries per record, same as `get_observation`: no ORM relationship is mapped
+    anywhere in this module because an async lazy-load raises `MissingGreenlet`.
+    """
+    observation_ids = (
+        (
+            await session.execute(
+                select(PhysiqueObservation.id)
+                .where(
+                    PhysiqueObservation.user_id == user_id,
+                    PhysiqueObservation.superseded_at.is_(None),
+                )
+                .order_by(
+                    PhysiqueObservation.observed_on.desc(),
+                    PhysiqueObservation.created_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    records: list[PhysiqueObservationRecord] = []
+    for observation_id in observation_ids:
+        record = await get_observation(session, observation_id=observation_id, user_id=user_id)
+        if record is not None:
+            records.append(record)
+    return records
+
+
 async def get_latest_observation(
     session: AsyncSession, *, user_id: uuid.UUID
 ) -> PhysiqueObservationRecord | None:
     """The user's most recent observation, or `None` if they have none.
 
-    Ordered `observed_on DESC, created_at DESC`. The `created_at` tie-break is load-bearing:
-    there is deliberately no unique constraint on `(user_id, observed_on)` (16-RESEARCH.md Open
-    Question 2), so two observations can share a calendar day and an unordered tie would make
-    the answer depend on the planner.
-
-    PHYS-08 SCOPE NOTE: this does NOT filter `superseded_at IS NULL`. D-01 pulls the supersede
-    columns forward into migration 0007 but leaves the semantics to Phase 17, which owns
-    PHYS-08. When Phase 17 adds supersede-aware reads, this predicate is the thing it changes.
+    Superseded observations are EXCLUDED (PHYS-08). The predicate lives in
+    `get_recent_observations`, which this function delegates to, so a user whose only observation
+    has been superseded reads as `None` -- the same answer as a user with no observations, which is
+    correct: a superseded observation is not the current picture.
     """
-    observation_id = (
-        await session.execute(
-            select(PhysiqueObservation.id)
-            .where(PhysiqueObservation.user_id == user_id)
-            .order_by(
-                PhysiqueObservation.observed_on.desc(),
-                PhysiqueObservation.created_at.desc(),
-            )
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if observation_id is None:
-        return None
-    return await _read_observation(session, observation_id=observation_id, user_id=user_id)
+    records = await get_recent_observations(session, user_id=user_id, limit=1)
+    return records[0] if records else None
