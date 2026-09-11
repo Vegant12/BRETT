@@ -18,15 +18,15 @@
 - [ ] **PHYS-03**: A physique observation is stored as a header row plus one narrow child row per `(observation, muscle_group)`, keyed on the existing 19-value `CanonicalMuscleGroup` enum with no new taxonomy. Ratings persist as a `String`-backed `StrEnum` guarded by a named `CHECK` constraint — never a native PostgreSQL `ENUM` type, which would orphan a `pg_type` on `DROP TABLE` and break the existing `test_migrations_round_trip`
 - [ ] **PHYS-04**: Each observation carries three separately-capped qualitative free-text note fields — leanness, conditioning and symmetry — which are strictly qualitative and contain no numeric body-fat estimate
 - [ ] **PHYS-05**: Each observation records confounder metadata as fields independent of the ratings themselves: which photo angles were present, pose state as a bounded enum (relaxed vs lightly flexed), and a short free-text conditions note. "The rating changed" and "the conditions were comparable" stay two separately inspectable facts, never one blended verdict
-- [ ] **PHYS-06**: A single-call, append-only, non-destructive MCP write tool records one physique observation, annotated `destructive_hint=False`. It does not use the two-call confirmation-token ceremony, which exists to gate an irreversible change that this write does not make
-- [ ] **PHYS-07**: A read tool returns the most recent prior observation — ratings, notes and confounder metadata — and is documented in both the tool description and `docs/coaching-instructions.md` as the required precursor to recording a new one. This is the anchoring mitigation, and it is honestly labelled as soft steering: nothing in MCP can force call ordering
-- [ ] **PHYS-08**: An observation can be marked superseded, with a reason, by a later correction. The row is retained in the ledger and excluded from diffs — never hard-deleted. This is the correction path for a duplicate observation or one recorded without a photo actually present
+- [x] **PHYS-06**: A single-call, append-only, non-destructive MCP write tool records one physique observation, annotated `destructive_hint=False`. It does not use the two-call confirmation-token ceremony, which exists to gate an irreversible change that this write does not make
+- [x] **PHYS-07**: A read tool returns the most recent prior observation — ratings, notes and confounder metadata — and is documented in both the tool description and `docs/coaching-instructions.md` as the required precursor to recording a new one. This is the anchoring mitigation, and it is honestly labelled as soft steering: nothing in MCP can force call ordering
+- [x] **PHYS-08**: An observation can be marked superseded, with a reason, by a later correction. The row is retained in the ledger and excluded from diffs — never hard-deleted. This is the correction path for a duplicate observation or one recorded without a photo actually present
 
 ### Physique Progress Analytics
 
-- [ ] **PHYS-09**: `analytics/physique.py` computes a deterministic per-muscle-group ordinal diff between two observations — improved, unchanged, regressed, or not-comparable when either side is `Not Assessable` — with no model call, no image, and no arithmetic beyond ordinal comparison, satisfying the project's rule that analytics stays deterministic and testable
-- [ ] **PHYS-10**: A composed analytics function cross-references physique ratings against per-muscle training volume from `get_muscle_group_volume`, answering "is the underdeveloped area also the undertrained one?". BRETT performs the join; Claude is never asked to correlate two separate tool responses
-- [ ] **PHYS-11**: Every physique-touching response carries a required disclaimer field, travelling verbatim, stating that ratings are subjective model output rather than measurement — the same required-field posture `RecompositionResult.disclaimer` already holds. Model-generated ratings are never presented indistinguishably from measured figures such as kilograms lifted or grams of protein
+- [x] **PHYS-09**: `analytics/physique.py` computes a deterministic per-muscle-group ordinal diff between two observations — improved, unchanged, regressed, or not-comparable when either side is `Not Assessable` — with no model call, no image, and no arithmetic beyond ordinal comparison, satisfying the project's rule that analytics stays deterministic and testable
+- [x] **PHYS-10**: A composed analytics function cross-references physique ratings against per-muscle training volume from `get_muscle_group_volume`, answering "is the underdeveloped area also the undertrained one?". BRETT performs the join; Claude is never asked to correlate two separate tool responses
+- [x] **PHYS-11**: Every physique-touching response carries a required disclaimer field, travelling verbatim, stating that ratings are subjective model output rather than measurement — the same required-field posture `RecompositionResult.disclaimer` already holds. Model-generated ratings are never presented indistinguishably from measured figures such as kilograms lifted or grams of protein
 
 ### Rating Calibration
 
@@ -39,8 +39,8 @@
 
 ### MCP Write-Guard Amendments
 
-- [ ] **MCP-07**: `_WRITE_ALLOWLIST` in `backend/tests/test_mcp_isolation.py` is widened to exactly two named modules, with the exact-membership property preserved rather than loosened — a second write tool still cannot pass by being skipped. Four assertions across two test files change deliberately
-- [ ] **MCP-08**: `test_annotations_are_an_exact_partition` in `backend/tests/test_mcp_tool_schemas.py` is restructured from a uniform `destructiveHint=True` assertion over all write tools into a per-tool annotation mapping, so a non-destructive write tool is expressible without weakening the assertion for the destructive one
+- [x] **MCP-07**: `_WRITE_ALLOWLIST` in `backend/tests/test_mcp_isolation.py` is widened to exactly two named modules, with the exact-membership property preserved rather than loosened — a second write tool still cannot pass by being skipped. Four assertions across two test files change deliberately
+- [x] **MCP-08**: `test_annotations_are_an_exact_partition` in `backend/tests/test_mcp_tool_schemas.py` is restructured from a uniform `destructiveHint=True` assertion over all write tools into a per-tool annotation mapping, so a non-destructive write tool is expressible without weakening the assertion for the destructive one
 
 ### Deploy Safety
 
@@ -99,16 +99,16 @@ Which phases cover which requirements. Populated during roadmap creation.
 | PHYS-03 | Phase 16 | Planned |
 | PHYS-04 | Phase 16 | Planned |
 | PHYS-05 | Phase 16 | Planned |
-| PHYS-06 | Phase 17 | Planned |
-| PHYS-07 | Phase 17 | Planned |
-| PHYS-08 | Phase 17 | Planned |
-| PHYS-09 | Phase 17 | Planned |
-| PHYS-10 | Phase 17 | Planned |
-| PHYS-11 | Phase 17 | Planned |
+| PHYS-06 | Phase 17 | Complete |
+| PHYS-07 | Phase 17 | Complete |
+| PHYS-08 | Phase 17 | Complete |
+| PHYS-09 | Phase 17 | Complete |
+| PHYS-10 | Phase 17 | Complete |
+| PHYS-11 | Phase 17 | Complete |
 | PHYS-12 | Phase 15 | Planned |
 | RPT-04 | Phase 18 | Planned |
 | RPT-05 | Phase 18 | Planned |
-| MCP-07 | Phase 17 | Planned |
-| MCP-08 | Phase 17 | Planned |
+| MCP-07 | Phase 17 | Complete |
+| MCP-08 | Phase 17 | Complete |
 | DEPLOY-04 | Phase 14 | Complete |
 | DEPLOY-05 | Phase 19 | Planned |
