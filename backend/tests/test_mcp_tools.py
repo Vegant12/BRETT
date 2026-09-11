@@ -122,6 +122,25 @@ MINIMAL_TOOL_ARGUMENTS: dict[str, dict[str, object]] = {
     # container and requires every call to succeed, and a minimal call that minted a token
     # would leave a row behind in a test whose subject is not this tool.
     "fitness_switch_training_program": {"program": "lean_bulk"},
+    "fitness_get_latest_physique_observation": {},
+    # A minimal but SCHEMA-VALID call: all 19 ratings are required (D-07's coverage invariant), so
+    # an incomplete list would be rejected by the SDK before the body ever reaches the dead
+    # database, proving nothing about this tool's degradation path. A fixed, non-existent
+    # `supersedes_observation_id` takes the REFUSED branch (same device
+    # `test_mcp_tool_budget.py::_physique_log_arguments` uses): against the dead sessionmaker here
+    # the lookup itself raises and degrades; against the healthy container in
+    # `test_secret_redaction.py` (which imports this same table) it is refused before any write,
+    # so neither run leaves a row behind in the shared container.
+    "fitness_log_physique_observation": {
+        "ratings": [
+            {"muscle_group": group.value, "rating_level": "Developed"}
+            for group in CanonicalMuscleGroup
+        ],
+        "pose_state": "relaxed",
+        "photo_angles_present": ["front"],
+        "supersedes_observation_id": "00000000-0000-4000-8000-000000000000",
+        "superseded_reason": "minimal-tool-arguments probe, never a real correction",
+    },
 }
 
 # --------------------------------------------------------------------------
