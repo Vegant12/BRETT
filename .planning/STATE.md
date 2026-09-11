@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
 status: executing
 stopped_at: Phase 17 context gathered
-last_updated: "2026-09-11T02:54:08.510Z"
-last_activity: 2026-09-09
+last_updated: "2026-09-11T03:54:48.628Z"
+last_activity: 2026-09-11 -- Phase 17 execution started
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 8
+  total_plans: 13
   completed_plans: 8
-  percent: 100
+  percent: 62
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 16 — physique-data-model-repository
+**Current focus:** Phase 17 — physique-analytics-mcp-read-write-tools
 
 ## Current Position
 
 Milestone: v2.1 Longitudinal Physique Analysis
-Phase: 17
-Plan: Not started
-Status: Executing Phase 16
-Last activity: 2026-09-09
+Phase: 17 (physique-analytics-mcp-read-write-tools) — EXECUTING
+Plan: 1 of 5
+Status: Executing Phase 17
+Last activity: 2026-09-11 -- Phase 17 execution started
 
 Progress: [███───────] 33% — 2/6 v2.1 phases complete
 
