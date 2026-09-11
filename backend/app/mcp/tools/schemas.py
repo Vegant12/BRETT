@@ -29,10 +29,11 @@ weekly totals compare unequal.
 """
 
 import datetime as dt
+import uuid
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analytics.schemas import (
     ActivityPeriodSummary,
@@ -61,6 +62,7 @@ from app.analytics.schemas import (
     TrendVerdict,
     WeeklyVolumeResult,
 )
+from app.db.models.physique import PhysiqueRatingLevel, PoseState
 from app.normalization.muscles import CanonicalMuscleGroup
 
 
@@ -570,3 +572,127 @@ class MonthlyReportResponse(_ReportBody):
     """
 
     narrative: str | None
+
+
+class PhysiqueRatingInput(_McpModel):
+    """One muscle group's rating, as Claude supplies it on the write call (PHYS-02, PHYS-03).
+
+    Exactly one of `rating_level` / `not_assessable_reason` is set, and the validator below is what
+    makes that a PUBLISHED contract rather than a comment: an invalid pair is rejected by the SDK
+    before the tool body runs, so the refusal costs no transaction. The database's
+    `ck_physique_ratings_rating_xor_not_assessable` is the backstop, not the first line of defence.
+
+    `not_assessable_reason` is capped at the column's own 160 characters so an over-long value is
+    refused at the boundary rather than aborting a session on an asyncpg truncation mid-write.
+
+    `Not Assessable` is a first-class answer, not a failure: a standard three-angle photo set never
+    shows `abductors` or `adductors`, and forcing a numeric guess there would be inventing data
+    (PHYS-02).
+    """
+
+    muscle_group: CanonicalMuscleGroup
+    rating_level: PhysiqueRatingLevel | None = None
+    not_assessable_reason: str | None = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "PhysiqueRatingInput":
+        if (self.rating_level is None) == (self.not_assessable_reason is None):
+            raise ValueError(
+                "set exactly one of rating_level or not_assessable_reason for each muscle group"
+            )
+        return self
+
+
+class PhysiqueLogStatus(StrEnum):
+    """PHYS-06's three-state outcome. `REFUSED` and `UNKNOWN` are NOT the same claim.
+
+    `REFUSED` means the server knows nothing was written -- an incomplete rating set, or a
+    `supersedes_observation_id` that does not name an un-superseded observation belonging to this
+    user. A model told `refused` may safely fix the call and retry.
+
+    `UNKNOWN` means an exception reached `safe_tool` and the server cannot say whether the append
+    landed. This write has NO confirmation-token replay path to fall back on the way
+    `program_switch.py` does, so a retry after a successful-but-unreported append is a SECOND
+    observation on the same day -- which is why the degraded payload must say `unknown` and point
+    the model at the read tool instead of inviting a retry (PITFALLS #15).
+    """
+
+    LOGGED = "logged"
+    REFUSED = "refused"
+    UNKNOWN = "unknown"
+
+
+class PhysiqueLogResponse(_McpModel):
+    """PHYS-06/PHYS-08/PHYS-11. What one append call reports back.
+
+    Deliberately carries NO list field and does not echo the 19 ratings the caller just sent: the
+    model already has them, and echoing them would triple this response's context cost to restate
+    its own input. That absence is also what keeps the response size flat, so the MCP-03 budget
+    measured on one branch is representative of every branch.
+
+    `disclaimer` is REQUIRED and is never `str | None` (PHYS-11). It travels on every branch --
+    logged, refused and the `safe_tool` degraded payload -- for the same reason
+    `RecompositionResult.disclaimer` does: a field that can be absent is a field a caller can
+    forget to read.
+    """
+
+    data_available: bool
+    # `log_status`, not `status`: `test_mcp_schemas._degraded_kwargs` resolves degraded values BY
+    # FIELD NAME, and `status` is generic enough that an override for one model would silently
+    # apply to another.
+    log_status: PhysiqueLogStatus
+    reason: str | None
+    observation_id: uuid.UUID | None
+    observed_on: dt.date | None
+    superseded_observation_id: uuid.UUID | None
+    disclaimer: str
+
+
+class PhysiqueRatingView(_McpModel):
+    """One muscle group's stored verdict on the read path."""
+
+    muscle_group: CanonicalMuscleGroup
+    rating_level: PhysiqueRatingLevel | None
+    not_assessable_reason: str | None
+
+
+class PhysiqueObservationView(_McpModel):
+    """PHYS-07: the whole prior observation -- ratings, notes AND confounder metadata.
+
+    The confounder fields (`photo_angles_present`, `pose_state`, `conditions_note`) travel beside
+    the ratings rather than being summarised away, because "the rating changed" and "conditions
+    were comparable" are two independently inspectable facts (PHYS-04). A rise from a relaxed
+    front-only set to a lightly-flexed three-angle set is a lighting-and-pose change before it is a
+    physique change, and only these fields can say so.
+
+    `ratings` is always all 19 groups in `CanonicalMuscleGroup` declaration order (D-07's
+    invariant), so a caller can zip it against the enum without sorting.
+    """
+
+    observation_id: uuid.UUID
+    observed_on: dt.date
+    leanness_notes: str | None
+    conditioning_notes: str | None
+    symmetry_notes: str | None
+    photo_angles_present: list[str]
+    pose_state: PoseState
+    conditions_note: str | None
+    ratings: list[PhysiqueRatingView]
+
+
+class LatestPhysiqueObservationResponse(_McpModel):
+    """PHYS-07's read side: the most recent NON-superseded observation, or none yet.
+
+    `observation=None` with `data_available=True` means the user has never logged one -- a
+    different fact from `data_available=False`, which means the server could not look.
+
+    `rating_scale` carries `PHYSIQUE_RATING_ANCHORS` verbatim. It is not decoration: this tool is
+    documented as the required precursor to logging a new observation, and shipping the five locked
+    anchor definitions in the same response means the next write's ratings are made against the
+    scale as written rather than against the model's recollection of it.
+    """
+
+    data_available: bool
+    observation: PhysiqueObservationView | None
+    rating_scale: str
+    disclaimer: str
