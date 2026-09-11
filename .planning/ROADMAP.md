@@ -129,7 +129,14 @@ Plans:
   4. `get_physique_diff` returns improved/unchanged/regressed/not-comparable per muscle group computed from stored rows only, with no model call, no image, and no arithmetic beyond ordinal comparison.
   5. A composed function in `analytics/physique.py` cross-references physique ratings against `get_muscle_group_volume` ("is the underdeveloped area also the undertrained one?"), so BRETT performs the join and Claude is never asked to correlate two separate tool responses.
   6. The write-guard suite describes a truthful two-write-module system: `backend/tests/test_mcp_isolation.py`'s `_WRITE_ALLOWLIST` asserts exact membership of `{"program_switch.py", "physique.py"}` with `len == 2` (widened deliberately, never loosened to a prefix/substring check), and `backend/tests/test_mcp_tool_schemas.py`'s uniform `destructiveHint=True` assertion is restructured into a per-tool `EXPECTED_WRITE_ANNOTATIONS` mapping that asserts the physique tool's non-destructive annotations distinctly from `program_switch.py`'s destructive ones. A hypothetical third write tool still fails the suite rather than passing by being skipped.
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+- [ ] 17-01-PLAN.md — Implement PHYS-08's supersede write and supersede-aware read in the physique repository, plus the one PHYS-11 disclaimer constant
+- [ ] 17-02-PLAN.md — Build analytics/physique.py: the deterministic ordinal diff and the self-relative volume cross-reference
+- [ ] 17-03-PLAN.md — Build the physique MCP tool module (append-only write + prior-observation read) and widen the write-guard allowlist to exactly two modules
+- [ ] 17-04-PLAN.md — Prove the tool bodies: one-call append, every refusal writing nothing, the supersede round trip and both degraded payloads
+- [ ] 17-05-PLAN.md — Register both tools, restructure the annotation guard into a per-tool mapping (MCP-08), budget both tools and document them
 
 ### Phase 18: Monthly Report Physique Integration
 **Goal**: The monthly report reads across training, nutrition, measurements and visible physique in one view; the weekly report structurally cannot carry it.
@@ -175,6 +182,6 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
 | 15. Physique Rating Calibration Spike | 2/2 | Complete    | 2026-09-08 |
 | 16. Physique Data Model & Repository | 3/3 | Complete    | 2026-09-09 |
-| 17. Physique Analytics & MCP Read/Write Tools | 0/TBD | Not started | - |
+| 17. Physique Analytics & MCP Read/Write Tools | 0/5 | Planned     | - |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
 | 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
