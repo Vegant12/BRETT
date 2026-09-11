@@ -116,7 +116,7 @@ async def test_ping_is_registered(mcp_server: ModuleType) -> None:
 
     This asserted ``== ["fitness_ping"]`` until plan 06-09 registered the twelve
     Phase 6 tools beside it. The exact-registry claim did not disappear -- it
-    MOVED, to ``test_mcp_tool_schemas.test_tool_registry_is_exactly_the_twenty``,
+    MOVED, to ``test_mcp_tool_schemas.test_tool_registry_is_exactly_the_twenty_two``,
     which owns the whole tool surface. What belongs in this file is only the part
     that is about mounting: the ping tool the mount was proven against is still
     there.

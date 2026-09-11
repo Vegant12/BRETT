@@ -48,6 +48,10 @@ from app.mcp.tools.health import (
     fitness_get_activity_trend,
     fitness_get_nutrition_trend,
 )
+from app.mcp.tools.physique import (
+    fitness_get_latest_physique_observation,
+    fitness_log_physique_observation,
+)
 from app.mcp.tools.ping import fitness_ping
 from app.mcp.tools.program_switch import fitness_switch_training_program
 from app.mcp.tools.programs import fitness_get_training_program
@@ -94,8 +98,10 @@ _INSTRUCTIONS = (
     "(sessions_in_window, insufficient_data, earliest_data_at): report stale or sparse "
     "data before answering, and give no verdict when insufficient_data is true. "
     "data_available=false means the server could not answer, not that the user has no data. "
-    "fitness_switch_training_program is the only tool that writes; it needs two calls and a "
-    "token from the first, and you must ask the user before the second."
+    "Two tools write. fitness_switch_training_program needs two calls and a token from the first, "
+    "and you must ask the user before the second. fitness_log_physique_observation appends one "
+    "physique observation in a single call -- call fitness_get_latest_physique_observation first, "
+    "and treat its ratings as a sanity check on the photo in front of you, never as a target."
 )
 
 mcp = MCPServer(
@@ -253,6 +259,12 @@ _TOOLS: tuple[tuple[Callable[..., Any], str], ...] = (
         "Recomposition verdict from the body-weight trend and training progression, "
         "with its disclaimer.",
     ),
+    (
+        fitness_get_latest_physique_observation,
+        "The most recent physique observation: per-muscle-group development ratings, the leanness, "
+        "conditioning and symmetry notes, the photo conditions, and the rating scale itself. Call "
+        "this before logging a new observation.",
+    ),
 )
 
 for _fn, _description in _TOOLS:
@@ -291,6 +303,44 @@ mcp.add_tool(
         "call echoing that exact token performs the switch. Tokens expire in 5 minutes."
     ),
     annotations=WRITE_TOOL,
+)
+
+# PHYS-06 / MCP-08. The SECOND write annotation object, and the reason
+# `test_mcp_tool_schemas.EXPECTED_WRITE_ANNOTATIONS` had to become a per-tool
+# mapping: a write tool is not automatically a destructive one, and collapsing
+# the two would either mislabel this tool or weaken the label on
+# `fitness_switch_training_program`.
+#
+# `destructive_hint=False` because logging an observation APPENDS a dated row and
+# overwrites nothing. The correction path for a mistaken observation is PHYS-08's
+# supersede, which is itself another append that retains the original row -- there
+# is no code path under this tool that deletes or replaces stored data.
+#
+# `idempotent_hint=False` because two identical calls append TWO observations.
+# That is the honest answer and it is why this tool needs no confirmation token:
+# a duplicate is recoverable by superseding it, unlike a double program switch.
+#
+# `open_world_hint=False` -- this tool touches this project's own database and
+# nothing else. The photo it reasons about never reaches the server at all.
+NON_DESTRUCTIVE_WRITE_TOOL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+
+mcp.add_tool(
+    fitness_log_physique_observation,
+    name="fitness_log_physique_observation",
+    description=(
+        "Log one physique observation read from progress photos: a development rating for each of "
+        "the 19 muscle groups, leanness/conditioning/symmetry notes, and the photo conditions. ONE "
+        "call appends one dated observation -- no confirmation token, nothing overwritten. Call "
+        "fitness_get_latest_physique_observation first: it returns the prior ratings and the "
+        "rating scale. Optionally supersedes an earlier observation with a reason; the earlier "
+        "row is retained, never deleted."
+    ),
+    annotations=NON_DESTRUCTIVE_WRITE_TOOL,
 )
 
 # MUST run at import time. See the module docstring.

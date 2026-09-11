@@ -67,6 +67,8 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
 | "How active have I been?" | `fitness_get_activity_trend` | *(none)* |
 | "How's my nutrition been?" | `fitness_get_nutrition_trend` | *(none)* |
 | "Is my training appropriate for recomposition?" | `fitness_get_recomposition_status` | *(none)* |
+| "What was my last physique observation?" | `fitness_get_latest_physique_observation` | *(none)* |
+| "Log what you see in my physique photos" | `fitness_log_physique_observation` | **`ratings`** (all 19 groups), **`pose_state`**, **`photo_angles_present`**; optional notes, `supersedes_observation_id` + `superseded_reason` |
 | "What program am I on?" | `fitness_get_training_program` | *(none)* |
 | "Switch me to a cut" | `fitness_switch_training_program` | **`program`**, then **`confirmation_token`** — two calls |
 | "What did I do this week?" | `fitness_get_recent_workouts` | `limit` (max 25) |
@@ -92,6 +94,12 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
   over a caller-chosen `weeks`; the reports answer "how did this week/month go" over a calendar
   period and add records, plateaus, measurements, nutrition and program context. Scheduled tasks
   reach these report tools (verified 2026-09-05).
+- **A physique rating comes from the photo, not from the previous rating.** Call
+  `fitness_get_latest_physique_observation` before `fitness_log_physique_observation` — it returns
+  the prior ratings and the five-level scale. Treat the prior observation as a sanity check on your
+  reading, never as a target to move toward or away from: if the photo disagrees with it, record
+  what the photo shows. Also read `pose_state` and `photo_angles_present` before calling a change
+  real — a relaxed front-only set and a lightly-flexed three-angle set are not comparable.
 
 ## How to read the metadata envelope
 
@@ -99,7 +107,7 @@ Every analytics-backed response carries this envelope. Read it before you answer
 
 | Field | Do this |
 |---|---|
-| `freshness.resources` (`workouts`, `exercise_templates`, `body_measurements`, `activity`, `nutrition`) | Compare each `last_synced_at` against today. If one is more than a few days old — or `null` — say so **before** answering, naming which resource. A stale `exercise_templates` sync changes every per-muscle number; a stale Apple Health feed only ages a report's activity/nutrition sections while its training half stays current — check each resource separately. |
+| `freshness.resources` (`workouts`, `exercise_templates`, `body_measurements`, `activity`, `nutrition`) | Compare each `last_synced_at` against today. If one is stale or `null`, say so **before** answering, naming which resource — check each one separately, since a stale Apple Health feed leaves the training half of a report current. |
 | `coverage.sessions_in_window` | State it whenever it is low. Three sessions is not a trend. |
 | `coverage.insufficient_data` | When `true`, give no verdict. Say what is missing and what would make the answer possible. |
 | `coverage.earliest_data_at` | Use it before concluding the user stopped training: it distinguishes "you did not train in this window" from "your synced history does not reach back that far". |
@@ -128,13 +136,10 @@ is allowed to be, so it belongs before the answer, not after it.
 
 ## Example questions
 
-Kept only where they carry guidance beyond the table above.
-
 - "Analyze my last 8 weeks of training." → `fitness_get_training_summary(weeks=8)` — an explicit
   `weeks` value narrows a broad opener.
 - "Switch me to a cut" → `fitness_switch_training_program` — the first call only WARNS and
   returns a token; relay it, get the user's explicit yes, then call again with that exact token.
   Never invent a token.
 
-A broad opener resolves to one call, not five. Start there, read the envelope, and only reach for
-a second tool when the first one leaves the actual question unanswered.
+A broad opener resolves to one call, not five. Read the envelope before reaching for a second.
