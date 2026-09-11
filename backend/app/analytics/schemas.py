@@ -36,6 +36,7 @@ from types import MappingProxyType
 from pydantic import BaseModel, ConfigDict
 
 from app.analytics.estimates import NoEstimateReason
+from app.db.models.physique import PhysiqueRatingLevel
 from app.normalization.muscles import CanonicalMuscleGroup
 
 
@@ -1053,3 +1054,92 @@ class ReportResult(_AnalyticsModel):
     nutrition: NutritionPeriodSummary
     coverage: CoverageMetadata
     freshness: FreshnessMetadata
+
+
+class PhysiqueDiffVerdict(StrEnum):
+    """PHYS-09's four outcomes per muscle group. Ordinal comparison only -- no score, no average.
+
+    `NOT_COMPARABLE` is a first-class verdict, not a missing value: it is what a `Not Assessable`
+    rating on EITHER side produces, which for `abductors`/`adductors` is the ordinary case rather
+    than an error (PHYS-02). Collapsing it into `UNCHANGED` would report "no change" for a muscle
+    nobody ever rated.
+    """
+
+    IMPROVED = "improved"
+    UNCHANGED = "unchanged"
+    REGRESSED = "regressed"
+    NOT_COMPARABLE = "not_comparable"
+
+
+class PhysiqueMuscleDiff(_AnalyticsModel):
+    """One muscle group's verdict across two observations.
+
+    `level_delta` is the raw ordinal index difference (later minus earlier) and is reported
+    ALONGSIDE the verdict rather than folded into it. With `PHYSIQUE_DIFF_MIN_LEVEL_DELTA = 2`, a
+    one-level
+    move classifies as `UNCHANGED` -- the Phase 15 spike measured the rater's own noise floor at
+    exactly 1 level, so a single step is indistinguishable from the instrument. Surfacing the raw
+    delta keeps that honest: "unchanged" here means "no change above the measured noise floor", and
+    the reader can see the 1 that produced it.
+
+    `level_delta` is `None` exactly when the verdict is `NOT_COMPARABLE`.
+    """
+
+    muscle_group: CanonicalMuscleGroup
+    earlier_level: PhysiqueRatingLevel | None
+    later_level: PhysiqueRatingLevel | None
+    level_delta: int | None
+    verdict: PhysiqueDiffVerdict
+
+
+class PhysiqueDiffResult(_AnalyticsModel):
+    """PHYS-09. All 19 muscle groups, sorted by ``muscle_group.value``, never a subset.
+
+    The gap-free 19-row spine is `get_muscle_group_volume`'s own convention and it matters for the
+    same reason: a caller that receives only the groups that changed cannot tell "no change" from
+    "not in this response".
+
+    `min_level_delta` and `min_elapsed_days` are SURFACED, not enforced. `min_elapsed_days` is
+    `PHYSIQUE_MIN_ELAPSED_DAYS`, and PHYS-F01 -- the hard floor that would refuse or flag a
+    too-close pair -- is deferred; carrying the constant beside the real `elapsed_days` lets a
+    reader see that an 8-day interval is inside the recommended floor without this module
+    inventing a refusal the phase did not authorize.
+    """
+
+    earlier_observed_on: dt.date
+    later_observed_on: dt.date
+    elapsed_days: int
+    min_elapsed_days: int
+    min_level_delta: int
+    muscle_groups: list[PhysiqueMuscleDiff]
+    disclaimer: str
+
+
+class PhysiqueVolumeFlag(_AnalyticsModel):
+    """One muscle group that is BOTH underdeveloped and undertrained (PHYS-10, D-01/D-02)."""
+
+    muscle_group: CanonicalMuscleGroup
+    rating_level: PhysiqueRatingLevel
+    weighted_sets: Decimal
+
+
+class PhysiqueVolumeCrossReference(_AnalyticsModel):
+    """PHYS-10. The flagged list ONLY (D-04), never a 19-row level-and-quartile table.
+
+    D-04's reasoning: this answers a specific question ("is the underdeveloped area also the
+    undertrained one?"), and a full table would hand Claude the raw material to re-derive the same
+    conclusion itself -- which is the join PHYS-10 exists to stop asking it to do. The narrow,
+    purpose-built shape follows `MAX_REPORT_PR_HIGHLIGHTS`'s precedent.
+
+    `undertrained_threshold_weighted_sets` is the volume total of the highest-ranked group still
+    inside the bottom quartile -- i.e. the cut. It is reported so the flag list is auditable
+    against `get_muscle_group_volume`'s own numbers rather than being a verdict with no working.
+    """
+
+    observed_on: dt.date
+    lookback_weeks: int
+    window_start: dt.date
+    window_end: dt.date
+    undertrained_threshold_weighted_sets: Decimal
+    flagged: list[PhysiqueVolumeFlag]
+    disclaimer: str
