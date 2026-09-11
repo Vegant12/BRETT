@@ -33,6 +33,7 @@ from app.db.repositories.physique import (
     RatingEntry,
     create_observation,
     get_latest_observation,
+    get_recent_observations,
 )
 from app.normalization.muscles import CanonicalMuscleGroup
 from tests.conftest import ANALYTICS_SECOND_USER_ID, DEFAULT_USER_ID, GoldenBuilder
@@ -648,3 +649,248 @@ async def test_observation_reads_are_scoped_to_the_user(
     mine = await get_latest_observation(session, user_id=ANALYTICS_SECOND_USER_ID)
     assert mine is not None
     assert mine.id == other_record.id
+
+
+# ---------------------------------------------------------------------------
+# PHYS-08: supersede
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_later_observation_supersedes_an_earlier_one_with_a_reason(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """PHYS-08: the older row's three supersede columns are set inside the same transaction as
+    the new row's insert, and the older row survives -- this is an UPDATE, never a DELETE.
+    """
+    prior_id = await committed_history.physique_observation(observed_on=dt.date(2026, 2, 1))
+
+    new_record = await create_observation(
+        session,
+        user_id=DEFAULT_USER_ID,
+        observed_on=dt.date(2026, 3, 3),
+        ratings=_full_rating_set(),
+        pose_state=PoseState.RELAXED,
+        supersedes_observation_id=prior_id,
+        superseded_reason="logged without a photo present",
+    )
+    await session.commit()
+
+    prior_row = (
+        await session.execute(
+            sa.select(
+                PhysiqueObservation.superseded_at,
+                PhysiqueObservation.superseded_reason,
+                PhysiqueObservation.superseded_by_id,
+            ).where(PhysiqueObservation.id == prior_id)
+        )
+    ).one()
+    assert prior_row.superseded_at is not None
+    assert prior_row.superseded_reason == "logged without a photo present"
+    assert prior_row.superseded_by_id == new_record.id
+
+
+@pytest.mark.integration
+async def test_a_superseded_observation_is_retained_with_all_nineteen_ratings(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """PHYS-08's retention rule: superseding never deletes the header or its 19 ratings."""
+    prior_id = await committed_history.physique_observation(observed_on=dt.date(2026, 2, 1))
+
+    await create_observation(
+        session,
+        user_id=DEFAULT_USER_ID,
+        observed_on=dt.date(2026, 3, 3),
+        ratings=_full_rating_set(),
+        pose_state=PoseState.RELAXED,
+        supersedes_observation_id=prior_id,
+        superseded_reason="logged without a photo present",
+    )
+    await session.commit()
+
+    header_still_present = (
+        await session.execute(
+            sa.select(PhysiqueObservation.id).where(PhysiqueObservation.id == prior_id)
+        )
+    ).scalar_one_or_none()
+    assert header_still_present == prior_id
+
+    rating_count = (
+        await session.execute(
+            sa.select(sa.func.count()).where(PhysiqueRating.observation_id == prior_id)
+        )
+    ).scalar_one()
+    assert rating_count == 19
+
+
+@pytest.mark.integration
+async def test_get_recent_observations_excludes_a_superseded_row(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """PHYS-08: the single `superseded_at IS NULL` predicate excludes a superseded row from
+    `get_recent_observations`, leaving exactly the two survivors, newest first.
+    """
+    oldest_id = await committed_history.physique_observation(observed_on=dt.date(2026, 1, 1))
+    middle_id = await committed_history.physique_observation(observed_on=dt.date(2026, 2, 1))
+    await session.commit()
+
+    newest_record = await create_observation(
+        session,
+        user_id=DEFAULT_USER_ID,
+        observed_on=dt.date(2026, 3, 3),
+        ratings=_full_rating_set(),
+        pose_state=PoseState.RELAXED,
+        supersedes_observation_id=middle_id,
+        superseded_reason="corrected after re-review",
+    )
+    await session.commit()
+
+    records = await get_recent_observations(session, user_id=DEFAULT_USER_ID, limit=5)
+    assert [record.id for record in records] == [newest_record.id, oldest_id]
+
+
+@pytest.mark.integration
+async def test_get_latest_observation_returns_none_when_the_only_observation_is_superseded(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """A user whose only observation has been superseded reads as `None`, the same answer as a
+    user with no observations at all (PHYS-08). The supersede is applied directly at the
+    column level here, matching how a real supersede leaves the row: this test's point is the
+    READ predicate in `get_recent_observations`, not the write path (covered above).
+    """
+    only_id = await committed_history.physique_observation(observed_on=dt.date(2026, 2, 1))
+    await session.execute(
+        sa.update(PhysiqueObservation)
+        .where(PhysiqueObservation.id == only_id)
+        .values(superseded_at=dt.datetime.now(dt.UTC), superseded_reason="test setup")
+    )
+    await session.commit()
+
+    assert await get_latest_observation(session, user_id=DEFAULT_USER_ID) is None
+
+
+@pytest.mark.integration
+async def test_superseding_another_users_observation_is_refused(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """ASVS V4/T-17-01: the `user_id` predicate in `_mark_superseded`'s WHERE is not merely the
+    caller's intention -- superseding across tenants is refused and writes nothing.
+    """
+    await committed_history.user(user_id=ANALYTICS_SECOND_USER_ID)
+    other_users_observation_id = await committed_history.physique_observation(
+        observed_on=dt.date(2026, 2, 1), user_id=ANALYTICS_SECOND_USER_ID
+    )
+    await session.commit()
+
+    with pytest.raises(ValueError, match="does not name an un-superseded observation"):
+        await create_observation(
+            session,
+            user_id=DEFAULT_USER_ID,
+            observed_on=dt.date(2026, 3, 3),
+            ratings=_full_rating_set(),
+            pose_state=PoseState.RELAXED,
+            supersedes_observation_id=other_users_observation_id,
+            superseded_reason="attempting to supersede someone else's observation",
+        )
+
+    other_users_superseded_at = (
+        await session.execute(
+            sa.select(PhysiqueObservation.superseded_at).where(
+                PhysiqueObservation.id == other_users_observation_id
+            )
+        )
+    ).scalar_one()
+    assert other_users_superseded_at is None
+
+
+@pytest.mark.integration
+async def test_superseding_an_already_superseded_observation_is_refused(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """PHYS-08: supersede once. A second supersede attempt on an already-superseded row must
+    not overwrite the first correction's provenance.
+    """
+    prior_id = await committed_history.physique_observation(observed_on=dt.date(2026, 1, 1))
+    await create_observation(
+        session,
+        user_id=DEFAULT_USER_ID,
+        observed_on=dt.date(2026, 2, 1),
+        ratings=_full_rating_set(),
+        pose_state=PoseState.RELAXED,
+        supersedes_observation_id=prior_id,
+        superseded_reason="first correction",
+    )
+    await session.commit()
+
+    with pytest.raises(ValueError, match="does not name an un-superseded observation"):
+        await create_observation(
+            session,
+            user_id=DEFAULT_USER_ID,
+            observed_on=dt.date(2026, 3, 3),
+            ratings=_full_rating_set(),
+            pose_state=PoseState.RELAXED,
+            supersedes_observation_id=prior_id,
+            superseded_reason="second correction, should be refused",
+        )
+
+
+@pytest.mark.integration
+async def test_one_supersede_argument_without_the_other_is_refused(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """Both supersede arguments travel together or not at all -- one alone is refused before
+    any statement is issued.
+    """
+    prior_id = await committed_history.physique_observation(observed_on=dt.date(2026, 1, 1))
+    await session.commit()
+
+    with pytest.raises(ValueError, match="requires both"):
+        await create_observation(
+            session,
+            user_id=DEFAULT_USER_ID,
+            observed_on=dt.date(2026, 2, 1),
+            ratings=_full_rating_set(),
+            pose_state=PoseState.RELAXED,
+            supersedes_observation_id=prior_id,
+            superseded_reason=None,
+        )
+
+    with pytest.raises(ValueError, match="requires both"):
+        await create_observation(
+            session,
+            user_id=DEFAULT_USER_ID,
+            observed_on=dt.date(2026, 2, 1),
+            ratings=_full_rating_set(),
+            pose_state=PoseState.RELAXED,
+            supersedes_observation_id=None,
+            superseded_reason="a reason with no id to attach it to",
+        )
+
+
+@pytest.mark.integration
+async def test_an_over_long_superseded_reason_is_refused(
+    session: AsyncSession, committed_history: GoldenBuilder
+) -> None:
+    """D-01: `superseded_reason` is `String(200)`; refused here rather than left for asyncpg to
+    truncate mid-transaction.
+    """
+    prior_id = await committed_history.physique_observation(observed_on=dt.date(2026, 1, 1))
+    await session.commit()
+
+    with pytest.raises(ValueError, match="longer than 200 characters"):
+        await create_observation(
+            session,
+            user_id=DEFAULT_USER_ID,
+            observed_on=dt.date(2026, 2, 1),
+            ratings=_full_rating_set(),
+            pose_state=PoseState.RELAXED,
+            supersedes_observation_id=prior_id,
+            superseded_reason="a" * 201,
+        )
+
+    # Refused before any statement was issued: the prior observation is untouched and un-
+    # superseded, so it is still the latest -- no new row was inserted either.
+    record = await get_latest_observation(session, user_id=DEFAULT_USER_ID)
+    assert record is not None
+    assert record.id == prior_id
+    assert record.superseded_at is None
