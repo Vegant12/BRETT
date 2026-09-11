@@ -33,9 +33,10 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.time import utc_now
 from app.db.models.physique import (
     PhysiqueObservation,
     PhysiqueRating,
@@ -47,6 +48,11 @@ from app.normalization.muscles import CanonicalMuscleGroup
 # D-05. A `not_assessable_reason` past this length is refused here rather than left for
 # asyncpg to truncate mid-transaction, aborting the session on a write that started clean.
 _NOT_ASSESSABLE_REASON_MAX_LENGTH = 160
+
+# The `superseded_reason` column is String(200). Refused here rather than left for asyncpg to
+# truncate mid-transaction, aborting a session that started clean -- the same argument
+# `_NOT_ASSESSABLE_REASON_MAX_LENGTH` makes.
+_SUPERSEDED_REASON_MAX_LENGTH = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +137,52 @@ def _validate_rating_coverage(ratings: Sequence[RatingEntry]) -> None:
             )
 
 
+async def _mark_superseded(
+    session: AsyncSession,
+    *,
+    observation_id: uuid.UUID,
+    user_id: uuid.UUID,
+    superseded_by_id: uuid.UUID,
+    reason: str,
+) -> int:
+    """Set the three supersede columns on ONE older observation. Returns the row count.
+
+    PHYS-08's retention rule is structural, not a convention: this is an UPDATE and there is no
+    DELETE statement anywhere in this module. The superseded row keeps every rating it ever had.
+
+    Four predicates, each doing work:
+    * `id ==` -- the target.
+    * `user_id ==` -- ASVS V4. The id arrives from a model-supplied tool argument, so a missing
+      tenant predicate here is an IDOR that would let one user's observation be marked superseded
+      by another user's write.
+    * `superseded_at IS NULL` -- supersede once. A second supersede would overwrite the first
+      reason and re-point `superseded_by_id`, losing the original correction's provenance.
+
+    A returned count of 0 means one of those three did not hold. The caller decides whether that
+    is a refusal (the MCP tool pre-validates through `get_observation`, so it is a race) or a
+    programming error.
+
+    Counted via `RETURNING` rather than `Result.rowcount` -- the async `execute()` is typed as a
+    plain `Result`, which has no `rowcount`, and Postgres gives the exact count for free (same
+    argument `normalization/resolver.py::clear_override` makes).
+    """
+    updated = await session.scalars(
+        update(PhysiqueObservation)
+        .where(
+            PhysiqueObservation.id == observation_id,
+            PhysiqueObservation.user_id == user_id,
+            PhysiqueObservation.superseded_at.is_(None),
+        )
+        .values(
+            superseded_at=utc_now(),
+            superseded_reason=reason,
+            superseded_by_id=superseded_by_id,
+        )
+        .returning(PhysiqueObservation.id)
+    )
+    return len(updated.all())
+
+
 async def create_observation(
     session: AsyncSession,
     *,
@@ -143,12 +195,29 @@ async def create_observation(
     conditioning_notes: str | None = None,
     symmetry_notes: str | None = None,
     conditions_note: str | None = None,
+    supersedes_observation_id: uuid.UUID | None = None,
+    superseded_reason: str | None = None,
 ) -> PhysiqueObservationRecord:
     """INSERT the header, then all 19 rating rows, in this session. The caller commits.
 
     `ratings` must cover every `CanonicalMuscleGroup` exactly once (D-07) — validated before
     any statement is issued.
+
+    PHYS-08: when `supersedes_observation_id` is given, `superseded_reason` is REQUIRED and the
+    older row is marked superseded inside this same transaction, AFTER the new row has been
+    flushed -- `physique_observations.superseded_by_id` is a self-referential FK, so the new id
+    must exist before another row can point at it. Both arguments together or neither; one alone
+    raises.
     """
+    if (supersedes_observation_id is None) != (superseded_reason is None):
+        raise ValueError(
+            "supersede requires both supersedes_observation_id and superseded_reason, or neither"
+        )
+    if superseded_reason is not None and len(superseded_reason) > _SUPERSEDED_REASON_MAX_LENGTH:
+        raise ValueError(
+            f"superseded_reason is longer than {_SUPERSEDED_REASON_MAX_LENGTH} characters"
+        )
+
     _validate_rating_coverage(ratings)
 
     observation_id = uuid.uuid4()
@@ -187,6 +256,28 @@ async def create_observation(
     )
 
     await session.flush()
+
+    if supersedes_observation_id is not None and superseded_reason is not None:
+        # After the flush, never before: `superseded_by_id` is a self-referential FK and the new
+        # row has to exist for the older one to point at it.
+        marked = await _mark_superseded(
+            session,
+            observation_id=supersedes_observation_id,
+            user_id=user_id,
+            superseded_by_id=observation_id,
+            reason=superseded_reason,
+        )
+        if marked != 1:
+            # Wrong user, unknown id, or already superseded. The MCP write tool pre-validates all
+            # three through `get_observation`, so reaching here means the row changed underneath
+            # that check. Raising rolls the whole transaction back -- including the new
+            # observation, which is correct: a correction that did not correct anything must not
+            # land half-applied.
+            raise ValueError(
+                "supersedes_observation_id does not name an un-superseded observation "
+                "belonging to this user"
+            )
+
     record = await get_observation(session, observation_id=observation_id, user_id=user_id)
     if record is None:  # pragma: no cover - the inserts above just created this row
         raise RuntimeError("create_observation: newly inserted observation not found")
