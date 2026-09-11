@@ -23,7 +23,12 @@ import pytest
 from pydantic import BaseModel
 
 from app.mcp.tools import schemas
-from app.mcp.tools.schemas import MuscleGroupRollup, ProgramSwitchStatus, _McpModel
+from app.mcp.tools.schemas import (
+    MuscleGroupRollup,
+    PhysiqueLogStatus,
+    ProgramSwitchStatus,
+    _McpModel,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS_SOURCE = REPO_ROOT / "backend" / "app" / "mcp" / "tools" / "schemas.py"
@@ -51,6 +56,12 @@ _FLOAT_USE = re.compile(r"(?<![\w.])float\s*\(|:\s*float\b|->\s*float\b|\[\s*flo
 _DEGRADED_OVERRIDES: dict[str, object] = {
     "plateaued_only": True,
     "switch_status": ProgramSwitchStatus.UNKNOWN,
+    # Same reasoning as `switch_status`, and the same reasoning as `_degraded_log` in
+    # `app/mcp/tools/physique.py`: `log_status` is a bare enum annotation the generic builder
+    # cannot degrade, and `REFUSED` would be a claim the server cannot make from inside an
+    # exception handler -- an append that raised after the INSERT succeeded is `UNKNOWN`, not
+    # "nothing happened" (PITFALLS #15).
+    "log_status": PhysiqueLogStatus.UNKNOWN,
 }
 
 
