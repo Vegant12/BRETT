@@ -571,6 +571,8 @@ class MonthlyReportResponse(_ReportBody):
     ``None`` exactly when ``data_available`` is False.
     """
 
+    narrative: str | None
+
 
 class PhysiqueRatingInput(_McpModel):
     """One muscle group's rating, as Claude supplies it on the write call (PHYS-02, PHYS-03).
@@ -694,5 +696,3 @@ class LatestPhysiqueObservationResponse(_McpModel):
     observation: PhysiqueObservationView | None
     rating_scale: str
     disclaimer: str
-
-    narrative: str | None

@@ -21,8 +21,10 @@ no uniqueness constraint at all.
 **The exception guard** (D-10, MCP-06). ``safe_tool`` exists because ``mcp 2.0.0`` returns
 ``str(exception)`` to the model verbatim, and an asyncpg connection error carries the DSN.
 
-**The one writable session** (GOAL-03, PITFALLS #14). ``writable_session`` is
-``read_only_session``'s sibling, not its replacement; exactly one tool module opens it.
+**The one writable session** (GOAL-03, PITFALLS #14, MCP-07). ``writable_session`` is
+``read_only_session``'s sibling, not its replacement; ``program_switch.py`` and ``physique.py``
+are the only two tool modules that open it, and ``test_mcp_isolation._WRITE_ALLOWLIST`` asserts
+that set EXACTLY -- a third entry fails the suite.
 
 Plus the per-tool response caps, in one block, so a budget can be re-tuned in one place.
 """
@@ -186,8 +188,12 @@ async def writable_session(ctx: Context[AppContext]) -> AsyncIterator[AsyncSessi
       because an exception after a successful commit is reported by `safe_tool` as `unknown`
       -- and `unknown` on an applied switch invites a retry that double-applies.
 
-    Used by exactly one module. `test_mcp_isolation._WRITE_ALLOWLIST` asserts that, with
-    exactly one entry, so a second write tool cannot arrive quietly.
+    Used by exactly TWO modules -- `program_switch.py` (GOAL-03's confirm-gated switch) and
+    `physique.py` (PHYS-06's append-only observation log).
+    `test_mcp_isolation._WRITE_ALLOWLIST` asserts that membership exactly, with `len == 2`, so a
+    THIRD write tool cannot arrive quietly. The allowlist was WIDENED for the second one, never
+    loosened into a prefix or substring check. The commit-is-last rule now has two callers:
+    `program_switch.py`'s double-apply and `physique.py`'s duplicate-append are the same failure.
     """
     sessionmaker = ctx.request_context.lifespan_context.sessionmaker
     async with sessionmaker() as session:
