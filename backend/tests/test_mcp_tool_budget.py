@@ -56,6 +56,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from app.normalization.muscles import CanonicalMuscleGroup
 from tests.conftest import WORST_CASE_TEMPLATES
 
 # Full `CallToolResult` bytes: the measured worst case at the published cap, rounded up with
@@ -116,7 +117,51 @@ BUDGETS: dict[str, int] = {
     # A fixed-shape object with no list, so this does not grow with data.
     # Measured 880 bytes at the seeded "already active" no-op refusal on 2026-09-04.
     "fitness_switch_training_program": 2_048,
+    # A fixed-shape object with NO list field -- it does not echo the 19 ratings the caller just
+    # sent -- so it does not grow with data and the refusal branch measured below is the same shape
+    # as the logged branch.
+    "fitness_log_physique_observation": 2_048,
+    # Fixed shape too, but a wide one: 19 rating rows plus three 500-character note fields, a
+    # 200-character conditions note and the ~600-character PHYSIQUE_RATING_ANCHORS scale string.
+    # Derived from the schema's own caps rather than from a measurement, because
+    # `worst_case_history` seeds no physique observation: 19 rows at ~120 bytes + 1,700 bytes of
+    # notes + ~600 of scale + envelope is roughly 4.6 KB, so 8,192 is the same ~30-70% headroom
+    # every other entry carries.
+    "fitness_get_latest_physique_observation": 8_192,
 }
+
+# A fixed, non-existent observation id. The write tool validates `supersedes_observation_id`
+# through its tenant-scoped lookup BEFORE issuing any statement, so a budget call carrying this id
+# takes the REFUSED branch: it writes nothing and commits nothing, exactly as
+# `fitness_switch_training_program`'s "already active" branch does above. A budget measurement must
+# not leave rows behind in the shared container. The refusal response is the same field set as the
+# logged one (no list, no echoed ratings), so this measures the real worst case.
+_ABSENT_OBSERVATION_ID = "00000000-0000-4000-8000-000000000000"
+
+
+def _physique_log_arguments() -> dict[str, object]:
+    """The heaviest legal call to `fitness_log_physique_observation`, on its no-write branch.
+
+    All 19 ratings are required by D-07's invariant, so they are built from
+    `CanonicalMuscleGroup` rather than written out -- the same computed-helper convention
+    `_adjacent_comparison_periods` follows. The note fields are sent at their published caps,
+    because a budget measured on a short call is measuring the cheap call.
+    """
+    return {
+        "ratings": [
+            {"muscle_group": group.value, "rating_level": "Developed"}
+            for group in CanonicalMuscleGroup
+        ],
+        "pose_state": "relaxed",
+        "photo_angles_present": ["front", "back", "side"],
+        "leanness_notes": "x" * 500,
+        "conditioning_notes": "x" * 500,
+        "symmetry_notes": "x" * 500,
+        "conditions_note": "y" * 200,
+        "supersedes_observation_id": _ABSENT_OBSERVATION_ID,
+        "superseded_reason": "z" * 200,
+    }
+
 
 # Every window parameter at its published maximum. Tools whose arguments cannot be written down
 # ahead of time -- they need an exercise title or a workout id the fixture created -- are listed
@@ -141,6 +186,8 @@ WORST_CASE_ARGS: dict[str, dict[str, object]] = {
     # branch: it writes nothing and issues no token. A budget measurement must not leave
     # rows behind in the shared container, and a token minted here would outlive the test.
     "fitness_switch_training_program": {"program": "lean_bulk"},
+    "fitness_get_latest_physique_observation": {},
+    "fitness_log_physique_observation": _physique_log_arguments(),
     # exercise_name / workout_id are filled in at call time from the seeded fixture.
 }
 
