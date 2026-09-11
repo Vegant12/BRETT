@@ -64,7 +64,7 @@ numbering from v2.0's last phase (13); it does not restart at 1.
 - [x] **Phase 14: Deploy Pipeline Migration Safety** - Close the deploy-migration gap before this milestone ships its own new migration (completed 2026-09-07)
 - [x] **Phase 15: Physique Rating Calibration Spike** - Measure real rating drift/anchoring before the observation schema locks (completed 2026-09-08)
 - [x] **Phase 16: Physique Data Model & Repository** - Persist a physique observation's full shape with no MCP surface yet (completed 2026-09-09)
-- [ ] **Phase 17: Physique Analytics & MCP Read/Write Tools** - Claude can log and retrieve physique observations; diff and volume-correlation analytics land alongside
+- [x] **Phase 17: Physique Analytics & MCP Read/Write Tools** - Claude can log and retrieve physique observations; diff and volume-correlation analytics land alongside (completed 2026-09-11)
 - [ ] **Phase 18: Monthly Report Physique Integration** - The monthly report gains a physique section; the weekly report structurally cannot
 - [ ] **Phase 19: Production Deploy of Migration 0007** - Prove Phase 14's fix works by deploying this milestone's own migration through it
 
@@ -135,8 +135,8 @@ Plans:
 - [x] 17-01-PLAN.md — Implement PHYS-08's supersede write and supersede-aware read in the physique repository, plus the one PHYS-11 disclaimer constant
 - [x] 17-02-PLAN.md — Build analytics/physique.py: the deterministic ordinal diff and the self-relative volume cross-reference
 - [x] 17-03-PLAN.md — Build the physique MCP tool module (append-only write + prior-observation read) and widen the write-guard allowlist to exactly two modules
-- [ ] 17-04-PLAN.md — Prove the tool bodies: one-call append, every refusal writing nothing, the supersede round trip and both degraded payloads
-- [ ] 17-05-PLAN.md — Register both tools, restructure the annotation guard into a per-tool mapping (MCP-08), budget both tools and document them
+- [x] 17-04-PLAN.md — Prove the tool bodies: one-call append, every refusal writing nothing, the supersede round trip and both degraded payloads
+- [x] 17-05-PLAN.md — Register both tools, restructure the annotation guard into a per-tool mapping (MCP-08), budget both tools and document them
 
 ### Phase 18: Monthly Report Physique Integration
 **Goal**: The monthly report reads across training, nutrition, measurements and visible physique in one view; the weekly report structurally cannot carry it.
@@ -182,6 +182,6 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
 | 15. Physique Rating Calibration Spike | 2/2 | Complete    | 2026-09-08 |
 | 16. Physique Data Model & Repository | 3/3 | Complete    | 2026-09-09 |
-| 17. Physique Analytics & MCP Read/Write Tools | 3/5 | In Progress|  |
+| 17. Physique Analytics & MCP Read/Write Tools | 5/5 | Complete   | 2026-09-11 |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
 | 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
