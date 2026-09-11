@@ -133,8 +133,8 @@ Plans:
 
 Plans:
 - [x] 17-01-PLAN.md — Implement PHYS-08's supersede write and supersede-aware read in the physique repository, plus the one PHYS-11 disclaimer constant
-- [ ] 17-02-PLAN.md — Build analytics/physique.py: the deterministic ordinal diff and the self-relative volume cross-reference
-- [ ] 17-03-PLAN.md — Build the physique MCP tool module (append-only write + prior-observation read) and widen the write-guard allowlist to exactly two modules
+- [x] 17-02-PLAN.md — Build analytics/physique.py: the deterministic ordinal diff and the self-relative volume cross-reference
+- [x] 17-03-PLAN.md — Build the physique MCP tool module (append-only write + prior-observation read) and widen the write-guard allowlist to exactly two modules
 - [ ] 17-04-PLAN.md — Prove the tool bodies: one-call append, every refusal writing nothing, the supersede round trip and both degraded payloads
 - [ ] 17-05-PLAN.md — Register both tools, restructure the annotation guard into a per-tool mapping (MCP-08), budget both tools and document them
 
@@ -182,6 +182,6 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 14. Deploy Pipeline Migration Safety | 3/3 | Complete    | 2026-09-07 |
 | 15. Physique Rating Calibration Spike | 2/2 | Complete    | 2026-09-08 |
 | 16. Physique Data Model & Repository | 3/3 | Complete    | 2026-09-09 |
-| 17. Physique Analytics & MCP Read/Write Tools | 1/5 | In Progress|  |
+| 17. Physique Analytics & MCP Read/Write Tools | 3/5 | In Progress|  |
 | 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
 | 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
