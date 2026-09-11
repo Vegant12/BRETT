@@ -70,13 +70,16 @@ _PUBLIC_TOOL = re.compile(r"^async def (fitness_\w+)\(", re.MULTILINE)
 # the response models.
 _NOT_TOOL_MODULES = frozenset({"ping.py", "_common.py", "schemas.py"})
 
-# GOAL-04 / PITFALLS #14: the write guard is NARROWED to one named module, never relaxed.
-# `program_switch.py` holds the only tool in the system that commits, and it commits
-# exactly twice -- once for the token it issues, once for the switch it applies. Every
-# other module under `app/mcp/`, INCLUDING the program READ tool in `programs.py`, stays
-# under the full ban. The length assertion below is the actual control: a second write
-# module cannot be admitted by adding a second entry here without failing the suite.
-_WRITE_ALLOWLIST = frozenset({"program_switch.py"})
+# GOAL-04 / PITFALLS #14 / MCP-07: the write guard is NARROWED to two NAMED modules, and was
+# WIDENED for the second one rather than loosened into a prefix or substring check.
+# `program_switch.py` holds the confirm-gated program switch; `physique.py` holds PHYS-06's
+# append-only observation log AND its companion read tool -- the read tool in a
+# write-allowlisted module is the price 17-CONTEXT.md D-07 accepts for keeping the supersede
+# correction on the same tool instead of adding a third write module. Every other module under
+# `app/mcp/`, INCLUDING the program READ tool in `programs.py`, stays under the full ban. The
+# length assertion below is the actual control: a THIRD write module cannot be admitted by
+# adding a third entry here without failing the suite.
+_WRITE_ALLOWLIST = frozenset({"program_switch.py", "physique.py"})
 
 
 def _mcp_modules() -> list[Path]:
@@ -129,10 +132,11 @@ def test_the_walk_actually_finds_files() -> None:
 
     # As of Phase 6 the package holds `__init__`, `auth`, `context`, `server`, `tools/__init__`,
     # `tools/_common`, `tools/schemas`, `tools/ping`, plus the seven tool modules `workouts`,
-    # `volume`, `progression`, `records`, `comparison`, `body` and `summary` -- fifteen. The floor
-    # rises with the package on purpose: a floor of 2 stays satisfied by a walk that has silently
-    # lost most of what it was supposed to be checking.
-    assert len(modules) >= 15, f"the walk found only {len(modules)} modules under {MCP}"
+    # `volume`, `progression`, `records`, `comparison`, `body` and `summary` -- fifteen, plus
+    # `programs`, `program_switch`, `health`, `reports` and (Phase 17) `physique` -- twenty. The
+    # floor rises with the package on purpose: a floor of 2 stays satisfied by a walk that has
+    # silently lost most of what it was supposed to be checking.
+    assert len(modules) >= 20, f"the walk found only {len(modules)} modules under {MCP}"
 
 
 def test_mcp_never_writes() -> None:
@@ -143,12 +147,12 @@ def test_mcp_never_writes() -> None:
     half: that a future tool does not quietly construct its own session from the sessionmaker and
     bypass the helper entirely, which is the one way around the runtime control.
 
-    GOAL-04 (Plan 12-04): the guard is NARROWED, never relaxed, for `_WRITE_ALLOWLIST`'s one
-    named module. Only the `_SESSION_WRITE` assertion is skipped for it -- `_WRITE_IMPORT`
-    keeps applying to EVERY module, allowlisted or not, which is Pitfall A's whole point: no
-    module under `app/mcp/` may construct its own insert/update/delete, including the one
-    module that is allowed to call `session.commit()` on writes built entirely inside
-    `app/db/repositories/programs.py`.
+    GOAL-04 (Plan 12-04, widened in Plan 17-03 / MCP-07): the guard is NARROWED, never relaxed,
+    to `_WRITE_ALLOWLIST`'s two named modules. Only the `_SESSION_WRITE` assertion is skipped for
+    them -- `_WRITE_IMPORT` keeps applying to EVERY module, allowlisted or not, which is Pitfall
+    A's whole point: no module under `app/mcp/` may construct its own insert/update/delete,
+    including the two modules that are allowed to call `session.commit()` on writes built
+    entirely inside `app/db/repositories/programs.py` and `app/db/repositories/physique.py`.
     """
     for path in _mcp_modules():
         source = _module_code(path)
@@ -163,28 +167,27 @@ def test_mcp_never_writes() -> None:
             f"sqlalchemy. A read-only tool layer has no use for insert/update/delete"
         )
 
-    assert len(_WRITE_ALLOWLIST) == 1, (
-        "GOAL-04: exactly ONE module under app/mcp/ may write. A second entry here is a "
-        "second write tool arriving without the token gate, the ToolAnnotations, the budget "
-        "and the coaching-doc entry that the first one shipped with -- which is the review "
-        "this assertion exists to force."
+    assert len(_WRITE_ALLOWLIST) == 2, (
+        "GOAL-04: exactly TWO modules under app/mcp/ may write. A THIRD entry here is a "
+        "write tool arriving without the annotations, the budget and the coaching-doc entry "
+        "that the first two shipped with -- which is the review this assertion exists to force."
     )
 
 
-def test_the_write_allowlist_holds_exactly_one_module() -> None:
-    """GOAL-04 / SC#5 / T-12-09: exactly one module under `app/mcp/` may commit.
+def test_the_write_allowlist_holds_exactly_two_modules() -> None:
+    """GOAL-04 / SC#5 / T-12-09 / MCP-07: exactly two modules under `app/mcp/` may commit.
 
-    This is the assertion that makes "adding a second write module would fail the test
-    suite" literally true. A second write tool either fails `test_mcp_never_writes` (not
-    allowlisted) or fails HERE (allowlisted, making the set two) -- there is no third
+    This is the assertion that makes "adding a third write module would fail the test
+    suite" literally true. A THIRD write tool either fails `test_mcp_never_writes` (not
+    allowlisted) or fails HERE (allowlisted, making the set three) -- there is no third
     path, and both roads lead to the review this phase's token gate, annotations, budget
     and coaching-doc entry all went through.
     """
-    assert _WRITE_ALLOWLIST == frozenset({"program_switch.py"})
-    assert len(_WRITE_ALLOWLIST) == 1
+    assert _WRITE_ALLOWLIST == frozenset({"program_switch.py", "physique.py"})
+    assert len(_WRITE_ALLOWLIST) == 2
 
 
-def test_only_one_module_opens_a_writable_session() -> None:
+def test_only_two_modules_open_a_writable_session() -> None:
     """The runtime half of the same claim. `_WRITE_ALLOWLIST` names who may COMMIT; this
     names who may open a session that CAN. A module calling `writable_session` without a
     commit today is a module one line away from writing, and `read_only_session` is the
@@ -194,7 +197,7 @@ def test_only_one_module_opens_a_writable_session() -> None:
         for path in _mcp_modules()
         if path.name != "_common.py" and "writable_session(" in _module_code(path)
     }
-    assert opens_writable == {"program_switch.py"}
+    assert opens_writable == {"program_switch.py", "physique.py"}
 
 
 def test_mcp_uses_no_raw_sql_text() -> None:
@@ -301,9 +304,13 @@ def test_every_tool_module_guards_its_public_tools() -> None:
     # Plan 05's job, alongside the registry/budget/coaching-doc guards it trips. Raised from 15
     # to 17 in Plan 13-06, which adds `fitness_get_activity_trend` and
     # `fitness_get_nutrition_trend` (`health.py`). Raised from 17 to 19 in Plan 13-09, which adds
-    # `fitness_get_weekly_report` and `fitness_get_monthly_report` (`reports.py`).
-    assert len(found) == 19, (
-        f"expected 19 public tool coroutines under app/mcp/tools/, found {len(found)}: "
+    # `fitness_get_weekly_report` and `fitness_get_monthly_report` (`reports.py`). Raised from 19
+    # to 21 in Plan 17-03, which adds `fitness_log_physique_observation` and
+    # `fitness_get_latest_physique_observation` (`physique.py`) -- neither is registered in
+    # `server.py` yet, deliberately: that is Plan 17-05's job, alongside the
+    # registry/annotation/budget/coaching-doc guards it trips.
+    assert len(found) == 21, (
+        f"expected 21 public tool coroutines under app/mcp/tools/, found {len(found)}: "
         f"{sorted(found)}. If a tool was added, register it in `server.py`, add it to "
         f"`EXPECTED_TOOLS` in test_mcp_tool_schemas.py, and raise this count -- all three, so a "
         f"new tool cannot ship unguarded and unnoticed"
