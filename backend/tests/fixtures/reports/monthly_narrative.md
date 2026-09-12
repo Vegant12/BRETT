@@ -43,3 +43,12 @@ Decision support from body-weight trend and training progression only. Not a med
 - body_measurements: last synced 2026-05-31T09:00:00+00:00
 - activity: last synced 2026-05-31T09:00:00+00:00
 - nutrition: last synced 2026-05-31T09:00:00+00:00
+
+## Physique
+- As of 2026-04-26 — a different anchor from the 2026-05-01 to 2026-05-31 period above.
+- Changes since 2026-03-20 (37 days):
+  - chest: improved, Emerging to Well-Developed
+  - calves: regressed, Developed to Minimal
+- Underdeveloped and undertrained (12-week volume window, 2026-02-02 to 2026-04-26):
+  - rear_delts: Minimal, 2.000 weighted sets
+These muscle-group ratings are subjective model output read from photographs, not a measurement. They are not comparable to a measured figure such as kilograms lifted or centimetres of waist, and they carry no comparison to anyone other than this same person.

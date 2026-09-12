@@ -570,7 +570,9 @@ def test_the_weekly_heading_names_the_period_and_the_window() -> None:
     )
 
 
-def test_the_seven_section_headings_are_present() -> None:
+def test_the_seven_shared_section_headings_are_present() -> None:
+    """The seven period-independent sections. ## Physique is asserted separately because it is
+    monthly-only."""
     narrative = build_narrative(_report())
     for heading in (
         "## Training",
@@ -837,11 +839,12 @@ def test_every_number_in_the_narrative_is_already_in_the_structured_fields() -> 
         )
 
 
-def test_the_template_declares_the_seven_sections_in_order() -> None:
+def test_the_template_declares_the_eight_sections_in_order() -> None:
     """The shared contract, asserted on the template itself rather than inferred from rendered
-    text. `test_the_seven_section_headings_are_present` proves the headings reach the output;
-    this proves there is ONE ordered declaration producing them, which is what makes weekly and
-    monthly structurally identical instead of coincidentally identical."""
+    text. `test_the_seven_shared_section_headings_are_present` proves the headings reach the
+    output; this proves there is ONE ordered declaration producing them, which is what makes
+    weekly and monthly structurally identical instead of coincidentally identical -- apart from
+    the ONE section that declares itself monthly-only."""
     assert [section.heading for section in _NARRATIVE_TEMPLATE] == [
         "## Training",
         "## Strength",
@@ -850,11 +853,38 @@ def test_the_template_declares_the_seven_sections_in_order() -> None:
         "## Activity",
         "## Program and recomposition",
         "## Data quality",
+        "## Physique",
     ]
-    assert all(section.periods is None for section in _NARRATIVE_TEMPLATE), (
-        "every section shipped today applies to BOTH periods; the first period-restricted "
-        "section is Phase 18's monthly-only physique block"
+    restricted = {
+        section.heading: section.periods
+        for section in _NARRATIVE_TEMPLATE
+        if section.periods is not None
+    }
+    assert restricted == {"## Physique": (ReportPeriod.MONTHLY,)}, (
+        "exactly one section is period-restricted: RPT-04's monthly-only physique block. "
+        "Every other section applies to BOTH periods"
     )
+
+
+def test_every_shipped_section_builder_returns_at_least_one_line() -> None:
+    """D-13's constraint, asserted rather than observed. `build_narrative` now SKIPS a section
+    whose builder returns no lines; that is a no-op for everything shipped today only if every
+    other builder is total. If a future edit makes one of them return `[]` for a populated
+    report, that section would vanish silently from the narrative -- this is what catches it."""
+    for period in (ReportPeriod.MONTHLY, ReportPeriod.WEEKLY):
+        report = _report(period=period)
+        for section in _NARRATIVE_TEMPLATE:
+            if not section.applies_to(period):
+                continue
+            assert section.build(report), (
+                f"{section.heading} returned no body lines for a populated {period.value} "
+                "report -- build_narrative would now skip it entirely"
+            )
+
+
+def test_the_physique_heading_is_monthly_only() -> None:
+    assert "## Physique" in build_narrative(_report(period=ReportPeriod.MONTHLY))
+    assert "## Physique" not in build_narrative(_report(period=ReportPeriod.WEEKLY))
 
 
 def test_a_monthly_only_section_renders_monthly_and_is_absent_weekly(
