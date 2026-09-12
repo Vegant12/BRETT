@@ -52,6 +52,7 @@ from app.analytics.schemas import (
     NutritionTrendResult,
     PeriodSummary,
     PersonalRecordsResult,
+    PhysiqueSection,
     PlateauResult,
     ProgressionSignal,
     RecentRecord,
@@ -569,9 +570,32 @@ class MonthlyReportResponse(_ReportBody):
     data the structured fields above already carry. Not free-form text, not AI-authored, and
     carrying no recommendation language -- ``test_analytics_reports.py`` asserts all three.
     ``None`` exactly when ``data_available`` is False.
+
+    ``physique`` is RPT-04: the latest physique observation's header and confounder metadata,
+    the per-muscle diff against the prior observation, and the volume cross-reference --
+    the Phase 17 analytics results embedded WHOLE, because each carries its own window in its
+    own fields and the cross-reference's 12-week volume window anchors on ``observed_on``
+    rather than on this report's period.
+
+    The ``diff`` carried here is NARROWED to muscle groups whose verdict is ``improved`` or
+    ``regressed`` (D-02/D-03). The analytics layer keeps the gap-free 19-row spine for any
+    direct caller; a monthly report is a summary, and 19 rows of mostly-unchanged is the same
+    grid problem ``roll_up_muscles`` exists to avoid. There is deliberately no
+    "of 19 groups, N were comparable" count beside it (D-04): unlike the open-ended exercise
+    population behind ``plateau_highlights_total``, the physique denominator is a fixed,
+    published 19 (``CanonicalMuscleGroup``). ``cross_reference.flagged`` is carried whole with
+    no cap and no ``was_truncated``/``total`` pair (D-06) -- it is the intersection of two
+    narrow sets inside that same fixed 19.
+
+    ``None`` when ``data_available`` is False, and also when the user has never logged an
+    observation (D-11). That second case means a ``None`` here does NOT prove the period was
+    weekly: ``WeeklyReportResponse`` carries no ``physique`` FIELD at all, and that structural
+    absence -- not this value -- is what
+    ``test_the_weekly_report_response_structurally_cannot_carry_a_physique_section`` asserts.
     """
 
     narrative: str | None
+    physique: PhysiqueSection | None
 
 
 class PhysiqueRatingInput(_McpModel):

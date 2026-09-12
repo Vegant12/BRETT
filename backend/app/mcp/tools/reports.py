@@ -24,6 +24,11 @@ a coaching answer that cites more than a handful of individual lifts has stopped
 two (``waist_cm``, ``fat_percent``), and ``fitness_get_body_measurement_trend`` answers for the
 rest.
 
+*The unchanged and not-comparable muscle groups* are dropped from the monthly report's physique
+diff (RPT-04/D-02). The analytics layer keeps all 19; a monthly summary reports the ones that
+moved. The weekly report carries no physique section at all -- ``WeeklyReportResponse`` has no
+such field, which is a structural absence rather than an omission by convention.
+
 **What these tools COST.**
 
 ``compose_report`` issues roughly nine analytics calls, one of which
@@ -51,7 +56,12 @@ import structlog
 from mcp.server.mcpserver import Context
 
 from app.analytics.reports import build_narrative, compose_report
-from app.analytics.schemas import ReportPeriod, ReportResult
+from app.analytics.schemas import (
+    PhysiqueDiffVerdict,
+    PhysiqueSection,
+    ReportPeriod,
+    ReportResult,
+)
 from app.mcp.context import AppContext
 from app.mcp.tools._common import (
     MAX_REPORT_PLATEAU_HIGHLIGHTS,
@@ -149,6 +159,46 @@ def _report_body_fields(report: ReportResult) -> dict[str, Any]:
     }
 
 
+# D-02: the two verdicts a monthly summary reports. `UNCHANGED` and `NOT_COMPARABLE` are
+# deliberately absent -- the report layer already made this exact narrowing once, for plateaus
+# (`plateaued=True` before the cap), and for the same reason: of the 19 groups analysed, these
+# are the ones that moved.
+_REPORT_PHYSIQUE_VERDICTS: tuple[PhysiqueDiffVerdict, ...] = (
+    PhysiqueDiffVerdict.IMPROVED,
+    PhysiqueDiffVerdict.REGRESSED,
+)
+
+
+def _filtered_physique(report: ReportResult) -> PhysiqueSection | None:
+    """D-02/D-03: the presentation narrowing, applied HERE and not in `compose_report`.
+
+    `ReportResult`'s own docstring states the rule this follows -- "Lists are UNCAPPED here",
+    and a silent truncation inside the analytics layer would be a wrong answer. So
+    `report.physique.diff` arrives with its gap-free 19-row spine intact and leaves here with
+    only the rows that moved.
+
+    NO cap and no `was_truncated`/`total` pair (D-06): the population is a fixed, published 19
+    (`CanonicalMuscleGroup`), and `cross_reference.flagged` is the intersection of two narrow
+    subsets of it. A truncation apparatus for a list that cannot exceed 19 would be ceremony
+    with no failure mode behind it.
+
+    Returns ONE object, which `fitness_get_monthly_report` then uses for BOTH the response
+    field and the `capped_report` copy handed to `build_narrative`. That is what makes the
+    WR-01 bug class -- the narrative and the JSON field beside it silently disagreeing --
+    structurally unreachable here rather than merely tested against.
+    """
+    physique = report.physique
+    if physique is None:
+        return None
+    diff = physique.diff
+    if diff is None:
+        # D-12: exactly one observation. Nothing to narrow; the narrative renders its own
+        # explicit "first recorded observation" line off this same None.
+        return physique
+    changed = [row for row in diff.muscle_groups if row.verdict in _REPORT_PHYSIQUE_VERDICTS]
+    return physique.model_copy(update={"diff": diff.model_copy(update={"muscle_groups": changed})})
+
+
 def _degraded_body_fields() -> dict[str, Any]:
     """Every ``_ReportBody`` field, emptied rather than partially filled (T-06-01).
 
@@ -197,7 +247,10 @@ def _degraded_weekly() -> WeeklyReportResponse:
 
 
 def _degraded_monthly() -> MonthlyReportResponse:
-    return MonthlyReportResponse(**_degraded_body_fields(), narrative=None)
+    # `physique=None` sits beside `narrative=None` rather than inside the SHARED
+    # `_degraded_body_fields()` dict, for the same reason `narrative` does: the weekly response
+    # type has neither field (D-14, criterion 1).
+    return MonthlyReportResponse(**_degraded_body_fields(), narrative=None, physique=None)
 
 
 @safe_tool(degraded=_degraded_weekly)
@@ -224,12 +277,15 @@ async def fitness_get_monthly_report(ctx: Context[AppContext]) -> MonthlyReportR
     # OUTSIDE the `async with`: `build_narrative` is pure and synchronous, and holding a
     # transaction open across string formatting would be a transaction held for no reason.
     body_fields = _report_body_fields(report)
-    # `build_narrative` must narrate the SAME capped/filtered highlight lists the structured
-    # fields above carry, never the raw `report`. Passing the uncapped report here would let the
-    # narrative -- the one field `docs/coaching-instructions.md` tells Claude to quote directly --
-    # silently outgrow the MAX_REPORT_PR_HIGHLIGHTS/MAX_REPORT_PLATEAU_HIGHLIGHTS caps the JSON
-    # fields above already enforce, for a user who PRs or stalls on more exercises in a month than
-    # the fixed test fixture does.
+    # D-02/D-03: narrowed ONCE, here, and used twice below -- so the `physique` field the
+    # response carries and the one `build_narrative` narrates are literally the same object.
+    physique = _filtered_physique(report)
+    # `build_narrative` must narrate the SAME capped/filtered lists the structured fields above
+    # carry, never the raw `report`. Passing the uncapped report here would let the narrative --
+    # the one field `docs/coaching-instructions.md` tells Claude to quote directly -- silently
+    # outgrow the MAX_REPORT_PR_HIGHLIGHTS/MAX_REPORT_PLATEAU_HIGHLIGHTS caps the JSON fields
+    # above already enforce, and (since plan 18-03) would let it narrate 19 physique rows beside
+    # a JSON field carrying only the ones that moved.
     capped_report = report.model_copy(
         update={
             "pr_highlights": report.pr_highlights.model_copy(
@@ -238,6 +294,9 @@ async def fitness_get_monthly_report(ctx: Context[AppContext]) -> MonthlyReportR
             "plateau_highlights": report.plateau_highlights.model_copy(
                 update={"exercises": body_fields["plateau_highlights"]}
             ),
+            "physique": physique,
         }
     )
-    return MonthlyReportResponse(**body_fields, narrative=build_narrative(capped_report))
+    return MonthlyReportResponse(
+        **body_fields, narrative=build_narrative(capped_report), physique=physique
+    )
