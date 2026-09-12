@@ -12,3 +12,11 @@ Three pre-existing lines (around `get_nutrition_trend`'s signature and two `Deci
 after some prior ruff-version change, unrelated to this phase's physique work. This file is not
 touched by any 18-01/18-02/18-03 task. Left as-is; a future formatting-only pass across the repo
 should pick it up.
+
+## `backend/app/db/migration_preflight.py` fails `ruff check` (E501, line too long)
+
+Found while running plan 18-03's phase-level `<verification>` block
+(`uv run ruff check backend docs`). Line 144's f-string (inside an exception's `stderr`
+formatting branch) is 115 characters, over the 100-column limit. This file belongs to Phase 14
+(Deploy Pipeline Migration Safety) and is not touched by any 18-01/18-02/18-03 task. Left as-is,
+per the scope boundary; a future formatting-only pass across the repo should pick it up.

@@ -54,7 +54,7 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
 |---|---|---|
 | "How's my training going?" | `fitness_get_training_summary` | `weeks` (max 52) |
 | "How did this week go?" | `fitness_get_weekly_report` | *(none)* |
-| "How was this month?" | `fitness_get_monthly_report` | *(none)* |
+| "How was this month?" / "How does my physique compare to last time?" | `fitness_get_monthly_report` | *(none)* |
 | "Which muscles are undertrained?" | `fitness_get_muscle_group_volume` | `weeks` |
 | "Is my volume up or down?" | `fitness_get_weekly_volume` | `weeks` |
 | "Am I hitting each muscle enough times a week?" | `fitness_get_training_frequency` | `weeks` |
@@ -84,22 +84,24 @@ mechanism, for proposing what to do next. It is never a substitute for the numbe
 - **`exercise_name` resolves by title and can be ambiguous.** Two templates can share a title, so
   the tool returns every candidate with `matched: false` rather than guessing. Present the
   candidates and ask which one the user meant. Never pick one yourself.
-- **The report tools have two anchors, not one.** `window_start`/`window_end` govern the volume,
-  muscle, PR, activity and nutrition figures (Monday-to-today weekly, month-to-date monthly).
-  `recomposition_anchor_day` and each plateau row's own `lookback_start`/`lookback_end` do NOT
-  share that window. Never narrate a 12-week plateau or recomposition verdict as "this week".
+- **The report tools have two anchors, not one.** `window_start`/`window_end` govern volume,
+  muscle, PR, activity and nutrition figures. `recomposition_anchor_day` and each plateau's own
+  `lookback_start`/`lookback_end` do NOT share that window — never narrate a 12-week plateau or
+  recomposition verdict as "this week".
 - **The monthly report's `narrative` field restates the same structured figures as markdown and
   adds no recommendations.** Quote from it; never treat it as the answer itself.
-- **`fitness_get_training_summary` vs. the report tools:** the summary answers "am I progressing"
-  over a caller-chosen `weeks`; the reports answer "how did this week/month go" over a calendar
-  period and add records, plateaus, measurements, nutrition and program context. Scheduled tasks
-  reach these report tools (verified 2026-09-05).
-- **A physique rating comes from the photo, not from the previous rating.** Call
-  `fitness_get_latest_physique_observation` before `fitness_log_physique_observation` — it returns
-  the prior ratings and the five-level scale. Treat the prior observation as a sanity check on your
-  reading, never as a target to move toward or away from: if the photo disagrees with it, record
-  what the photo shows. Also read `pose_state` and `photo_angles_present` before calling a change
-  real — a relaxed front-only set and a lightly-flexed three-angle set are not comparable.
+- **`fitness_get_training_summary` vs. the report tools:** summary answers "am I progressing" over
+  a caller-chosen `weeks`; reports answer "how did this week/month go" over a calendar period with
+  records, plateaus, measurements, nutrition and program context. Scheduled tasks reach them too.
+- **A physique rating comes from the photo, not the previous rating.** Call
+  `fitness_get_latest_physique_observation` before `fitness_log_physique_observation` for the
+  prior ratings and the five-level scale — a sanity check only, never a target to move toward.
+  Also read `pose_state`/`photo_angles_present`: a relaxed front-only set and a flexed
+  three-angle set are not comparable.
+- **The monthly report's `physique` section** carries the latest observation, notes, the diff
+  narrowed to groups that improved or regressed, and the undertrained cross-reference. Notes are
+  JSON-only, never repeated in `narrative` — relay them from the field itself.
+  The weekly report has no physique section.
 
 ## How to read the metadata envelope
 
@@ -121,10 +123,9 @@ is allowed to be, so it belongs before the answer, not after it.
 - Weights and tonnage are in **kilograms**. Body measurements are in **centimetres**.
 - Weeks are **local Monday-start weeks in `Asia/Jakarta`**. The server has already done that
   conversion — never re-bucket the returned rows by UTC, and never shift a `week_start`.
-- Warm-up sets are **already excluded** from every volume, tonnage and hard-set figure. Never
-  subtract them again.
-- Per-muscle set counts legitimately exceed the week's hard-set total, because one exercise
-  reaches several muscle groups. Never sum `direct_sets` across muscle groups into one number.
+- Warm-up sets are **already excluded** from every volume, tonnage and hard-set figure.
+- Per-muscle set counts can exceed the week's hard-set total (one exercise reaches several
+  muscle groups). Never sum `direct_sets` across muscle groups into one number.
 - When you report a recomposition verdict, always surface the response's
   `recomposition_disclaimer`. The verdict is decision support, not a medical claim.
 
