@@ -147,7 +147,12 @@ Plans:
   2. `build_narrative`'s physique section is byte-identical across repeated runs on the same input, contains none of the ten banned recommendation tokens (`_BANNED_NARRATIVE_TOKENS`), and every number it renders already exists in `report.model_dump_json()`.
   3. Claude-authored free-text notes (leanness/conditioning/symmetry) are present as structured JSON fields on the report response so Claude can relay them conversationally, but never appear inside `build_narrative`'s own rendered markdown output.
   4. A new assertion confirms every rating/verdict word rendered in the narrative matches the corresponding `.value` read directly off `report.physique`'s own fields — the word-level equivalent of the existing numeric-provenance test.
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 18-01-PLAN.md — Declare PhysiqueSection, add ReportResult.physique, and populate it from a monthly-only conditional in compose_report
+- [ ] 18-02-PLAN.md — Render the ## Physique narrative block, skip it when absent, and close D-09's free-text provenance hole
+- [ ] 18-03-PLAN.md — Put the section on the MCP wire: monthly-only field, changed-groups filter, structural weekly absence, coaching doc
 
 ### Phase 19: Production Deploy of Migration 0007
 **Goal**: Phase 14's deploy-safety fix is proven by a real deploy of this milestone's own schema change, not merely asserted.
