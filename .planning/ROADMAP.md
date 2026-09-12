@@ -150,7 +150,7 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 18-01-PLAN.md — Declare PhysiqueSection, add ReportResult.physique, and populate it from a monthly-only conditional in compose_report
+- [x] 18-01-PLAN.md — Declare PhysiqueSection, add ReportResult.physique, and populate it from a monthly-only conditional in compose_report
 - [ ] 18-02-PLAN.md — Render the ## Physique narrative block, skip it when absent, and close D-09's free-text provenance hole
 - [ ] 18-03-PLAN.md — Put the section on the MCP wire: monthly-only field, changed-groups filter, structural weekly absence, coaching doc
 
@@ -188,5 +188,5 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 15. Physique Rating Calibration Spike | 2/2 | Complete    | 2026-09-08 |
 | 16. Physique Data Model & Repository | 3/3 | Complete    | 2026-09-09 |
 | 17. Physique Analytics & MCP Read/Write Tools | 5/5 | Complete    | 2026-09-11 |
-| 18. Monthly Report Physique Integration | 0/TBD | Not started | - |
+| 18. Monthly Report Physique Integration | 1/3 | In Progress|  |
 | 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
