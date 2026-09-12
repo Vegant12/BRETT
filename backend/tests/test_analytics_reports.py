@@ -40,7 +40,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics import reports as reports_module
-from app.analytics.recomposition import INTERPRETATION_DISCLAIMER
+from app.analytics.recomposition import INTERPRETATION_DISCLAIMER, RECOMP_LOOKBACK_WEEKS
 from app.analytics.reports import (
     _NARRATIVE_TEMPLATE,
     _NarrativeSection,
@@ -1189,3 +1189,102 @@ async def test_compose_report_issues_no_write(
     assert not session.new
     assert not session.dirty
     assert not session.deleted
+
+
+async def _seed_two_observations(golden_workout: GoldenBuilder) -> tuple[dt.date, dt.date]:
+    """Two non-superseded observations 40 days apart, both inside the current local month's
+    reach, with chest moving EMERGING -> WELL-DEVELOPED (a delta of 2, the locked
+    PHYSIQUE_DIFF_MIN_LEVEL_DELTA, so the verdict is a real IMPROVED rather than the noise
+    floor). Every other group stays Not Assessable, which is `physique_observation`'s default."""
+    anchor = _anchor()
+    earlier_on = anchor - dt.timedelta(days=40)
+    later_on = anchor
+    await golden_workout.physique_observation(
+        observed_on=earlier_on,
+        ratings=[(CanonicalMuscleGroup.CHEST, "Emerging", None)],
+    )
+    await golden_workout.physique_observation(
+        observed_on=later_on,
+        ratings=[(CanonicalMuscleGroup.CHEST, "Well-Developed", None)],
+        leanness_notes="Fixture leanness note.",
+        conditioning_notes="Fixture conditioning note.",
+        symmetry_notes="Fixture balance note.",
+        conditions_note="Fixture conditions note.",
+        pose_state="lightly_flexed",
+        photo_angles_present=["front", "side"],
+    )
+    return earlier_on, later_on
+
+
+@pytest.mark.integration
+async def test_a_monthly_report_carries_the_physique_section(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """RPT-04/D-01: the monthly report's `physique` field is populated from Phase 17's
+    already-shipped analytics functions, sharing the report's single transaction snapshot."""
+    _earlier_on, later_on = await _seed_two_observations(golden_workout)
+
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY)
+
+    assert report.physique is not None
+    assert report.physique.observed_on == later_on
+    assert report.physique.pose_state is PoseState.LIGHTLY_FLEXED
+    assert report.physique.photo_angles_present == ["front", "side"]
+    assert report.physique.leanness_notes == "Fixture leanness note."
+    assert report.physique.conditions_note == "Fixture conditions note."
+    assert report.physique.diff is not None
+    # D-01: the analytics layer carries the full gap-free 19-row spine, unfiltered -- filtering
+    # to changed groups only is the MCP layer's presentation decision (plan 18-03).
+    assert len(report.physique.diff.muscle_groups) == 19
+    chest_row = next(
+        group
+        for group in report.physique.diff.muscle_groups
+        if group.muscle_group is CanonicalMuscleGroup.CHEST
+    )
+    assert chest_row.verdict is PhysiqueDiffVerdict.IMPROVED
+    assert report.physique.cross_reference.observed_on == later_on
+    assert report.physique.cross_reference.lookback_weeks == RECOMP_LOOKBACK_WEEKS
+    assert report.physique.diff.disclaimer == PHYSIQUE_RATING_DISCLAIMER
+
+
+@pytest.mark.integration
+async def test_a_weekly_report_never_carries_the_physique_section(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-11's analytics half: the structural absence lives on the MCP response type
+    (plan 18-03), and this proves the composer never populates `physique` for a weekly window
+    even when the data is present -- the same two observations `test_a_monthly_report_carries_
+    the_physique_section` proves DOES populate the monthly report."""
+    await _seed_two_observations(golden_workout)
+
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.WEEKLY)
+
+    assert report.physique is None
+
+
+@pytest.mark.integration
+async def test_a_monthly_report_with_no_observation_carries_no_physique_section(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-11: zero observations means `physique` is `None`, the same value the weekly report
+    always carries."""
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY)
+
+    assert report.physique is None
+
+
+@pytest.mark.integration
+async def test_a_monthly_report_with_exactly_one_observation_carries_a_section_with_no_diff(
+    session: AsyncSession, golden_workout: GoldenBuilder
+) -> None:
+    """D-12: fewer than two non-superseded observations means `diff` is `None`, but the section
+    itself still renders and `cross_reference` is still populated (it only requires ONE
+    observation to exist)."""
+    anchor = _anchor()
+    await golden_workout.physique_observation(observed_on=anchor)
+
+    report = await compose_report(session, user_id=DEFAULT_USER_ID, period=ReportPeriod.MONTHLY)
+
+    assert report.physique is not None
+    assert report.physique.diff is None
+    assert report.physique.cross_reference is not None
