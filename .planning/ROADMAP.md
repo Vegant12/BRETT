@@ -65,7 +65,7 @@ numbering from v2.0's last phase (13); it does not restart at 1.
 - [x] **Phase 15: Physique Rating Calibration Spike** - Measure real rating drift/anchoring before the observation schema locks (completed 2026-09-08)
 - [x] **Phase 16: Physique Data Model & Repository** - Persist a physique observation's full shape with no MCP surface yet (completed 2026-09-09)
 - [x] **Phase 17: Physique Analytics & MCP Read/Write Tools** - Claude can log and retrieve physique observations; diff and volume-correlation analytics land alongside (completed 2026-09-11)
-- [ ] **Phase 18: Monthly Report Physique Integration** - The monthly report gains a physique section; the weekly report structurally cannot
+- [x] **Phase 18: Monthly Report Physique Integration** - The monthly report gains a physique section; the weekly report structurally cannot (completed 2026-09-12)
 - [ ] **Phase 19: Production Deploy of Migration 0007** - Prove Phase 14's fix works by deploying this milestone's own migration through it
 
 ## Phase Details
@@ -152,7 +152,7 @@ Plans:
 Plans:
 - [x] 18-01-PLAN.md — Declare PhysiqueSection, add ReportResult.physique, and populate it from a monthly-only conditional in compose_report
 - [x] 18-02-PLAN.md — Render the ## Physique narrative block, skip it when absent, and close D-09's free-text provenance hole
-- [ ] 18-03-PLAN.md — Put the section on the MCP wire: monthly-only field, changed-groups filter, structural weekly absence, coaching doc
+- [x] 18-03-PLAN.md — Put the section on the MCP wire: monthly-only field, changed-groups filter, structural weekly absence, coaching doc
 
 ### Phase 19: Production Deploy of Migration 0007
 **Goal**: Phase 14's deploy-safety fix is proven by a real deploy of this milestone's own schema change, not merely asserted.
@@ -188,5 +188,5 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 15. Physique Rating Calibration Spike | 2/2 | Complete    | 2026-09-08 |
 | 16. Physique Data Model & Repository | 3/3 | Complete    | 2026-09-09 |
 | 17. Physique Analytics & MCP Read/Write Tools | 5/5 | Complete    | 2026-09-11 |
-| 18. Monthly Report Physique Integration | 2/3 | In Progress|  |
+| 18. Monthly Report Physique Integration | 3/3 | Complete   | 2026-09-12 |
 | 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
