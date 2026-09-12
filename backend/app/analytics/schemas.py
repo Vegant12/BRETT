@@ -36,7 +36,7 @@ from types import MappingProxyType
 from pydantic import BaseModel, ConfigDict
 
 from app.analytics.estimates import NoEstimateReason
-from app.db.models.physique import PhysiqueRatingLevel
+from app.db.models.physique import PhysiqueRatingLevel, PoseState
 from app.normalization.muscles import CanonicalMuscleGroup
 
 
@@ -1018,6 +1018,9 @@ class ReportResult(_AnalyticsModel):
     ``body_measurements.py``). Each of those three carries its own window in its own fields,
     which is why they are embedded whole rather than projected: a reader must be able to see
     that the verdict beside this week's volume is not a verdict about this week.
+    ``physique`` carries a FOURTH anchor -- its ``observed_on``, with ``cross_reference``'s
+    12-week volume window anchored on that observation day rather than on the report window
+    or on today -- and is ``None`` for every ``WEEKLY`` report (D-11).
 
     **No recommendations field, deliberately (D-03).** This is composed DATA. Claude
     synthesizes the recommendation from it and ``docs/coaching-instructions.md``'s decision
@@ -1054,6 +1057,7 @@ class ReportResult(_AnalyticsModel):
     nutrition: NutritionPeriodSummary
     coverage: CoverageMetadata
     freshness: FreshnessMetadata
+    physique: "PhysiqueSection | None"
 
 
 class PhysiqueDiffVerdict(StrEnum):
@@ -1143,3 +1147,57 @@ class PhysiqueVolumeCrossReference(_AnalyticsModel):
     undertrained_threshold_weighted_sets: Decimal
     flagged: list[PhysiqueVolumeFlag]
     disclaimer: str
+
+
+class PhysiqueSection(_AnalyticsModel):
+    """RPT-04/D-01: the monthly report's physique block. Composed, never computed.
+
+    **Embedded whole, not projected**, for the reason ``ReportResult``'s own docstring gives
+    about ``recomposition``/``plateau_highlights``/``measurement_highlights``: each carries its
+    own window in its own fields. That is doubly true here -- ``cross_reference``'s 12-week
+    volume window anchors on the OBSERVATION's ``observed_on``, not on the report window and
+    not on today, so a flat projection would have to hand-carry ``observed_on``,
+    ``lookback_weeks``, ``window_start``, ``window_end`` and
+    ``undertrained_threshold_weighted_sets`` or silently drop the anchor.
+
+    **No ``ratings`` list, deliberately (D-05).** ``diff.muscle_groups`` already carries
+    ``later_level`` for all 19 groups; a ratings list would ship the same 19 levels twice in one
+    payload. The confounder fields (``pose_state``, ``photo_angles_present``,
+    ``conditions_note``) are KEPT rather than trimmed, because PHYS-04's whole point is that
+    "the rating changed" and "conditions were comparable" must stay two independently
+    inspectable facts: a rise from a relaxed front-only set to a lightly-flexed three-angle set
+    is a lighting-and-pose change before it is a physique change.
+
+    **The three note fields travel as structured DATA only (D-09).** RPT-05 requires Claude to
+    be able to relay them conversationally, and requires ``build_narrative`` never to render
+    them -- free text inside the narrative would let any number printed anywhere in the prose
+    be laundered through ``model_dump_json()`` and would weaken the numeric-provenance
+    guarantee for the WHOLE narrative, not just this block.
+
+    ``diff`` is ``None`` when fewer than two non-superseded observations exist (D-12: the
+    section still renders, naming it as a first recorded observation). ``cross_reference`` is
+    non-optional: it is ``None`` from ``get_physique_volume_cross_reference`` only when ZERO
+    observations exist, which is exactly the case in which ``ReportResult.physique`` is itself
+    ``None`` (D-11).
+
+    ``flagged`` is carried UNCAPPED (D-06): it is the intersection of two narrow sets inside a
+    fixed, published population of 19 ``CanonicalMuscleGroup`` members, so a truncation
+    apparatus would be ceremony with no failure mode behind it.
+    """
+
+    observed_on: dt.date
+    pose_state: PoseState
+    photo_angles_present: list[str]
+    leanness_notes: str | None
+    conditioning_notes: str | None
+    symmetry_notes: str | None
+    conditions_note: str | None
+    diff: PhysiqueDiffResult | None
+    cross_reference: PhysiqueVolumeCrossReference
+
+
+# `ReportResult.physique` is a forward reference: `PhysiqueSection` embeds `PhysiqueDiffResult`
+# and `PhysiqueVolumeCrossReference`, which are declared BELOW `ReportResult`. Rebuilding here --
+# at the point where every referenced name finally exists -- is what turns the string annotation
+# into a resolved model, rather than leaving it to fail at the first validation.
+ReportResult.model_rebuild()
