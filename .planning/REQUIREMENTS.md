@@ -35,7 +35,7 @@
 ### Monthly Report Integration
 
 - [ ] **RPT-04**: The monthly report carries a physique section — latest observation, per-muscle diff versus the prior observation, and the volume cross-reference — expressed as an Optional field on `ReportResult` populated by a period conditional in `compose_report`, mirroring the already-shipped `MonthlyReportResponse.narrative` precedent. The weekly report does not carry it, which requires splitting the currently-shared `_report_body_fields` projection deliberately
-- [ ] **RPT-05**: `build_narrative` renders the physique section under its existing determinism contract — byte-identical across runs, no recommendation language, no number absent from the structured data. Claude-authored free-text notes travel to Claude as structured JSON fields but are never echoed into the narrative output, because a note's own presence in `model_dump_json()` would make any number inside it trivially "provable" and defeat the numeric-provenance check
+- [x] **RPT-05**: `build_narrative` renders the physique section under its existing determinism contract — byte-identical across runs, no recommendation language, no number absent from the structured data. Claude-authored free-text notes travel to Claude as structured JSON fields but are never echoed into the narrative output, because a note's own presence in `model_dump_json()` would make any number inside it trivially "provable" and defeat the numeric-provenance check
 
 ### MCP Write-Guard Amendments
 
