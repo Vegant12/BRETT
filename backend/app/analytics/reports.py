@@ -462,6 +462,85 @@ def _program_lines(report: ReportResult) -> list[str]:
     return lines
 
 
+def _physique_lines(report: ReportResult) -> list[str]:
+    """RPT-05/D-07: the monthly-only physique block.
+
+    **Renders NO Claude-authored free text (D-09).** Not `leanness_notes`, not
+    `conditioning_notes`, not `symmetry_notes`, not `conditions_note`. Only dates, enum
+    `.value`s, the fixed `photo_angles_present`/`pose_state` vocabularies and numbers reach
+    this output. Those four fields travel to Claude as structured JSON on `PhysiqueSection`,
+    where RPT-05 wants them, and are additionally excluded from the provenance dump
+    `test_every_number_in_the_narrative_is_already_in_the_structured_fields` checks against --
+    once free text is inside that dump, a spurious number printed ANYWHERE in the prose becomes
+    trivially "provable", and the guarantee weakens for the whole narrative rather than for
+    this block alone.
+
+    **Careful with the word "symmetry".** `_BANNED_NARRATIVE_TOKENS` contains `"try "` (trailing
+    space, added so `"entry "` does not false-positive), and `"symmetry "` contains it. A
+    `Symmetry:` label here would fail `test_the_narrative_contains_no_recommendation_language`
+    with a message pointing at recommendation language rather than at the real cause.
+
+    **This builder does NOT filter.** `report.physique.diff.muscle_groups` is rendered exactly
+    as carried. The MCP layer narrows it to IMPROVED/REGRESSED and hands `build_narrative` the
+    NARROWED copy (D-02/D-03), so a filter here would make that mechanism untestable: the
+    WR-01 bug class -- the narrative and the JSON field beside it silently disagreeing -- is
+    only catchable if this function is honest about what it was given.
+
+    Returns `[]` when the report carries no physique section, which is what makes
+    `build_narrative` omit the heading entirely (D-13).
+    """
+    physique = report.physique
+    if physique is None:
+        return []
+
+    lines: list[str] = [
+        f"- As of {physique.observed_on.isoformat()} — a different anchor from the "
+        f"{report.window_start.isoformat()} to {report.window_end.isoformat()} period above."
+    ]
+
+    diff = physique.diff
+    if diff is None:
+        # D-12: an explicit word where the figure would go, never a silent omission and never a
+        # bare 0 -- the same rule `_body_lines` follows for a null weigh-in average. Omitting
+        # the line would leave a reader unable to tell "nothing changed" from "nothing to
+        # compare against".
+        lines.append("- Changes: first recorded observation, no prior to compare against")
+    else:
+        lines.append(
+            f"- Changes since {diff.earlier_observed_on.isoformat()} ({diff.elapsed_days} days):"
+        )
+        if diff.muscle_groups:
+            for row in diff.muscle_groups:
+                earlier = "not assessable" if row.earlier_level is None else row.earlier_level.value
+                later = "not assessable" if row.later_level is None else row.later_level.value
+                lines.append(
+                    f"  - {row.muscle_group.value}: {row.verdict.value}, {earlier} to {later}"
+                )
+        else:
+            lines.append("  - none")
+
+    cross_reference = physique.cross_reference
+    lines.append(
+        f"- Underdeveloped and undertrained ({cross_reference.lookback_weeks}-week volume "
+        f"window, {cross_reference.window_start.isoformat()} to "
+        f"{cross_reference.window_end.isoformat()}):"
+    )
+    if cross_reference.flagged:
+        for flag in cross_reference.flagged:
+            lines.append(
+                f"  - {flag.muscle_group.value}: {flag.rating_level.value}, "
+                f"{flag.weighted_sets} weighted sets"
+            )
+    else:
+        lines.append("  - none")
+
+    # D-08: VERBATIM, on its own line, at the end of the block -- read off the embedded result,
+    # never retyped. `diff` carries an identical copy of the same constant, so rendering both
+    # would read as a bug.
+    lines.append(cross_reference.disclaimer)
+    return lines
+
+
 def _data_quality_lines(report: ReportResult) -> list[str]:
     lines: list[str] = []
     sessions_line = f"- Sessions in window: {report.coverage.sessions_in_window}"
@@ -475,9 +554,10 @@ def _data_quality_lines(report: ReportResult) -> list[str]:
 
 
 # The shared weekly/monthly contract, made visible in code shape rather than enforced only by
-# convention and tests. Seven entries today, all `periods=None` (every period). A section
-# restricted to one `ReportPeriod` -- Phase 18's monthly-only physique section -- is one more
-# entry here plus one more builder above, editing no existing section.
+# convention and tests. Eight entries. The first seven are `periods=None` (every period); the
+# eighth, `## Physique`, is restricted to `MONTHLY` (RPT-04's D-11) and is the mechanism this
+# shape was designed for -- one more entry here plus one more builder above, editing no existing
+# section.
 _NARRATIVE_TEMPLATE: tuple[_NarrativeSection, ...] = (
     _NarrativeSection("## Training", _training_lines),
     _NarrativeSection("## Strength", _strength_lines),
@@ -486,6 +566,7 @@ _NARRATIVE_TEMPLATE: tuple[_NarrativeSection, ...] = (
     _NarrativeSection("## Activity", _activity_lines),
     _NarrativeSection("## Program and recomposition", _program_lines),
     _NarrativeSection("## Data quality", _data_quality_lines),
+    _NarrativeSection("## Physique", _physique_lines, (ReportPeriod.MONTHLY,)),
 )
 
 
@@ -538,14 +619,17 @@ def build_narrative(report: ReportResult) -> str:
 
     **The shape, since this refactor:** the narrative is an ordered template of named sections
     (``_NARRATIVE_TEMPLATE``), and this function is the title plus a loop over it. Weekly and
-    monthly share the template by construction -- the same seven ``_NarrativeSection`` entries
+    monthly share the template by construction -- the same eight ``_NarrativeSection`` entries
     render for both -- rather than by convention alone. A section may declare itself restricted
     to one ``ReportPeriod`` and is skipped for the other; every section shipped today applies to
-    both. Each builder returns BODY lines only, taking one ``ReportResult`` argument; this
-    function owns the leading blank line and the heading for every section, so no builder can
-    omit one and no two builders can disagree about the separator. Every rendering rule above --
-    determinism, D-03, the verbatim disclaimer, the Decimal/isoformat/``.value`` conventions --
-    is unchanged and now applies inside the builders rather than inline here.
+    both. The eighth, ``## Physique``, is the first period-restricted section: it renders for
+    ``MONTHLY`` only, and is skipped entirely -- heading included -- when the report carries no
+    physique section (D-13). Each builder returns BODY lines only, taking one ``ReportResult``
+    argument; this function owns the leading blank line and the heading for every section, so no
+    builder can omit one and no two builders can disagree about the separator. Every rendering
+    rule above -- determinism, D-03, the verbatim disclaimer, the
+    Decimal/isoformat/``.value`` conventions -- is unchanged and now applies inside the builders
+    rather than inline here.
     """
     period_label = report.period.value.capitalize()
     lines: list[str] = [
@@ -555,7 +639,15 @@ def build_narrative(report: ReportResult) -> str:
     for section in _NARRATIVE_TEMPLATE:
         if not section.applies_to(report.period):
             continue
+        body = section.build(report)
+        if not body:
+            # D-13: a section with nothing to say renders NO heading and no placeholder line --
+            # today that is exactly `## Physique` on a monthly report for a user who has never
+            # logged an observation. Provably a no-op for the seven shipped sections:
+            # `test_every_shipped_section_builder_returns_at_least_one_line` asserts each of
+            # them returns at least one line for a populated report in both periods.
+            continue
         lines.append("")
         lines.append(section.heading)
-        lines.extend(section.build(report))
+        lines.extend(body)
     return "\n".join(lines)
