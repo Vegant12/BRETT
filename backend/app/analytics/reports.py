@@ -465,7 +465,7 @@ def _program_lines(report: ReportResult) -> list[str]:
 def _physique_lines(report: ReportResult) -> list[str]:
     """RPT-05/D-07: the monthly-only physique block.
 
-    **Renders NO Claude-authored free text (D-09).** Not `leanness_notes`, not
+    **Renders NO Claude-authored free-form prose (D-09).** Not `leanness_notes`, not
     `conditioning_notes`, not `symmetry_notes`, not `conditions_note`. Only dates, enum
     `.value`s, the fixed `photo_angles_present`/`pose_state` vocabularies and numbers reach
     this output. Those four fields travel to Claude as structured JSON on `PhysiqueSection`,

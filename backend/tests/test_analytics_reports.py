@@ -139,6 +139,29 @@ _BANNED_NARRATIVE_TOKENS: tuple[str, ...] = (
 # where `2026-08-01`'s internal hyphens would otherwise be read as unary minus signs.
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 
+# D-09's four Claude-authored free-text fields, excluded from the provenance dump. Nested
+# Pydantic exclude syntax: {"physique": {<field names>}}.
+_PHYSIQUE_FREE_TEXT_FIELDS: frozenset[str] = frozenset(
+    {"leanness_notes", "conditioning_notes", "symmetry_notes", "conditions_note"}
+)
+_PROVENANCE_EXCLUDE: dict[str, set[str]] = {"physique": set(_PHYSIQUE_FREE_TEXT_FIELDS)}
+
+# Whole tokens, hyphen and underscore INCLUDED in the character class on purpose: "Well-Developed"
+# must tokenize as ONE word, or a substring match would find "Developed" inside it and a
+# narrative printing a level the report never held would pass (18-CONTEXT.md's Tripwires).
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z_-]*")
+
+
+def _physique_block(narrative: str) -> str:
+    """The `## Physique` section's own lines, heading included. Asserting on the whole narrative
+    would let a rating word printed by some OTHER section satisfy a physique assertion."""
+    lines = narrative.splitlines()
+    start = lines.index("## Physique")
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith("## "):
+        end += 1
+    return "\n".join(lines[start:end])
+
 
 def _coverage(
     *, sessions: int = 3, insufficient: bool = False, earliest: dt.datetime | None = _TS
@@ -828,7 +851,11 @@ def test_every_number_in_the_narrative_is_already_in_the_structured_fields() -> 
         )
     )
     narrative = build_narrative(report)
-    json_dump = report.model_dump_json()
+    # D-09: the four Claude-authored free-text fields are EXCLUDED. A note's own presence in
+    # this dump would make any number inside it trivially "provable", so a spurious number
+    # printed anywhere in the prose could be laundered through a note -- weakening the
+    # guarantee for the WHOLE narrative, not just the physique block.
+    json_dump = report.model_dump_json(exclude=_PROVENANCE_EXCLUDE)
     tokens = _NUMBER_RE.findall(narrative)
     assert tokens, "the fixture must contain numbers for this test to mean anything"
     for token in tokens:
@@ -837,6 +864,103 @@ def test_every_number_in_the_narrative_is_already_in_the_structured_fields() -> 
             "report.model_dump_json() -- the narrative has introduced a number the "
             "structured fields do not carry"
         )
+
+
+def test_a_number_inside_a_physique_note_cannot_launder_a_narrative_number() -> None:
+    """D-09's exclusion is load-bearing, not decorative. A number that exists ONLY inside a
+    free-text note must not appear in the dump the provenance test checks against -- otherwise
+    that test would certify a narrative number the structured fields never carried."""
+    smuggled = "918273"
+    report = _report(
+        physique=_physique_section(leanness_notes=f"Waist reads {smuggled} mm narrower.")
+    )
+    assert smuggled in report.model_dump_json(), "the fixture must actually carry the number"
+    assert smuggled not in report.model_dump_json(exclude=_PROVENANCE_EXCLUDE)
+    assert smuggled not in build_narrative(report)
+
+
+def test_no_claude_authored_note_reaches_the_narrative() -> None:
+    """RPT-05 criterion 3: the notes travel as structured JSON fields and are rendered nowhere
+    in the markdown. All four, including `conditions_note` -- it is the same class of object
+    (free text supplied by Claude on the write call), and one rule is more durable than two."""
+    section = _physique_section()
+    narrative = build_narrative(_report(physique=section))
+    for field in sorted(_PHYSIQUE_FREE_TEXT_FIELDS):
+        value = getattr(section, field)
+        assert value, f"the fixture must populate {field} for this test to mean anything"
+        assert value not in narrative, f"{field} leaked into the narrative"
+
+
+def test_every_rating_word_in_the_narrative_is_already_in_the_structured_fields() -> None:
+    """D-10: the word-level twin of the numeric-provenance check, and deliberately the STRONGER
+    variant. Scanning against the `PhysiqueRatingLevel`/`PhysiqueDiffVerdict` enum classes would
+    pass even when the narrative prints a level the report never held -- which is the failure
+    actually worth catching. The legal set is read as `.value` off `report.physique`'s OWN
+    fields."""
+    report = _report()
+    physique = report.physique
+    assert physique is not None
+    assert physique.diff is not None
+
+    legal: set[str] = set()
+    for row in physique.diff.muscle_groups:
+        legal.add(row.verdict.value)
+        if row.earlier_level is not None:
+            legal.add(row.earlier_level.value)
+        if row.later_level is not None:
+            legal.add(row.later_level.value)
+    for flag in physique.cross_reference.flagged:
+        legal.add(flag.rating_level.value)
+
+    universe = {level.value for level in PhysiqueRatingLevel} | {
+        verdict.value for verdict in PhysiqueDiffVerdict
+    }
+    block = _physique_block(build_narrative(report))
+    rendered = set(_WORD_RE.findall(block))
+    assert rendered & universe, "the fixture must render at least one rating/verdict word"
+    for word in sorted(rendered & universe):
+        assert word in legal, (
+            f"{word!r} is rendered in the physique block but is not a value this report's "
+            "own physique fields carry"
+        )
+
+
+def test_a_first_recorded_observation_renders_an_explicit_line_not_an_omission() -> None:
+    """D-12: with exactly one observation the diff is None, and the block still renders with an
+    explicit line where the changes would go. A silent omission would leave a reader unable to
+    tell "nothing changed" from "nothing to compare against" -- the ambiguity
+    `PhysiqueDiffVerdict.NOT_COMPARABLE` exists as a first-class value to prevent."""
+    narrative = build_narrative(_report(physique=_physique_section(diff=None)))
+    assert "## Physique" in narrative
+    assert "- Changes: first recorded observation, no prior to compare against" in narrative
+
+
+def test_a_monthly_report_with_no_physique_omits_the_heading_entirely() -> None:
+    """D-13: no heading, no placeholder line."""
+    narrative = build_narrative(_report(period=ReportPeriod.MONTHLY, physique=None))
+    assert "## Physique" not in narrative
+    assert "first recorded observation" not in narrative
+    # The seven shared sections are unaffected.
+    assert "## Data quality" in narrative
+
+
+def test_the_physique_anchor_line_names_the_observation_date_and_states_it_differs() -> None:
+    """D-07: the fourth anchor, named on the wire the same way `_program_lines` names the
+    third."""
+    narrative = build_narrative(_report())
+    assert (
+        f"- As of {_PHYSIQUE_OBSERVED_ON.isoformat()} — a different anchor from the "
+        f"{_WINDOW_START.isoformat()} to {_WINDOW_END.isoformat()} period above."
+    ) in narrative
+
+
+def test_the_physique_disclaimer_appears_verbatim_on_its_own_line_exactly_once() -> None:
+    """D-08: once, verbatim, at the end of the block -- read off the embedded result, never
+    retyped. Both the diff and the cross-reference carry an identical copy; rendering both would
+    read as a bug."""
+    lines = build_narrative(_report()).splitlines()
+    assert lines.count(PHYSIQUE_RATING_DISCLAIMER) == 1
+    assert _physique_block(build_narrative(_report())).endswith(PHYSIQUE_RATING_DISCLAIMER)
 
 
 def test_the_template_declares_the_eight_sections_in_order() -> None:
