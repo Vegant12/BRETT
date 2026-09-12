@@ -63,12 +63,12 @@ Both shipped milestones are archived in full:
 - [x] Pre-deploy migration step in `scripts/deploy-cloud-run.sh` (DEPLOY-04) — `backend/app/db/migration_preflight.py` extracts the `alembic current` vs `alembic heads` predicate as an importable, redaction-safe module; `scripts/deploy-cloud-run.sh` now fetches the production DSN from Secret Manager, runs `alembic upgrade head`, then independently re-verifies head before `exec gcloud run deploy`, guarded by a static assertion in `test_cloud_run_deploy.py` — Validated in Phase 14: Deploy Pipeline Migration Safety (2026-09-07); rehearsed against a real Postgres container deliberately downgraded one revision behind head, and against the real shell script itself with `gcloud` stubbed, reproducing all three v2.0 drift incidents
 - [x] Physique observations as structured, longitudinal data — a single-call, append-only, non-destructive MCP write tool (`fitness_log_physique_observation`) records ratings/notes/confounders with a required subjective-rating disclaimer; a dedicated read tool (`fitness_get_latest_physique_observation`) returns the prior observation as anchoring context; a later observation can mark an earlier one superseded with a reason, retained (never hard-deleted) and excluded from diffs — Validated in Phase 17: Physique Analytics & MCP Read/Write Tools (2026-09-11)
 - [x] Deterministic physique progress analytics — `analytics/physique.py`'s `get_physique_diff` computes a pure per-muscle-group ordinal diff (improved/unchanged/regressed/not-comparable) with no model call and no image, and `get_physique_volume_cross_reference` joins ratings against `get_muscle_group_volume` server-side so Claude is never asked to correlate two tool responses; the write-guard suite was widened to an exact two-module allowlist and a per-tool annotation mapping (MCP-07/MCP-08) rather than loosened — Validated in Phase 17: Physique Analytics & MCP Read/Write Tools (2026-09-11); full backend suite 1178 tests passing
+- [x] Physique section in the monthly report — `ReportResult.physique` populated monthly-only in `compose_report` from Phase 17's diff/cross-reference/observation reads; `build_narrative` renders it as the 8th, first period-restricted `_NARRATIVE_TEMPLATE` entry under the existing determinism, banned-token and numeric-provenance constraints (with a new free-text-note provenance-dump exclusion and a word-level rating-provenance test); the MCP layer narrows the diff to changed muscle groups and the weekly report structurally cannot carry the field at all — Validated in Phase 18: Monthly Report Physique Integration (2026-09-12); verification 11/11 must-haves, full backend suite 1195 tests passing
 
 ### Active
 
 *(v2.1 scope, gathered at the milestone gate. Formal REQ-IDs live in `.planning/REQUIREMENTS.md`.)*
 
-- [ ] **Physique section in the monthly report** — composed into `compose_report` and restated by `build_narrative` under its existing determinism, banned-token and numeric-provenance constraints; the weekly report is deliberately excluded
 - [ ] **D-06 production nutrition-coverage re-query** — blocked all milestone by the sandbox command classifier on `gcloud secrets versions access`. `MEASURED_DAY_FLOORS` (3/7, 5/14, 10/30) is currently reused for nutrition trend floors as a documented UNMEASURED fallback; needs a human-operator re-query to confirm or replace
 - [ ] **Verify Hevy's real rate limits** (carried unresolved from v1.0) — the retry policy is still unverified against an actual limit rather than confirmed unnecessary
 
@@ -156,4 +156,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-11 — Phase 17: Physique Analytics & MCP Read/Write Tools complete*
+*Last updated: 2026-09-12 — Phase 18: Monthly Report Physique Integration complete*
