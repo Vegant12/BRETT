@@ -62,6 +62,12 @@ from app.analytics.schemas import (
     NutritionPeriodSummary,
     PersonalRecord,
     PersonalRecordType,
+    PhysiqueDiffResult,
+    PhysiqueDiffVerdict,
+    PhysiqueMuscleDiff,
+    PhysiqueSection,
+    PhysiqueVolumeCrossReference,
+    PhysiqueVolumeFlag,
     PlateauConfidence,
     PlateauReport,
     PlateauResult,
@@ -79,7 +85,9 @@ from app.analytics.schemas import (
     WeeklyVolumeWeek,
 )
 from app.core.time import local_day, utc_now
+from app.db.models.physique import PHYSIQUE_RATING_DISCLAIMER, PhysiqueRatingLevel, PoseState
 from app.mcp.tools._common import week_window
+from app.normalization.muscles import CanonicalMuscleGroup
 from tests.conftest import (
     ANALYTICS_SECOND_USER_ID,
     DEFAULT_USER_ID,
@@ -96,6 +104,12 @@ from tests.conftest import (
 # "today"; a fixed baseline lets the byte-identical-output test mean something (two calls on
 # the SAME instance) without the fixture itself changing under the test.
 # ---------------------------------------------------------------------------------------------
+
+# Deliberately BEFORE `_WINDOW_START`, so the physique block's anchor line is asserted against a
+# date genuinely outside the report window rather than a coincidental match -- the same move
+# `_RECOMP_ANCHOR` makes on the other side of the window.
+_PHYSIQUE_OBSERVED_ON = dt.date.fromisoformat("2026-04-26")
+_PHYSIQUE_EARLIER_OBSERVED_ON = dt.date.fromisoformat("2026-03-20")
 
 _WINDOW_START = dt.date.fromisoformat("2026-05-01")
 _WINDOW_END = dt.date.fromisoformat("2026-05-31")
@@ -416,6 +430,77 @@ def _recomposition(**overrides: object) -> RecompositionResult:
     return RecompositionResult(**base)  # type: ignore[arg-type]
 
 
+def _physique_diff(**overrides: object) -> PhysiqueDiffResult:
+    """A diff already FILTERED to changed groups, which is what the MCP layer hands
+    `build_narrative` (D-02/D-03). Two rows, one IMPROVED and one REGRESSED, so both verdict
+    words and four distinct rating levels are exercised by the default fixture."""
+    base: dict[str, object] = {
+        "earlier_observed_on": _PHYSIQUE_EARLIER_OBSERVED_ON,
+        "later_observed_on": _PHYSIQUE_OBSERVED_ON,
+        "elapsed_days": 37,
+        "min_elapsed_days": 30,
+        "min_level_delta": 2,
+        "muscle_groups": [
+            PhysiqueMuscleDiff(
+                muscle_group=CanonicalMuscleGroup.CHEST,
+                earlier_level=PhysiqueRatingLevel.EMERGING,
+                later_level=PhysiqueRatingLevel.WELL_DEVELOPED,
+                level_delta=2,
+                verdict=PhysiqueDiffVerdict.IMPROVED,
+            ),
+            PhysiqueMuscleDiff(
+                muscle_group=CanonicalMuscleGroup.CALVES,
+                earlier_level=PhysiqueRatingLevel.DEVELOPED,
+                later_level=PhysiqueRatingLevel.MINIMAL,
+                level_delta=-2,
+                verdict=PhysiqueDiffVerdict.REGRESSED,
+            ),
+        ],
+        "disclaimer": PHYSIQUE_RATING_DISCLAIMER,
+    }
+    base.update(overrides)
+    return PhysiqueDiffResult(**base)  # type: ignore[arg-type]
+
+
+def _physique_cross_reference(**overrides: object) -> PhysiqueVolumeCrossReference:
+    base: dict[str, object] = {
+        "observed_on": _PHYSIQUE_OBSERVED_ON,
+        "lookback_weeks": 12,
+        "window_start": dt.date.fromisoformat("2026-02-02"),
+        "window_end": _PHYSIQUE_OBSERVED_ON,
+        "undertrained_threshold_weighted_sets": Decimal("4.000"),
+        "flagged": [
+            PhysiqueVolumeFlag(
+                muscle_group=CanonicalMuscleGroup.REAR_DELTS,
+                rating_level=PhysiqueRatingLevel.MINIMAL,
+                weighted_sets=Decimal("2.000"),
+            )
+        ],
+        "disclaimer": PHYSIQUE_RATING_DISCLAIMER,
+    }
+    base.update(overrides)
+    return PhysiqueVolumeCrossReference(**base)  # type: ignore[arg-type]
+
+
+def _physique_section(**overrides: object) -> PhysiqueSection:
+    """The default monthly physique block. The three note fields carry REAL text on purpose:
+    plan 18-02 asserts none of it reaches the narrative, and a null fixture would make that
+    assertion vacuous."""
+    base: dict[str, object] = {
+        "observed_on": _PHYSIQUE_OBSERVED_ON,
+        "pose_state": PoseState.RELAXED,
+        "photo_angles_present": ["front", "back", "side"],
+        "leanness_notes": "Midsection definition reads softer than the prior set.",
+        "conditioning_notes": "Vascularity similar; lighting warmer than last time.",
+        "symmetry_notes": "Left and right upper arms read even in the front angle.",
+        "conditions_note": "Morning, fasted, same room and same phone as last time.",
+        "diff": _physique_diff(),
+        "cross_reference": _physique_cross_reference(),
+    }
+    base.update(overrides)
+    return PhysiqueSection(**base)  # type: ignore[arg-type]
+
+
 def _report(*, period: ReportPeriod = ReportPeriod.MONTHLY, **overrides: object) -> ReportResult:
     """A fully-populated, hand-built ``ReportResult`` -- the Task 1 baseline.
 
@@ -443,6 +528,10 @@ def _report(*, period: ReportPeriod = ReportPeriod.MONTHLY, **overrides: object)
         "nutrition": _period_summary(NutritionPeriodSummary),
         "coverage": _coverage(),
         "freshness": _freshness(),
+        # MONTHLY only, exactly as `compose_report` populates it -- so the WEEKLY golden
+        # narrative and every `period=ReportPeriod.WEEKLY` test keep asserting the real weekly
+        # shape rather than a monthly one with a weekly label.
+        "physique": _physique_section() if period is ReportPeriod.MONTHLY else None,
     }
     base.update(overrides)
     return ReportResult(**base)  # type: ignore[arg-type]
@@ -605,9 +694,7 @@ def test_a_single_measurement_reading_renders_no_comparison() -> None:
                     metric=BodyMeasurementMetric.WAIST_CM,
                     window_days=90,
                     anchor_day=_WINDOW_END,
-                    coverage=_measurement_coverage(
-                        window_days=90, measured=1, insufficient=True
-                    ),
+                    coverage=_measurement_coverage(window_days=90, measured=1, insufficient=True),
                     latest_value=Decimal("80.00"),
                     latest_measured_on=_WINDOW_END,
                     earliest_value=None,

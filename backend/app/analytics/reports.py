@@ -26,7 +26,8 @@ divergence.
 own fields: recomposition (fixed 12 weeks ending today -- D-01 forbids parameterizing it),
 plateaus (12 weeks back from today, because a plateau duration is only meaningful relative to
 now), body measurements (a fixed 90-day comparison that is a module constant in
-``body_measurements.py``).
+``body_measurements.py``). A fourth, ``physique``, is monthly-only and anchors on the
+observation's own ``observed_on``.
 
 Read-only, like everything else under ``app/analytics/``: nothing here writes, and the CALLER
 owns the transaction. The session is positional and everything else keyword-only, matching
@@ -44,6 +45,10 @@ from app.analytics.body_measurements import get_body_measurement_trend
 from app.analytics.frequency import get_training_frequency
 from app.analytics.health import get_activity_period_summary, get_nutrition_period_summary
 from app.analytics.metadata import FRESHNESS_RESOURCES_REPORT, build_coverage, build_freshness
+from app.analytics.physique import (
+    get_latest_physique_diff,
+    get_physique_volume_cross_reference,
+)
 from app.analytics.progression import DEFAULT_PLATEAU_LOOKBACK_WEEKS, get_plateaus
 from app.analytics.recomposition import get_recomposition_status
 from app.analytics.records import get_recent_records
@@ -52,11 +57,13 @@ from app.analytics.schemas import (
     ActivityPeriodSummary,
     BodyMeasurementMetric,
     NutritionPeriodSummary,
+    PhysiqueSection,
     ReportPeriod,
     ReportResult,
 )
 from app.analytics.volume import get_muscle_group_volume, get_weekly_volume
 from app.core.time import local_day, local_month_start, local_week_start, utc_now
+from app.db.repositories.physique import get_latest_observation
 
 # D-02's "narrow extras, not full composition". Two metrics, not the 16 the enum offers.
 # Calling get_body_measurement_trend once per member would be 16 queries for what D-02 calls
@@ -122,8 +129,10 @@ async def compose_report(
     functions snap themselves), the recomposition verdict (its own fixed lookback, no window
     argument), the plateau report (its own 12-week lookback), PR highlights over the report's
     own window, the two narrow body-measurement extras, activity and nutrition over the
-    report's own window, and finally the coverage/freshness envelope built from the same
-    resolved window and the five-resource report bundle.
+    report's own window, and -- for ``MONTHLY`` only -- the latest physique observation, its
+    diff against the prior one and its volume cross-reference (RPT-04; ``None`` for ``WEEKLY``
+    and for a user who has never logged an observation), and finally the coverage/freshness
+    envelope built from the same resolved window and the five-resource report bundle.
 
     Session positional, everything else keyword-only, ``user_id`` with no default (ASVS V4).
     The caller owns the transaction; nothing here writes.
@@ -133,9 +142,7 @@ async def compose_report(
     # NOT pre-snapped. `get_weekly_volume` and `get_muscle_group_volume` snap the range OUTWARD
     # to whole Monday-start weeks themselves -- `summary.py` documents what double-snapping
     # costs.
-    weekly = await get_weekly_volume(
-        session, user_id=user_id, start_day=start_day, end_day=end_day
-    )
+    weekly = await get_weekly_volume(session, user_id=user_id, start_day=start_day, end_day=end_day)
     muscle_volume = await get_muscle_group_volume(
         session, user_id=user_id, start_day=start_day, end_day=end_day
     )
@@ -176,6 +183,39 @@ async def compose_report(
         session, user_id=user_id, start_day=start_day, end_day=end_day
     )
 
+    # RPT-04/D-11: MONTHLY only, and a structural absence rather than a convention -- the weekly
+    # report's response type has no `physique` field at all (plan 18-03). Up to three extra
+    # queries on an already heavy transaction, accepted here because it is monthly only and
+    # because the section must share the report's single consistent snapshot: a physique block
+    # read from a second transaction could describe a different database than the volume figures
+    # beside it.
+    physique: PhysiqueSection | None = None
+    if period is ReportPeriod.MONTHLY:
+        # Read directly rather than off the two analytics results: neither carries the
+        # observation's pose/angle/notes metadata, and 18-CONTEXT.md's Integration Points
+        # already names this redundant read as accepted cost. Do not try to eliminate it by
+        # threading the record through `analytics/physique.py` -- that would widen a Phase 17
+        # signature this phase is not authorised to change.
+        observation = await get_latest_observation(session, user_id=user_id)
+        if observation is not None:
+            diff = await get_latest_physique_diff(session, user_id=user_id)
+            # `get_physique_volume_cross_reference` re-reads the SAME latest observation in this
+            # same transaction, so a non-None `observation` implies a non-None result here. The
+            # guard is type narrowing, not a real branch.
+            cross_reference = await get_physique_volume_cross_reference(session, user_id=user_id)
+            if cross_reference is not None:
+                physique = PhysiqueSection(
+                    observed_on=observation.observed_on,
+                    pose_state=observation.pose_state,
+                    photo_angles_present=list(observation.photo_angles_present),
+                    leanness_notes=observation.leanness_notes,
+                    conditioning_notes=observation.conditioning_notes,
+                    symmetry_notes=observation.symmetry_notes,
+                    conditions_note=observation.conditions_note,
+                    diff=diff,
+                    cross_reference=cross_reference,
+                )
+
     window = await resolve_window(
         session, user_id=user_id, start_day=start_day, end_day=end_day, snap_to_weeks=False
     )
@@ -209,6 +249,7 @@ async def compose_report(
         nutrition=nutrition,
         coverage=coverage,
         freshness=freshness,
+        physique=physique,
     )
 
 
@@ -366,9 +407,7 @@ def _body_lines(report: ReportResult) -> list[str]:
         else:
             earliest_measured_on = measurement.earliest_measured_on
             if earliest_measured_on is None:
-                raise ValueError(
-                    "earliest_measured_on missing alongside a populated delta_value"
-                )
+                raise ValueError("earliest_measured_on missing alongside a populated delta_value")
             body = (
                 f"{measurement.latest_value} on {latest_measured_on.isoformat()}, "
                 f"{measurement.delta_value} vs {measurement.earliest_value} on "
