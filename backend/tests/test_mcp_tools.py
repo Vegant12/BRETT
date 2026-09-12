@@ -1463,3 +1463,158 @@ async def test_monthly_narrative_respects_the_same_plateau_cap_as_the_structured
         f"narrative must list exactly the capped {MAX_REPORT_PLATEAU_HIGHLIGHTS} plateaued "
         f"exercises, not all {plateau_count} scanned -- got {mentioned}"
     )
+
+
+# ---------------------------------------------------------------------------
+# RPT-04/RPT-05: the monthly report's physique section.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_physique_pair(committed_history: GoldenBuilder) -> tuple[dt.date, dt.date]:
+    """Two observations 40 days apart. CHEST moves Emerging -> Well-Developed (delta 2, the
+    locked PHYSIQUE_DIFF_MIN_LEVEL_DELTA, so a real IMPROVED rather than the rater's noise
+    floor); LATS moves Well-Developed -> Emerging (delta -2, a real REGRESSED for the same
+    reason -- Developed -> Emerging is only a delta of 1 and would classify UNCHANGED). Every
+    other group stays Not Assessable, which is `physique_observation`'s default and yields
+    NOT_COMPARABLE -- rows the monthly response must NOT carry."""
+    anchor = _reference_anchor().date()
+    earlier_on = anchor - dt.timedelta(days=40)
+    later_on = anchor
+    await committed_history.physique_observation(
+        observed_on=earlier_on,
+        ratings=[
+            (CanonicalMuscleGroup.CHEST, "Emerging", None),
+            (CanonicalMuscleGroup.LATS, "Well-Developed", None),
+        ],
+    )
+    await committed_history.physique_observation(
+        observed_on=later_on,
+        ratings=[
+            (CanonicalMuscleGroup.CHEST, "Well-Developed", None),
+            (CanonicalMuscleGroup.LATS, "Emerging", None),
+        ],
+        leanness_notes="Fixture leanness note.",
+        conditioning_notes="Fixture conditioning note.",
+        symmetry_notes="Fixture balance note.",
+        conditions_note="Fixture conditions note.",
+    )
+    return earlier_on, later_on
+
+
+@pytest.mark.integration
+async def test_the_monthly_report_carries_a_physique_section_narrowed_to_changed_groups(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """RPT-04: `physique` carries the latest observation, the diff narrowed to the muscle groups
+    that actually moved, and the volume cross-reference -- with the 19-row spine visibly
+    narrowed to 2, proving D-02's filter ran rather than merely existing."""
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    _earlier_on, later_on = await _seed_physique_pair(committed_history)
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_monthly_report", {})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["data_available"] is True
+    assert payload["physique"] is not None
+    assert payload["physique"]["observed_on"] == later_on.isoformat()
+
+    muscle_groups = payload["physique"]["diff"]["muscle_groups"]
+    assert {row["muscle_group"] for row in muscle_groups} == {"chest", "lats"}
+    verdicts = {row["verdict"] for row in muscle_groups}
+    assert verdicts <= {"improved", "regressed"}
+    assert "unchanged" not in verdicts
+    assert "not_comparable" not in verdicts
+    assert len(muscle_groups) == 2, (
+        "the gap-free 19-row spine must be narrowed to exactly the groups that moved (D-02)"
+    )
+    assert payload["physique"]["cross_reference"]["lookback_weeks"] == 12
+    assert payload["physique"]["leanness_notes"] == "Fixture leanness note.", (
+        "RPT-05 criterion 3: the notes reach Claude as structured JSON"
+    )
+
+
+@pytest.mark.integration
+async def test_the_monthly_narrative_names_exactly_the_physique_rows_the_json_field_carries(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """WR-01 regression twin for physique: the narrative must narrate the SAME narrowed rows the
+    JSON `physique` field carries, and no group the JSON omitted."""
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    await _seed_physique_pair(committed_history)
+    await session.commit()
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool("fitness_get_monthly_report", {})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    narrative = payload["narrative"]
+    assert isinstance(narrative, str)
+    assert "## Physique" in narrative
+
+    muscle_groups = payload["physique"]["diff"]["muscle_groups"]
+    for row in muscle_groups:
+        assert f"  - {row['muscle_group']}: {row['verdict']}," in narrative
+
+    physique_block = narrative[narrative.index("## Physique") :]
+    carried = {row["muscle_group"] for row in muscle_groups}
+    for group in CanonicalMuscleGroup:
+        if group.value not in carried:
+            assert f"  - {group.value}:" not in physique_block, (
+                f"{group.value} was omitted from the JSON diff but is still named in the "
+                "narrative -- the narrative and the JSON field must agree"
+            )
+    assert "not_comparable" not in physique_block
+
+    for note in (
+        "Fixture leanness note.",
+        "Fixture conditioning note.",
+        "Fixture balance note.",
+        "Fixture conditions note.",
+    ):
+        assert note not in narrative, (
+            "RPT-05 criterion 3: no Claude-authored note reaches the live narrative"
+        )
+
+
+@pytest.mark.integration
+async def test_a_monthly_report_with_no_observation_carries_no_physique_and_no_heading(
+    client: TestClient, committed_history: GoldenBuilder, session: AsyncSession
+) -> None:
+    """D-11 + D-13, end to end: a user who has never logged a physique observation gets
+    `physique=None` and no `## Physique` heading, not a placeholder."""
+    from mcp import Client
+
+    from app.mcp.server import mcp
+
+    await _seed_reference_history(committed_history, session)
+
+    async with Client(mcp) as mcp_client:
+        weekly = await mcp_client.call_tool("fitness_get_weekly_report", {})
+        monthly = await mcp_client.call_tool("fitness_get_monthly_report", {})
+
+    assert weekly.is_error is False
+    assert monthly.is_error is False
+
+    weekly_payload = weekly.structured_content
+    assert weekly_payload is not None
+    assert "physique" not in weekly_payload, (
+        "T-18-16: the weekly report must never carry a physique field at all"
+    )
+
+    monthly_payload = monthly.structured_content
+    assert monthly_payload is not None
+    assert monthly_payload["data_available"] is True
+    assert monthly_payload["physique"] is None
+    assert "## Physique" not in monthly_payload["narrative"]

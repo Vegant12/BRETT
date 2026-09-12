@@ -531,3 +531,26 @@ async def test_ping_is_still_registered_first_class(_mcp_state: None) -> None:
 
     assert set(output_schema["required"]) == {"status", "database"}
     assert set(output_schema["properties"]) == {"status", "database"}
+
+
+def test_the_weekly_report_response_structurally_cannot_carry_a_physique_section() -> None:
+    """ROADMAP Phase 18, criterion 1: the weekly report has NO `physique` attribute at all --
+    a structural, tested absence via the declared field set, not omission by convention.
+
+    This assertion cannot rest on the VALUE, and that is D-11's accepted consequence: a monthly
+    report for a user who has never logged an observation also carries `physique=None`, so
+    `None` no longer proves the period was weekly. Only the field set can.
+
+    Mirrors the precedent `WeeklyReportResponse`'s own docstring already states for
+    `narrative`.
+    """
+    from app.mcp.tools.reports import _degraded_weekly
+    from app.mcp.tools.schemas import MonthlyReportResponse, WeeklyReportResponse
+
+    assert "physique" not in WeeklyReportResponse.model_fields
+    assert "physique" in MonthlyReportResponse.model_fields
+    # The same claim against a REAL instance, not only the class declaration.
+    assert not hasattr(_degraded_weekly(), "physique")
+    assert "narrative" not in WeeklyReportResponse.model_fields, (
+        "the narrative precedent this test mirrors must still hold"
+    )
