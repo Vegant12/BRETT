@@ -162,7 +162,10 @@ Plans:
   1. Migration `0007` reaches the production database through the Phase 14 pre-deploy mechanism, with no manual `psql`/operator intervention required.
   2. `alembic current` on production matches `alembic heads` immediately after the deploy completes.
   3. The live MCP tool registry in production includes the physique tools, and a real call against the deployed schema (e.g. `fitness_get_latest_physique_observation` returning an empty-but-valid response, or a real logged observation) succeeds.
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 19-01-PLAN.md — Pre-deploy checklist, operator-run deploy through the unmodified Phase 14 pipeline, live MCP smoke test against the deployed schema, and the redacted evidence record that closes DEPLOY-05
 
 ## Progress
 
@@ -189,4 +192,4 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 16. Physique Data Model & Repository | 3/3 | Complete    | 2026-09-09 |
 | 17. Physique Analytics & MCP Read/Write Tools | 5/5 | Complete    | 2026-09-11 |
 | 18. Monthly Report Physique Integration | 3/3 | Complete    | 2026-09-12 |
-| 19. Production Deploy of Migration 0007 | 0/TBD | Not started | - |
+| 19. Production Deploy of Migration 0007 | 0/1 | Planned | - |
