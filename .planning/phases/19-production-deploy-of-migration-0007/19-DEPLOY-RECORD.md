@@ -96,8 +96,62 @@ Service URL: https://brett-792870654598.us-central1.run.app
 
 ## MCP smoke test (verbatim)
 
-pending -- written by Task 5 from the operator's pasted response
+**Stale-connector detour (recorded for the paper trail, not omitted because it resolved cleanly).**
+The operator's first attempt reported the `fitness_get_latest_physique_observation` tool as "doesn't
+exist." This was investigated rather than assumed to be either a real regression or a false alarm:
+`backend/app/mcp/server.py` was grepped directly and both `fitness_get_latest_physique_observation`
+(lines 262-267) and `fitness_log_physique_observation` (lines 332-334) are confirmed unconditionally
+registered, no feature flag, in the code live on the deployed revision `brett-00012-n6r`. Conclusion:
+the operator's Claude connector held a stale `tools/list` result cached from before the new revision
+went live — not a deploy defect. The operator reconnected the BRETT connector (forcing a fresh tool
+discovery) and retried, producing the PASS result below.
+
+**Route used:** A — a live Claude client with the BRETT connector, over the real `authkit` OAuth 2.1
+path (no static bearer, no auth-mode flip). Endpoint: the connector's registered resource URL,
+`https://brett-792870654598.us-central1.run.app/mcp`.
+
+Raw tool result from `fitness_get_latest_physique_observation` (no arguments):
+
+```json
+{
+  "data_available": true,
+  "observation": null,
+  "rating_scale": "1. Minimal - the group shows little visible development; its outline is not apparent in this photo set. 2. Emerging - the group's outline is visible but shallow; shape is suggested rather than defined. 3. Developed - the group has clear shape and visible separation from adjacent groups. 4. Well-Developed - the group is clearly fuller or more defined than the average group on THIS person's own body. 5. Standout - the group is among the most developed on THIS person's own body; it is the group a viewer would notice first.",
+  "disclaimer": "These muscle-group ratings are subjective model output read from photographs, not a measurement. They are not comparable to a measured figure such as kilograms lifted or centimetres of waist, and they carry no comparison to anyone other than this same person."
+}
+```
+
+**Why `observation: null` is a PASS, not a failure:** production has never had a physique
+observation logged — the write tool (`fitness_log_physique_observation`) did not exist in any
+deployed revision before this phase, and this phase deliberately does not call it (verification, not
+data creation). `LatestPhysiqueObservationResponse`'s own docstring states `observation=None` with
+`data_available=True` means the user has never logged one, which is exactly this case.
+
+| Check | Expected | Observed | Pass/Fail |
+|---|---|---|---|
+| HTTP status | 200 (no 401, no 500) | 200 (operator reported no error status; a successful tool result was returned) | PASS |
+| JSON-RPC error member | absent | absent | PASS |
+| `data_available` | `true` | `true` | PASS |
+| `observation` | `null` (never logged) or a populated object — both PASS | `null` | PASS |
+| `rating_scale` | non-empty string | 495 chars, all five rating anchors present | PASS |
+| `disclaimer` | non-empty string | 230 chars, matches the locked disclaimer text | PASS |
+| Route B flip-back (if used) | live `MCP_AUTH_MODE` = `authkit`, `git diff --quiet deploy/cloud-run.env.yaml` exit 0 | N/A — route A used, no auth-mode change made | N/A |
 
 ## Result
 
-pending -- PASS/FAIL per DEPLOY-05 criterion, written by Task 5
+| # | Criterion | Evidence | Verdict |
+|---|---|---|---|
+| 1 | Migration `0007` reaches production through the Phase 14 pre-deploy mechanism, with no manual `psql`/operator intervention | The `DEPLOY-04: using Secret Manager brett-database-url:latest in project brett-fitness` line and the alembic `0006 -> 0007` upgrade output in the deploy log above; the operator ran only `./scripts/deploy-cloud-run.sh` — no `alembic` or `psql` invoked outside that script | PASS |
+| 2 | `alembic current` matches `alembic heads` on production immediately after the deploy | `at head: ['0007']` (line 5 of the deploy log), printed by `app.db.migration_preflight` strictly before the first `gcloud run deploy` output line (line 6) | PASS |
+| 3 | The live MCP registry includes the physique tools and a real call against the deployed schema succeeds | The `fitness_get_latest_physique_observation` response above — `data_available: true`, `observation: null`, non-empty `rating_scale` and `disclaimer`, no error member, no 401/500 — obtained over the real `authkit` OAuth path against revision `brett-00012-n6r`. (A stale-connector cache initially masked this on the first attempt; resolved by reconnecting, root-caused via direct code inspection, not assumed.) | PASS |
+
+**Deployed revision:** `brett-00012-n6r` (previously `brett-00011-n2z`).
+**Deployed commit:** `4888aff52ff491279964dea68792f283e788713b`.
+
+All three of v2.0's production drift incidents (Phase 8: `0004` vs `0005`; the Phase 9 operator run:
+wrong `DATABASE_URL`; the Phase 13 spike: `0005` vs `0006`) shared one root cause — no automated,
+enforced check that the deployed code's migration head matches the database's actual state before
+traffic cut over. That root cause is now closed by a real production run of the fixed pipeline, not
+by a test fixture: this deploy's own pre-flight (`app.db.migration_preflight.check_at_head`) printed
+`at head: ['0007']` from inside `scripts/deploy-cloud-run.sh` before `gcloud run deploy` ever ran,
+and a live, schema-dependent MCP tool call against the resulting revision succeeded end-to-end.

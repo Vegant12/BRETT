@@ -45,7 +45,7 @@
 ### Deploy Safety
 
 - [x] **DEPLOY-04**: `scripts/deploy-cloud-run.sh` gains a migration step, or an enforced `alembic current` versus `alembic heads` pre-flight that fails the deploy on drift, plus a documented single source of truth for the production `DATABASE_URL`. Production ran a schema behind deployed code three separate times during v2.0, each caught only during live verification
-- [ ] **DEPLOY-05**: This milestone's new migration reaches production through the fixed pipeline, proving DEPLOY-04 works rather than asserting it
+- [x] **DEPLOY-05**: This milestone's new migration reaches production through the fixed pipeline, proving DEPLOY-04 works rather than asserting it
 
 ---
 
@@ -111,4 +111,4 @@ Which phases cover which requirements. Populated during roadmap creation.
 | MCP-07 | Phase 17 | Complete |
 | MCP-08 | Phase 17 | Complete |
 | DEPLOY-04 | Phase 14 | Complete |
-| DEPLOY-05 | Phase 19 | Planned |
+| DEPLOY-05 | Phase 19 | Complete |
