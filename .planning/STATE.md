@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
-status: completed
-stopped_at: Phase 19 complete — v2.1's sixth and final phase
+status: archived
+stopped_at: v2.1 milestone closed and archived; next milestone not yet planned
 last_updated: "2026-09-15T02:56:30.725Z"
 last_activity: 2026-09-15
 progress:
@@ -18,26 +18,27 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
+See: .planning/PROJECT.md (updated 2026-09-15 after v2.1 milestone close)
 
 **Core value:** Claude can retrieve real, normalized workout data through the MCP server and answer training questions from actual data instead of guessing.
-**Current focus:** Phase 19 — production-deploy-of-migration-0007
+**Current focus:** Planning next milestone — run `/gsd-new-milestone`
 
 ## Current Position
 
-Milestone: v2.1 Longitudinal Physique Analysis
-Phase: 19
-Plan: Not started
-Status: Phase 19 complete
+Milestone: None active — v2.1 Longitudinal Physique Analysis shipped and archived 2026-09-15
+Phase: None
+Plan: None
+Status: Between milestones
 Last activity: 2026-09-15
 
-Progress: [██████████] 100% — 6/6 v2.1 phases complete
+Progress: v2.1 closed at 100% — 6/6 phases, 17/17 plans
 
-Two milestones shipped to date: v1.0 (7 phases, 65 plans) and v2.0 (6 phases, 34 plans).
-Phase numbering continues from v2.0's last phase (13); v2.1 runs Phase 14 through Phase 19:
-14 Deploy Pipeline Migration Safety, 15 Physique Rating Calibration Spike, 16 Physique Data
-Model & Repository, 17 Physique Analytics & MCP Read/Write Tools, 18 Monthly Report Physique
-Integration, 19 Production Deploy of Migration 0007.
+Three milestones shipped to date: v1.0 (7 phases, 65 plans), v2.0 (6 phases, 34 plans), and
+v2.1 (6 phases, 17 plans). Phase numbering continued from v2.0's last phase (13) through v2.1's
+last (19): 14 Deploy Pipeline Migration Safety, 15 Physique Rating Calibration Spike, 16 Physique
+Data Model & Repository, 17 Physique Analytics & MCP Read/Write Tools, 18 Monthly Report Physique
+Integration, 19 Production Deploy of Migration 0007. The next milestone continues numbering from
+Phase 20.
 
 ## Performance Metrics
 
@@ -45,8 +46,9 @@ Integration, 19 Production Deploy of Migration 0007.
 |-----------|--------|-------|-------|----------|---------|
 | v1.0 MVP | 7 | 65 | 151 | 2026-08-23 → 2026-09-01 (10 days) | — |
 | v2.0 Apple Health & Coaching | 6 | 34 | 81 | 2026-09-02 → 2026-09-05 (4 days) | 220 |
+| v2.1 Longitudinal Physique Analysis | 6 | 17 | 46 | 2026-09-05 → 2026-09-15 (10 days) | — |
 
-**Codebase at v2.0 close:** ~52.3k LOC in `backend/`, 925 test functions, 20 MCP tools.
+**Codebase at v2.1 close:** ~58.1k LOC in `backend/`, 1195 tests passing, 22 MCP tools.
 
 **Per-plan execution metrics (v2.1):**
 
@@ -157,10 +159,10 @@ Items acknowledged and deferred at v2.1 milestone close on 2026-09-15:
 ## Session Continuity
 
 Last session: 2026-09-15
-Stopped at: Phase 19 complete — v2.1's sixth and final phase
-Resume: `/gsd-complete-milestone` — all 6 v2.1 phases complete, ready for milestone close.
+Stopped at: v2.1 milestone closed and archived (tag pending)
+Resume: `/gsd-new-milestone` — start requirements definition for the next milestone.
 
-### v2.1 milestone-gate decisions (made before research, carry into requirements)
+### v2.1 milestone-gate decisions (archived — kept for historical reference)
 
 | Decision | Choice |
 |----------|--------|
