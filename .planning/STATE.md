@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
 status: executing
-stopped_at: Phase 18 complete, ready to plan Phase 19
-last_updated: "2026-09-12T04:50:15.133Z"
-last_activity: 2026-09-12
+stopped_at: Phase 18 context gathered
+last_updated: "2026-09-14T03:16:47.883Z"
+last_activity: 2026-09-14 -- Phase 19 execution started
 progress:
   total_phases: 6
   completed_phases: 5
-  total_plans: 16
+  total_plans: 17
   completed_plans: 16
-  percent: 100
+  percent: 94
 ---
 
 # Project State
@@ -26,12 +26,12 @@ See: .planning/PROJECT.md (updated 2026-09-05 after v2.0 milestone)
 ## Current Position
 
 Milestone: v2.1 Longitudinal Physique Analysis
-Phase: 19
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-12 -- Phase 18 complete (3/3 plans, verification passed 11/11 must-haves)
+Phase: 19 (production-deploy-of-migration-0007) — COMPLETE
+Plan: 1 of 1 complete
+Status: Phase 19 complete
+Last activity: 2026-09-15 -- Phase 19 complete — migration 0007 deployed to production via the fixed pipeline, DEPLOY-05 closed
 
-Progress: [████████──] 83% — 5/6 v2.1 phases complete
+Progress: [██████████] 100% — 6/6 v2.1 phases complete
 
 Two milestones shipped to date: v1.0 (7 phases, 65 plans) and v2.0 (6 phases, 34 plans).
 Phase numbering continues from v2.0's last phase (13); v2.1 runs Phase 14 through Phase 19:
@@ -78,16 +78,17 @@ Resolved items were cleared at the v2.0 milestone close. Open items only. **The 
 migration gap below is now in v2.1 scope** rather than carried debt — see PROJECT.md
 Requirements → Active:
 
-- **Open (highest priority, 3 occurrences in v2.0):** `scripts/deploy-cloud-run.sh` has no
-  migration step, so production repeatedly runs a schema behind the deployed code. It happened
-  in Phase 8 (`alembic current` == `0004`, code needed `0005`), during the Phase 9 operator run
-  (shell pointed at the wrong `DATABASE_URL`, showing a stale before-state), and again in the
-  Phase 13 spike (`0005` vs `0006` → `UndefinedTableError: relation "user_program_history" does
-  not exist`). Each was fixed live with the user's confirmation. The structural fix — a
-  pre-deploy migration step, or an enforced `alembic current` vs `alembic heads` pre-flight,
-  plus a documented single source of truth for the production `DATABASE_URL`
-  (`gcloud secrets versions access latest --secret="brett-database-url"`) — is **still not done**
-  and should lead the next milestone.
+- **Resolved (Phase 14 built the fix; Phase 19 proved it in production on 2026-09-15):**
+  `scripts/deploy-cloud-run.sh` has no migration step, so production repeatedly runs a schema
+  behind the deployed code. It happened in Phase 8 (`alembic current` == `0004`, code needed
+  `0005`), during the Phase 9 operator run (shell pointed at the wrong `DATABASE_URL`, showing
+  a stale before-state), and again in the Phase 13 spike (`0005` vs `0006` →
+  `UndefinedTableError: relation "user_program_history" does not exist`). Each was fixed live
+  with the user's confirmation. Phase 19 deployed Cloud Run revision `brett-00012-n6r`, applying
+  migration `0007` — the first migration to reach production through the Phase 14 fixed pipeline
+  (pre-deploy `alembic upgrade head` inside `scripts/deploy-cloud-run.sh`, sourced from Secret
+  Manager). See `.planning/phases/19-production-deploy-of-migration-0007/19-DEPLOY-RECORD.md`
+  for the full evidence chain.
 
 - **Open (carried from v1.0):** Hevy's real rate limits remain undocumented — the existing retry
   policy is unverified against a real limit, not confirmed unnecessary.
@@ -144,9 +145,9 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 
 ## Session Continuity
 
-Last session: 2026-09-12T03:13:21.300Z
-Stopped at: Phase 18 context gathered
-Resume: `/gsd-discuss-phase 16` (Phase 14 is already complete — do not re-run its discuss step).
+Last session: 2026-09-15
+Stopped at: Phase 19 complete — v2.1's sixth and final phase
+Resume: `/gsd-complete-milestone` — all 6 v2.1 phases complete, ready for milestone close.
 
 ### v2.1 milestone-gate decisions (made before research, carry into requirements)
 

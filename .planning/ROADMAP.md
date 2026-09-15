@@ -66,7 +66,7 @@ numbering from v2.0's last phase (13); it does not restart at 1.
 - [x] **Phase 16: Physique Data Model & Repository** - Persist a physique observation's full shape with no MCP surface yet (completed 2026-09-09)
 - [x] **Phase 17: Physique Analytics & MCP Read/Write Tools** - Claude can log and retrieve physique observations; diff and volume-correlation analytics land alongside (completed 2026-09-11)
 - [x] **Phase 18: Monthly Report Physique Integration** - The monthly report gains a physique section; the weekly report structurally cannot (completed 2026-09-12)
-- [ ] **Phase 19: Production Deploy of Migration 0007** - Prove Phase 14's fix works by deploying this milestone's own migration through it
+- [x] **Phase 19: Production Deploy of Migration 0007** - Prove Phase 14's fix works by deploying this milestone's own migration through it (completed 2026-09-15)
 
 ## Phase Details
 
@@ -165,7 +165,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 19-01-PLAN.md — Pre-deploy checklist, operator-run deploy through the unmodified Phase 14 pipeline, live MCP smoke test against the deployed schema, and the redacted evidence record that closes DEPLOY-05
+- [x] 19-01-PLAN.md — Pre-deploy checklist, operator-run deploy through the unmodified Phase 14 pipeline, live MCP smoke test against the deployed schema, and the redacted evidence record that closes DEPLOY-05
 
 ## Progress
 
@@ -192,4 +192,4 @@ Phases execute in numeric order: 14 → 15 → 16 → 17 → 18 → 19
 | 16. Physique Data Model & Repository | 3/3 | Complete    | 2026-09-09 |
 | 17. Physique Analytics & MCP Read/Write Tools | 5/5 | Complete    | 2026-09-11 |
 | 18. Monthly Report Physique Integration | 3/3 | Complete    | 2026-09-12 |
-| 19. Production Deploy of Migration 0007 | 0/1 | Planned | - |
+| 19. Production Deploy of Migration 0007 | 1/1 | Complete   | 2026-09-15 |
