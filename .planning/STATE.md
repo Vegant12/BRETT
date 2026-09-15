@@ -4,7 +4,7 @@ milestone: v2.1
 milestone_name: Longitudinal Physique Analysis
 status: completed
 stopped_at: Phase 19 complete — v2.1's sixth and final phase
-last_updated: "2026-09-15T02:47:14.061Z"
+last_updated: "2026-09-15T02:56:30.725Z"
 last_activity: 2026-09-15
 progress:
   total_phases: 6
@@ -142,6 +142,17 @@ Items acknowledged and deferred at v2.0 milestone close on 2026-09-05:
 | process | REQUIREMENTS.md traceability drift, second milestone running | Three requirements marked `Pending` despite being complete and production-verified; reconciled to 26/26 at close. Identical failure mode to v1.0 — suggests the per-phase workflow does not reliably update the traceability table. Worth a structural fix over a third manual reconciliation |
 | ops | Deploy migration gap, 3 occurrences | Carried into next milestone as candidate scope — see Blockers/Concerns above and PROJECT.md Requirements → Active |
 | data | D-06 nutrition-coverage re-query | Blocked by sandbox command classifier; documented UNMEASURED fallback in use |
+
+Items acknowledged and deferred at v2.1 milestone close on 2026-09-15:
+
+| Category | Item | Status |
+|----------|------|--------|
+| audit | No formal `/gsd-audit-milestone` run before v2.1 close | Skipped by explicit user choice at the pre-flight gate, same as v1.0 and v2.0 — third milestone running without one |
+| tooling | Quick-task `260907-dsu-formalize-weekly-monthly-report-narrativ` flagged `[missing]` by `audit-open` | Its actual work is committed (`fe36e1c`, 2026-09-07) — the gap is a missing `SUMMARY.md`, not incomplete work. Acknowledged and closed without backfilling the summary |
+| process | REQUIREMENTS.md traceability drift, third milestone running | PHYS-01 through PHYS-05 were unchecked and marked `Planned` despite Phase 16's `16-VERIFICATION.md` confirming all five satisfied; PHYS-12 was checked but still marked `Planned`. Reconciled to 18/18 Complete at close. Same failure mode as v1.0 (8 stale) and v2.0 (3 stale) — this is now a 3-for-3 pattern in this project's per-phase workflow, not an isolated slip. Worth a structural fix (e.g., a phase-completion check that fails if REQUIREMENTS.md checkboxes don't match the phase's VERIFICATION.md) rather than a fourth manual reconciliation next milestone |
+| ops | Deploy migration gap | Closed this milestone — DEPLOY-05 proved Phase 14's fix works in production (Cloud Run revision `brett-00012-n6r`, migration `0007`). No longer carried debt |
+| ops | Hevy rate-limit verification | Still unresolved from v1.0, carried again — retry policy remains unverified against a real limit |
+| data | D-06 nutrition-coverage re-query | Still blocked by sandbox command classifier, carried again — documented UNMEASURED fallback remains in use |
 
 ## Session Continuity
 

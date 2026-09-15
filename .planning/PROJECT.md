@@ -2,25 +2,20 @@
 
 ## What This Is
 
-A personal fitness data platform that normalizes Hevy workout data, Apple Health data, body-composition measurements, and nutrition data into PostgreSQL, calculates fitness analytics (volume, progression, plateaus, PRs, trends), and exposes it through a remote MCP server so Claude can act as a long-term, data-driven body recomposition coach. v1.0 (shipped 2026-09-02) was backend-first: Hevy sync, analytics, and a read-only remote MCP server. v2.0 (shipped 2026-09-05) added Apple Health activity and nutrition data (via a Health Auto Export webhook, not a native app) with 4.5 years of history backfilled, max-weight-lifted surfaced as a display-only complement to the existing estimated-1RM strength signal, weekly/monthly report tools driven by Claude's own scheduled tasks, body-measurement history across 16 non-weight metrics, and switchable training programs — with one narrow, confirm-gated MCP write tool as the sole exception to read-only. Twenty MCP tools are live in production.
+A personal fitness data platform that normalizes Hevy workout data, Apple Health data, body-composition measurements, and nutrition data into PostgreSQL, calculates fitness analytics (volume, progression, plateaus, PRs, trends), and exposes it through a remote MCP server so Claude can act as a long-term, data-driven body recomposition coach. v1.0 (shipped 2026-09-02) was backend-first: Hevy sync, analytics, and a read-only remote MCP server. v2.0 (shipped 2026-09-05) added Apple Health activity and nutrition data (via a Health Auto Export webhook, not a native app) with 4.5 years of history backfilled, max-weight-lifted surfaced as a display-only complement to the existing estimated-1RM strength signal, weekly/monthly report tools driven by Claude's own scheduled tasks, body-measurement history across 16 non-weight metrics, and switchable training programs — with one narrow, confirm-gated MCP write tool as the sole exception to read-only. v2.1 (shipped 2026-09-15) added a longitudinal physique observation record — Claude rates visible development per muscle group from progress photos it never stores, BRETT persists only the structured rating, and the monthly report reads across training, nutrition, measurements and physique in one view — plus a second, non-destructive MCP write path and a fixed deploy pipeline that proved itself against its own new migration in production. Twenty-two MCP tools are live in production.
 
 ## Core Value
 
 Claude can retrieve real, normalized workout data through the MCP server and answer training questions ("Am I progressing?", "Which muscles are undertrained?") from actual data instead of guessing. This end-to-end path — Hevy → PostgreSQL → analytics → MCP → Claude — must work before anything else matters.
 
-## Current Milestone: v2.1 Longitudinal Physique Analysis
+## Next Milestone
+
+Not yet planned. Run `/gsd-new-milestone` to start requirements definition.
+
+<details>
+<summary>v2.1 Longitudinal Physique Analysis — shipped 2026-09-15 (gate notes, archived)</summary>
 
 **Goal:** Give BRETT a longitudinal record of physique observations — produced by Claude from progress photos BRETT never stores — so the monthly report reads across training, nutrition, measurements and visible physique in one view.
-
-**Target features:**
-
-- Physique observations persisted as structured data: per-muscle-group development ratings on the existing 19-value canonical taxonomy, plus bounded free-text notes on leanness, conditioning and symmetry
-- A single-call, append-only, non-destructive MCP write tool — BRETT's second write path ever
-- Prior-observation context returned at analysis time, so Claude rates *relative* to its last observation rather than absolutely from scratch (the drift mitigation, and the feature's load-bearing design decision)
-- Deterministic physique diff analytics (`analytics/physique.py`): improved / unchanged / regressed per muscle group, computed from stored rows only
-- Cross-reference of physique observations against `fitness_get_muscle_group_volume` — "is the underdeveloped area also the undertrained one?"
-- A physique section in the **monthly report only** (weekly deliberately excluded), restated by `build_narrative` under its existing determinism, banned-token and numeric-provenance constraints
-- Pre-deploy migration step in `scripts/deploy-cloud-run.sh` (or an enforced `alembic current` vs `alembic heads` pre-flight) — closes the v2.0 operational debt that bit three times
 
 **Shape decided at the milestone gate (2026-09-05), before any research:**
 
@@ -30,9 +25,14 @@ Claude can retrieve real, normalized workout data through the MCP server and ans
 - **Ratings are subjective model output, not measurements**, and must be labelled as such in tool responses and in the narrative — the same posture `RecompositionResult.disclaimer` already takes by travelling verbatim.
 - **`_report_body_fields` must be split on purpose.** It is currently ONE shared projection, which is what makes "the same sections in both reports" structurally true rather than a convention; monthly-only physique breaks that deliberately.
 
-Both shipped milestones are archived in full:
+All target features shipped as scoped; see Requirements → Validated and `.planning/milestones/v2.1-ROADMAP.md` / `v2.1-REQUIREMENTS.md` for full detail.
+
+</details>
+
+All three shipped milestones are archived in full:
 - `.planning/milestones/v1.0-ROADMAP.md` / `v1.0-REQUIREMENTS.md`
 - `.planning/milestones/v2.0-ROADMAP.md` / `v2.0-REQUIREMENTS.md` / `v2.0-phases/`
+- `.planning/milestones/v2.1-ROADMAP.md` / `v2.1-REQUIREMENTS.md`
 
 ## Requirements
 
@@ -68,18 +68,21 @@ Both shipped milestones are archived in full:
 
 ### Active
 
-*(v2.1 scope, gathered at the milestone gate. Formal REQ-IDs live in `.planning/REQUIREMENTS.md`.)*
+*(Carried operational debt, not tied to any single milestone's scope. Formal REQ-IDs, where they exist, live in `.planning/REQUIREMENTS.md`.)*
 
-- [ ] **D-06 production nutrition-coverage re-query** — blocked all milestone by the sandbox command classifier on `gcloud secrets versions access`. `MEASURED_DAY_FLOORS` (3/7, 5/14, 10/30) is currently reused for nutrition trend floors as a documented UNMEASURED fallback; needs a human-operator re-query to confirm or replace
-- [ ] **Verify Hevy's real rate limits** (carried unresolved from v1.0) — the retry policy is still unverified against an actual limit rather than confirmed unnecessary
+- [ ] **D-06 production nutrition-coverage re-query** — carried through v2.0 and v2.1, still blocked by the sandbox command classifier on `gcloud secrets versions access`. `MEASURED_DAY_FLOORS` (3/7, 5/14, 10/30) is currently reused for nutrition trend floors as a documented UNMEASURED fallback; needs a human-operator re-query to confirm or replace
+- [ ] **Verify Hevy's real rate limits** (carried unresolved from v1.0, through v2.0 and v2.1) — the retry policy is still unverified against an actual limit rather than confirmed unnecessary
 
 ### Out of Scope
 
 - Self-hosted / hand-rolled OAuth authorization servers — WorkOS AuthKit *is* the authorization server; BRETT is only a resource server that validates its tokens. *(This replaces the original scope note, which deferred OAuth for MCP auth on the grounds that a bearer token was sufficient for private v1 development. That note was overturned in Phase 2: a Claude custom connector cannot authenticate with a static bearer at all, so OAuth 2.1 was implemented rather than deferred — see the "MCP connector auth" row in Key Decisions. What stays out of scope is building the authorization server ourselves.)*
 - A native iOS HealthKit app — superseded for v2.0 by the Health Auto Export webhook approach (no Apple Developer Program needed); the blueprint's native `FitnessSync` app design remains a documented option if a native app is ever wanted later
 - Manual nutrition entry, and nutrition data not already present in Apple Health — nutrition work in v2.0 is scoped to what a real Apple Health export already has (calories + six consistently-logged macros, via the existing Health Auto Export pipeline); a dedicated provider integration or manual entry beyond that was not requested
-- Write/delete MCP tools beyond the one confirm-gated program-switch tool — MCP otherwise stays read-only; this is a narrow, deliberate exception, not a general opening of write access
+- Write/delete MCP tools beyond the two confirm-and-append-only exceptions (program switching, physique logging) — MCP otherwise stays read-only; both are narrow, deliberate exceptions, not a general opening of write access
 - Multi-user product features (accounts for other people, per-user auth flows beyond schema readiness) — schema must not preclude multi-user later, but no multi-user UX is built now
+- Any photo storage or retention for physique observations, temporary or otherwise — decided at the v2.1 milestone gate. BRETT never receives an image byte; only Claude's structured rating persists. Revisit only if a future milestone deliberately reopens the question
+- Numeric body-fat-percentage estimation from a photo, a composite whole-body physique score, or any aesthetic/comparative-to-others judgment — v2.1's physique feature is a per-muscle ordinal rating relative to the user's own history only, never a population comparison or a single blended number
+- Weekly (or more frequent) physique check-ins — sub-2-week intervals fall below the measured rating noise floor (`PHYSIQUE_MIN_ELAPSED_DAYS = 30`); monthly-report-only cadence is a deliberate constraint, not a current limitation
 
 ## Context
 
@@ -135,9 +138,11 @@ Both shipped milestones are archived in full:
 
 Full detail: `.planning/milestones/v2.0-ROADMAP.md`, `v2.0-REQUIREMENTS.md`, `v2.0-phases/`, and the shipped summary in `.planning/MILESTONES.md`.
 
-**Complete: v2.1 Longitudinal Physique Analysis (2026-09-15)** — all 6 phases shipped (14 → 19). The physique repository gained supersede semantics (`get_recent_observations`'s single `superseded_at IS NULL` predicate, `_mark_superseded`), `analytics/physique.py` computes the deterministic ordinal diff and the volume cross-reference, and BRETT's second MCP write path (`fitness_log_physique_observation` + `fitness_get_latest_physique_observation`) is live in `server.py` — non-destructive, no confirmation-token ceremony, required disclaimer field. The write-guard suite describes a truthful two-write-module system: `_WRITE_ALLOWLIST` is an exact `{"program_switch.py", "physique.py"}` frozenset and `test_mcp_tool_schemas.py`'s annotation check is a per-tool `EXPECTED_WRITE_ANNOTATIONS` mapping rather than one uniform destructive assertion. The monthly report gained a physique section (Phase 18), and Phase 19 closed the milestone by proving Phase 14's deploy-safety fix in production: migration `0007` reached production through the unmodified pipeline (Cloud Run revision `brett-00012-n6r`), with a live OAuth-authenticated MCP call against the deployed schema succeeding. Full backend suite: 1195 tests passing, 0 regressions across all six phases. Milestone close (`/gsd-complete-milestone`) is the only remaining step.
+**Shipped: v2.1 Longitudinal Physique Analysis (2026-09-15)** — 18 requirements, 6 phases, 17 plans, 46 tasks over 10 days. The physique repository gained supersede semantics (`get_recent_observations`'s single `superseded_at IS NULL` predicate, `_mark_superseded`), `analytics/physique.py` computes the deterministic ordinal diff and the volume cross-reference, and BRETT's second MCP write path (`fitness_log_physique_observation` + `fitness_get_latest_physique_observation`) is live in `server.py` — non-destructive, no confirmation-token ceremony, required disclaimer field. The write-guard suite describes a truthful two-write-module system: `_WRITE_ALLOWLIST` is an exact `{"program_switch.py", "physique.py"}` frozenset and `test_mcp_tool_schemas.py`'s annotation check is a per-tool `EXPECTED_WRITE_ANNOTATIONS` mapping rather than one uniform destructive assertion. The monthly report gained a physique section (Phase 18), and Phase 19 closed the milestone by proving Phase 14's deploy-safety fix in production: migration `0007` reached production through the unmodified pipeline (Cloud Run revision `brett-00012-n6r`), with a live OAuth-authenticated MCP call against the deployed schema succeeding. Full backend suite: 1195 tests passing (up from 925 at v2.0 close), 0 regressions across all six phases; `backend/` grew to ~58.1k LOC; MCP registry grew 20 → 22 tools.
 
-**Carried-forward debt (see Requirements → Active):** the deploy-migration gap — production drifted behind deployed code three times in v2.0 alone, each caught only during live verification — was closed in Phase 14: Deploy Pipeline Migration Safety (2026-09-07). The D-06 nutrition-coverage re-query and Hevy's unverified rate limits remain open. Two GSD tooling issues also persist across both milestone closes: `gsd-tools.cjs audit-open` is broken (`ReferenceError: output is not defined`), and REQUIREMENTS.md's traceability table drifted out of sync with reality yet again this phase (`Pending` vs the tool's `Planned` wording), needing manual reconciliation.
+Full detail: `.planning/milestones/v2.1-ROADMAP.md`, `v2.1-REQUIREMENTS.md`, and the shipped summary in `.planning/MILESTONES.md`.
+
+**Carried-forward debt, third milestone running (see Requirements → Active):** D-06's production nutrition-coverage re-query and Hevy's unverified rate limits remain open, unchanged since v1.0/v2.0. The v2.0 deploy-migration gap is now genuinely closed — Phase 14 built the fix and Phase 19 proved it in production. Two GSD tooling issues persist across all three milestone closes: `gsd-tools.cjs audit-open` is still broken (`ReferenceError: output is not defined`, reported at v1.0 close, never fixed upstream), and REQUIREMENTS.md's traceability table drifted stale for the third consecutive milestone (this time PHYS-01–05/PHYS-12, reconciled to 18/18 at close) — a 3-for-3 pattern that argues for a structural fix (e.g. a phase-completion check comparing REQUIREMENTS.md checkboxes against the phase's own VERIFICATION.md) rather than a fourth manual reconciliation next time.
 
 ## Evolution
 
@@ -157,4 +162,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-15 — Phase 19: Production Deploy of Migration 0007 complete — v2.1 milestone fully executed*
+*Last updated: 2026-09-15 — after v2.1 milestone close (Longitudinal Physique Analysis)*

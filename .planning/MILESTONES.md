@@ -1,5 +1,30 @@
 # Milestones
 
+## v2.1 Longitudinal Physique Analysis (Shipped: 2026-09-15)
+
+**Phases completed:** 6 phases, 17 plans, 46 tasks
+**Timeline:** 2026-09-05 → 2026-09-15 (10 days)
+**Git range:** `1cd5e05` (Phase 14 context) → `534a8da` (evolve PROJECT.md after Phase 19) — 108 files changed, +27,728/-222 lines, ~58.1k LOC in `backend/`; 1195 tests passing (up from 925 at v2.0 close); MCP registry grew 20 → 22 tools
+
+**Delivered:** BRETT can now log and retrieve Claude-authored physique observations from progress photos it never stores, diff them deterministically against training volume, and surface both in the monthly report — and this milestone's own migration (`0007`) proved, in production, that the deploy-migration gap which bit three times in v2.0 is actually fixed.
+
+**Key accomplishments:**
+
+- Closed the carried-forward deploy-migration gap first: extracted an `alembic current` vs `alembic heads` predicate (`app.db.migration_preflight`), wired a fetch-apply-verify pre-flight into `scripts/deploy-cloud-run.sh`, and rehearsed it against a real drifted Postgres container before trusting it with this milestone's own schema change.
+- Ran a pre-registered calibration spike (5 blind ratings + a 5-step anchored chain on one unchanged photo set) before locking the observation schema, finding BLIND-STABLE ratings and no self-reinforcing anchoring ratchet, and derived the diff-threshold and elapsed-time-floor constants from that measured evidence rather than a guess.
+- Built the physique data model and repository — a header row plus one child row per muscle group on the existing 19-value canonical taxonomy, `Not Assessable` as a first-class value, and a non-destructive supersede-with-reason correction path, with 19-row completeness enforced before any insert.
+- Shipped `fitness_log_physique_observation` (single-call, append-only, non-destructive) alongside its required companion read tool, deterministic ordinal diff and volume-cross-reference analytics, and widened the MCP write-guard suite from a uniform destructive-hint claim to an exact per-tool mapping — all backed by container-level tests proving every refusal family writes nothing.
+- Integrated physique into the monthly report only (the weekly report structurally cannot carry it): a deterministic, provenance-checked `## Physique` section with zero Claude-authored free text reaching the narrative.
+- Proved the deploy fix in production: migration `0007` reached Cloud Run through the unmodified Phase 14 pipeline (revision `brett-00012-n6r`), and a live OAuth-authenticated MCP call against that revision returned a schema-valid response — real evidence, not a fixture assertion.
+
+**Known Gaps / Deferred:**
+
+- No formal `/gsd-audit-milestone` run before close — third milestone running without one (see STATE.md Deferred Items).
+- REQUIREMENTS.md traceability drift reconciled at close for the third consecutive milestone (PHYS-01–05 and PHYS-12 were stale despite Phase 16's own verification confirming them satisfied) — a 3-for-3 pattern worth a structural fix rather than another manual reconciliation.
+- Hevy rate-limit verification and D-06's nutrition-coverage re-query remain open, carried again from v1.0/v2.0.
+
+---
+
 ## v2.0 Apple Health, Strength Tracking & Coaching Programs (Shipped: 2026-09-05)
 
 **Phases completed:** 6 phases, 34 plans, 81 tasks
