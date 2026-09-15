@@ -55,7 +55,44 @@ had a physique observation logged.
 
 ## Deploy log (verbatim, redacted)
 
-pending -- written by Task 3 from the operator's pasted output
+**Note on exit code:** the operator's capture command used bash's `${PIPESTATUS[0]}` syntax in a
+zsh shell, so the `EXIT:` line came back empty — this is a shell-syntax artifact of the operator's
+capture command, not a deploy failure signal. Success is evidenced instead by the log's own
+terminal markers below (`at head: ['0007']`, `Done.`, `has been deployed and is serving 100 percent
+of traffic`) plus the independent live `gcloud run services describe` revision/traffic check in the
+table that follows.
+
+```
+DEPLOY-04: using Secret Manager brett-database-url:latest in project brett-fitness
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 0006 -> 0007, physique observations: header + one rating row per (observation, muscle_group) (PHYS-01..PHYS-05)
+at head: ['0007']
+Building using Buildpacks and deploying container to Cloud Run service [brett] in project [brett-fitness] region [us-central1]
+Building and deploying...
+Validating configuration.........done
+Uploading sources........................................................done
+[... build progress output elided ...]
+Setting IAM Policy............................done
+Creating Revision...............................................................................................................................................................................................................................................done
+Routing traffic.....done
+Done.
+Service [brett] revision [brett-00012-n6r] has been deployed and is serving 100 percent of traffic.
+Service URL: https://brett-792870654598.us-central1.run.app
+```
+
+| Check | Expected | Observed | Pass/Fail |
+|---|---|---|---|
+| Deploy script exit code | 0 | not captured (zsh `$PIPESTATUS` artifact — see note above); log's own terminal success markers and independent live revision check used as evidence instead | N/A (see note) |
+| Secret Manager source line | present, exactly once | 1 | PASS |
+| BRETT_DATABASE_URL override line | absent | 0 | PASS |
+| Pre-flight head line | `at head: ['0007']` present | 1 | PASS |
+| Log ordering | `at head:` line < first gcloud deploy line | 5 < 6 | PASS |
+| Abort strings | none of the four | 0 | PASS |
+| DSN-shaped substring in log | none | 0 | PASS |
+| Revision BEFORE | (from pre-deploy table) | `brett-00011-n2z` | — |
+| Revision AFTER | different from BEFORE | `brett-00012-n6r` (confirmed independently via live `gcloud run services describe ... latestReadyRevisionName`) | PASS |
+| Traffic | 100% on latest revision | `100`/`True` (live `gcloud run services describe`) | PASS |
 
 ## MCP smoke test (verbatim)
 
