@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="960" height="360" rx="16" fill="#0f172a"/>
+  <text x="480" y="40" text-anchor="middle" font-size="22" font-weight="700" fill="#f8fafc">BRETT — data flow</text>
+  <text x="480" y="62" text-anchor="middle" font-size="13" fill="#94a3b8">Hevy and Apple Health in, a read-only MCP server out, Claude as the coach</text>
+
+  <!-- sources -->
+  <rect x="30" y="100" width="150" height="62" rx="10" fill="#1e293b" stroke="#38bdf8"/>
+  <text x="105" y="127" text-anchor="middle" font-size="15" font-weight="600" fill="#f8fafc">Hevy API</text>
+  <text x="105" y="147" text-anchor="middle" font-size="12" fill="#94a3b8">workouts · body data</text>
+
+  <rect x="30" y="198" width="150" height="62" rx="10" fill="#1e293b" stroke="#38bdf8"/>
+  <text x="105" y="225" text-anchor="middle" font-size="15" font-weight="600" fill="#f8fafc">Apple Health</text>
+  <text x="105" y="245" text-anchor="middle" font-size="12" fill="#94a3b8">via Health Auto Export</text>
+
+  <!-- ingest -->
+  <rect x="230" y="140" width="150" height="80" rx="10" fill="#1e293b" stroke="#a78bfa"/>
+  <text x="305" y="170" text-anchor="middle" font-size="15" font-weight="600" fill="#f8fafc">Ingest</text>
+  <text x="305" y="190" text-anchor="middle" font-size="12" fill="#94a3b8">idempotent sync</text>
+  <text x="305" y="206" text-anchor="middle" font-size="12" fill="#94a3b8">+ normalization</text>
+
+  <!-- postgres -->
+  <rect x="430" y="140" width="130" height="80" rx="10" fill="#1e293b" stroke="#34d399"/>
+  <text x="495" y="170" text-anchor="middle" font-size="15" font-weight="600" fill="#f8fafc">PostgreSQL</text>
+  <text x="495" y="190" text-anchor="middle" font-size="12" fill="#94a3b8">source of truth</text>
+  <text x="495" y="206" text-anchor="middle" font-size="12" fill="#94a3b8">(UTC)</text>
+
+  <!-- analytics -->
+  <rect x="610" y="140" width="130" height="80" rx="10" fill="#1e293b" stroke="#fbbf24"/>
+  <text x="675" y="170" text-anchor="middle" font-size="15" font-weight="600" fill="#f8fafc">Analytics</text>
+  <text x="675" y="190" text-anchor="middle" font-size="12" fill="#94a3b8">volume · PRs</text>
+  <text x="675" y="206" text-anchor="middle" font-size="12" fill="#94a3b8">deterministic</text>
+
+  <!-- mcp + claude -->
+  <rect x="790" y="100" width="140" height="62" rx="10" fill="#1e293b" stroke="#f472b6"/>
+  <text x="860" y="127" text-anchor="middle" font-size="15" font-weight="600" fill="#f8fafc">MCP server</text>
+  <text x="860" y="147" text-anchor="middle" font-size="12" fill="#94a3b8">22 tools · OAuth</text>
+
+  <rect x="790" y="198" width="140" height="62" rx="10" fill="#1e293b" stroke="#f472b6"/>
+  <text x="860" y="225" text-anchor="middle" font-size="15" font-weight="600" fill="#f8fafc">Claude</text>
+  <text x="860" y="245" text-anchor="middle" font-size="12" fill="#94a3b8">data-driven coach</text>
+
+  <!-- arrows -->
+  <path d="M180 131 L230 168" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M180 229 L230 192" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M380 180 L430 180" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M560 180 L610 180" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M740 168 L790 138" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M860 162 L860 198" stroke="#64748b" stroke-width="2" fill="none" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+
+  <!-- footer -->
+  <text x="480" y="310" text-anchor="middle" font-size="12" fill="#94a3b8">Hosted on Google Cloud Run · FastAPI · SQLAlchemy 2 · Alembic · Python 3.13</text>
+  <text x="480" y="330" text-anchor="middle" font-size="12" fill="#94a3b8">Read-only MCP, except two narrow, non-destructive write tools (program switch, physique log)</text>
+</svg>
