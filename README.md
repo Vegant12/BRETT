@@ -1,7 +1,41 @@
 # BRETT
 
-Personal fitness data platform: Hevy → PostgreSQL → analytics → remote MCP server.
-See `.planning/PROJECT.md` for scope and `.planning/ROADMAP.md` for the phase plan.
+A personal fitness data platform that turns your training and health data into a long-term,
+data-driven body recomposition coach. BRETT syncs workouts from [Hevy](https://www.hevyapp.com/),
+Apple Health activity and nutrition, and body measurements into PostgreSQL, calculates
+deterministic analytics on top, and exposes everything through a remote
+[MCP](https://modelcontextprotocol.io/) server, so Claude answers "Am I progressing?" and
+"Which muscles are undertrained?" from your real data instead of guessing.
+
+![BRETT architecture: Hevy and Apple Health feed ingest, PostgreSQL and analytics, served to Claude through an MCP server](docs/images/architecture.svg)
+
+## What it does
+
+- **Hevy sync**: idempotent full and incremental sync of workouts, exercise templates and body
+  measurements, with exercises mapped to canonical muscle groups.
+- **Apple Health**: steps, energy, distance and nutrition via a
+  [Health Auto Export](docs/health-auto-export-setup.md) webhook. No native app needed.
+- **Analytics**: weekly and per-muscle volume, training frequency, exercise progression with
+  estimated 1RM, plateaus, personal records, body weight and measurement trends, and a
+  recomposition verdict that respects the active training program (Lean Bulk, Cut or Recomp).
+- **Physique log**: Claude rates visible development from progress photos. BRETT stores only the
+  structured rating, never the image.
+- **Reports**: weekly and monthly reports that combine training, nutrition, measurements and
+  physique in one call.
+- **22 MCP tools**, authenticated with OAuth 2.1 (WorkOS AuthKit). The server is read-only apart
+  from two narrow, non-destructive write tools: switching the training program (two-step
+  confirmation) and logging a physique observation.
+
+Deployed on Google Cloud Run. See `.planning/PROJECT.md` for scope and `.planning/ROADMAP.md`
+for the phase plan.
+
+## Docs
+
+- [Coaching instructions](docs/coaching-instructions.md): the Claude Project prompt that makes Claude the coach
+- [Health Auto Export setup](docs/health-auto-export-setup.md)
+- [Hevy API observations](docs/hevy-api-observations.md)
+- Runbooks: [deploy](docs/runbook-deploy.md), [backup/restore](docs/runbook-backup-restore.md),
+  [secret rotation](docs/runbook-secret-rotation.md), [sync schedule](docs/runbook-sync-schedule.md)
 
 ## Requirements
 
